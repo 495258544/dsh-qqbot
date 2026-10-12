@@ -1,6 +1,6 @@
 {
   "name": "@tencent-connect/dsh-qqbot",
-  "version": "0.5.1",
+  "version": "0.5.2",
   "description": "QQ Bot IM channel plugin for deepseek-harness (dsh)",
   "type": "module",
   "main": "./dist/index.js",
@@ -61,7 +61,7 @@
   },
   "dependencies": {
     "@tencent-connect/qqbot-connector": "1.2.0",
-    "@tencent-connect/qqbot-nodejs": "^1.0.4",
+    "@tencent-connect/qqbot-nodejs": "^1.0.5",
     "js-yaml": "^4.1.0",
     "qrcode": "^1.5.4"
   },
