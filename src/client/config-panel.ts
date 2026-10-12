@@ -236,9 +236,9 @@ function SegmentedRow({ label, help, value, options, onChange }: {
 type AccessMode = AccessControlWire['c2cMode'];
 
 const MODE_OPTIONS: ReadonlyArray<{ value: AccessMode; label: string }> = [
-  { value: 'open', label: '开放' },
+  { value: 'open', label: '所有人' },
   { value: 'allowlist', label: '白名单' },
-  { value: 'disabled', label: '停用' },
+  { value: 'disabled', label: '禁用' },
 ];
 
 /** 深比较（表单值与初始回显值的 dirty 判断） */
@@ -292,6 +292,16 @@ export function ConfigPanel(): ReactNode {
     }
     if (Object.keys(changed).length === 0) return;
 
+    // 白名单编辑期间保留原始换行/空行（textarea 可正常回车），提交时才规范化
+    if (changed.access !== undefined) {
+      const a = changed.access as AccessControlWire;
+      changed.access = {
+        ...a,
+        c2cAllow: a.c2cAllow.map((s) => s.trim()).filter(Boolean),
+        groupAllow: a.groupAllow.map((s) => s.trim()).filter(Boolean),
+      };
+    }
+
     setBusy(true);
     void fetch(BIND_CONFIG_PATH, {
       method: 'POST',
@@ -325,16 +335,16 @@ export function ConfigPanel(): ReactNode {
   const access: AccessControlWire = form.access ?? { c2cMode: 'open', c2cAllow: [], groupMode: 'open', groupAllow: [] };
 
   return createElement('form', { className: 'imqb2-form', onSubmit: submit },
-    createElement('div', { className: 'imqb2-group-title' }, '访问控制'),
+    createElement('div', { className: 'imqb2-group-title' }, '服务范围'),
     createElement(SegmentedRow, {
       label: '私聊', value: access.c2cMode, options: MODE_OPTIONS,
       onChange: (v) => { patch('access', { ...access, c2cMode: v }); },
     }),
     access.c2cMode === 'allowlist'
       ? createElement(AreaRow, {
-          label: '私聊白名单', help: '每行一个 openid', rows: 3,
+          label: '私聊白名单', help: '请输入用户 openid，多个请换行输入', rows: 3,
           value: access.c2cAllow.join('\n'),
-          onChange: (v) => { patch('access', { ...access, c2cAllow: v.split('\n').map((s) => s.trim()).filter(Boolean) }); },
+          onChange: (v) => { patch('access', { ...access, c2cAllow: v.split('\n').map((s) => s.trim()) }); },
         })
       : null,
     createElement(SegmentedRow, {
@@ -343,16 +353,16 @@ export function ConfigPanel(): ReactNode {
     }),
     access.groupMode === 'allowlist'
       ? createElement(AreaRow, {
-          label: '群聊白名单', help: '每行一个群 openid', rows: 3,
+          label: '群聊白名单', help: '请输入群 openid，多个请换行输入', rows: 3,
           value: access.groupAllow.join('\n'),
-          onChange: (v) => { patch('access', { ...access, groupAllow: v.split('\n').map((s) => s.trim()).filter(Boolean) }); },
+          onChange: (v) => { patch('access', { ...access, groupAllow: v.split('\n').map((s) => s.trim()) }); },
         })
       : null,
 
-    createElement('div', { className: 'imqb2-group-title' }, '基本'),
+    createElement('div', { className: 'imqb2-group-title' }, '基础设置'),
     createElement(SwitchRow, {
-      label: '群聊需要 @机器人', checked: form.requireMention ?? true,
-      help: '开启后群聊中只有 @机器人 的消息会触发回复',
+      label: '群聊仅回复 @机器人的消息', checked: form.requireMention ?? true,
+      help: '开启后，机器人仅可回复 @机器人的群聊消息',
       onChange: (v) => { patch('requireMention', v); },
     }),
     createElement(SwitchRow, {
@@ -380,7 +390,7 @@ export function ConfigPanel(): ReactNode {
       onChange: (v) => { patch('preset', v); },
     }),
 
-    createElement('div', { className: 'imqb2-group-title' }, '补充指令'),
+    createElement('div', { className: 'imqb2-group-title' }, '个性化提示词'),
     createElement(AreaRow, {
       label: '群聊额外 system prompt', value: form.groupPrompt ?? '',
       onChange: (v) => { patch('groupPrompt', v); },
