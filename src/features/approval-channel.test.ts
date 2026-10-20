@@ -1,4 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
+import type { EventOptions } from '@deepseek-ai/cordis';
 import type { InteractionEvent } from '@tencent-connect/qqbot-nodejs';
 import {
   ApprovalChannel,
@@ -48,11 +49,15 @@ function makeRequest(opts?: {
   toolName?: string;
   callId?: string;
   reason?: string;
-  events?: ApprovalRequest['agent']['session']['events'];
+  events?: NonNullable<ApprovalRequest['agent']['session']>['events'];
   signal?: AbortSignal;
+  /** 模拟拿不到 live session 的审批上下文（跨进程/投影后的 Agent）。 */
+  noSession?: boolean;
 }): ApprovalRequest {
   return {
-    agent: { id: opts?.id ?? 'sess-qq', session: { events: opts?.events ?? [] } },
+    agent: opts?.noSession === true
+      ? { id: opts?.id ?? 'sess-qq' }
+      : { id: opts?.id ?? 'sess-qq', session: { events: opts?.events ?? [] } },
     toolName: opts?.toolName ?? 'bash',
     ...(opts?.callId !== undefined ? { callId: opts.callId } : {}),
     ...(opts?.reason !== undefined ? { reason: opts.reason } : {}),
@@ -74,16 +79,23 @@ function makeEvent(data: string | undefined, peer: { user?: string; group?: stri
 /** 注册 approval/request 监听并捕获 handler，供测试手动触发 */
 function installAndCapture(ch: ApprovalChannel, sent: SentMessage[]): {
   handler: (req: unknown, next: unknown) => unknown;
+  options?: EventOptions;
 } {
-  const captured: { handler?: (req: unknown, next: unknown) => unknown } = {};
+  const captured: {
+    handler?: (req: unknown, next: unknown) => unknown;
+    options?: EventOptions;
+  } = {};
   const ctx: ApprovalChannelContext = {
-    get: vi.fn((name: string) => (name === 'approval' ? {} : undefined)),
-    on: vi.fn((event: string, handler: (req: unknown, next: unknown) => unknown) => {
-      if (event === 'approval/request') captured.handler = handler;
+    on: vi.fn((event: string, handler: (req: unknown, next: unknown) => unknown, options?: EventOptions) => {
+      if (event === 'approval/request') {
+        captured.handler = handler;
+        captured.options = options;
+      }
+      return () => true;
     }),
   };
   ch.install(ctx);
-  return { handler: captured.handler! };
+  return { handler: captured.handler!, ...(captured.options !== undefined ? { options: captured.options } : {}) };
 }
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
@@ -155,6 +167,35 @@ describe('ApprovalChannel.install', () => {
     const p = handler(makeRequest({ id: 'sess-qq', callId: 'c1', events }), () => Promise.resolve('unavailable' as ApprovalOutcome));
     await sleep(20);
     expect(sent[0]!.text).toContain('ls -la');
+
+    ch.cancelPending(sessionKey('c2c', 'peer-qq'));
+    await expect(p).resolves.toBe('cancelled');
+  });
+
+  it('registers a global waterfall listener without probing the approval service', () => {
+    const ch = new ApprovalChannel(
+      createManager({ findBySessionId: () => undefined }),
+      createSender([]),
+      createLogger(),
+    );
+    const { handler, options } = installAndCapture(ch, []);
+    expect(handler).toBeTypeOf('function');
+    expect(options).toEqual({ global: true, prepend: true });
+  });
+
+  it('still sends the prompt when the session log is unavailable', async () => {
+    const sent: SentMessage[] = [];
+    const ch = new ApprovalChannel(
+      createManager({ findBySessionId: (id) => (id === 'sess-qq' ? makeRecord(sessionKey('c2c', 'peer-qq')) : undefined) }),
+      createSender(sent),
+      createLogger(),
+    );
+    const { handler } = installAndCapture(ch, sent);
+
+    const p = handler(makeRequest({ id: 'sess-qq', noSession: true }), () => Promise.resolve('unavailable' as ApprovalOutcome));
+    await sleep(20);
+    expect(sent).toHaveLength(1);
+    expect(sent[0]!.text).toContain('bash');
 
     ch.cancelPending(sessionKey('c2c', 'peer-qq'));
     await expect(p).resolves.toBe('cancelled');
