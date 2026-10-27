@@ -17,8 +17,8 @@
 
 <table>
 <tr>
-<td align="center" width="50%"><img src="./docs/assets/qqgroup.jpg" height="360" alt="QQ 群二维码" /><br /><b>QQ 开发者交流群</b><br /><sub>群号: 1032635674</sub></td>
-<td align="center" width="50%"><img src="./docs/assets/qqchannel.jpg" height="360" alt="QQ 频道二维码" /><br /><b>QQ 开发者社区频道</b><br /><sub>频道号: 20dnumts4z</sub></td>
+<td align="center" width="50%"><img src="./assets/docs/qqgroup.jpg" height="360" alt="QQ 群二维码" /><br /><b>QQ 开发者交流群</b><br /><sub>群号: 1032635674</sub></td>
+<td align="center" width="50%"><img src="./assets/docs/qqchannel.jpg" height="360" alt="QQ 频道二维码" /><br /><b>QQ 开发者社区频道</b><br /><sub>频道号: 20dnumts4z</sub></td>
 </tr>
 </table>
 
@@ -49,7 +49,7 @@ npx @deepseek-ai/dsh --profile qqbot
 
 DSH **桌面版 / Web** 下会自动打开应用内「QQ Bot 绑定」页（右侧边栏），端内渲染二维码并实时展示绑定状态，扫码成功后自动完成保存与插件重载；CLI 模式保持终端二维码引导。设置 `QQBOT_BIND_OPEN_BROWSER=1` 可在无端内页的环境额外拉起系统浏览器扫码页作为降级通道。
 
-<img src="./docs/assets/qrcode.png" alt="二维码扫码示意图" width="280" />
+<img src="./assets/docs/qrcode.png" alt="二维码扫码示意图" width="280" />
 
 > **提示**：建议升级至 `0.4.0` 以上版本扫码，支持点击链接在浏览器打开，避免部分终端二维码渲染错位的问题。
 

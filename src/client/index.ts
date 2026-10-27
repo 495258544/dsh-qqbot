@@ -15,7 +15,7 @@
 import type { Context } from '@deepseek-ai/cordis';
 import { createElement, type ReactNode } from 'react';
 import { BIND_STATE_PATH } from '../shared/bind-protocol.ts';
-import { BindPanelBody } from './bind-page.ts';
+import { BindPanelBody, QQ_BOT_LOGO_PATH, installPanelStyles } from './bind-page.ts';
 import { ConfigPanel } from './config-panel.ts';
 
 export const name = 'im-qqbot-client';
@@ -25,6 +25,10 @@ export const inject = ['slots', 'sidebarRight', 'sidebarRightTabs'];
 const TAB_KIND = 'qqbot-bind';
 /** 席位注册 key（Tab 类型 id，席位按其分发；只需全局唯一，与包名解耦） */
 const TAB_ID = 'im-qqbot/bind';
+/** 本插件包名（插件详情页按其匹配来源包，只在对应详情页渲染操作按钮） */
+const PACKAGE_NAME = '@tencent-connect/dsh-qqbot';
+/** 主面板 id（layout.selectPanel 导航目标；keyed main 席位按其分发） */
+const IM_MAIN_PANEL_ID = 'im-qqbot';
 
 /** ui-sidebar-right 的 Tab 注册表服务（局部投影） */
 interface TabRegistryLike {
@@ -83,7 +87,39 @@ function QQBotSettingsSection(): ReactNode {
   );
 }
 
+/** 主面板页面：与设置栏目同一内容，包一层滚动留白容器（plugins.detail.actions 的跳转目标） */
+function QQBotPage(): ReactNode {
+  return createElement('div', { className: 'imqb-pluginPage' },
+    createElement('div', { className: 'imqb-pluginPageContent' },
+      createElement(QQBotSettingsSection)),
+  );
+}
+
+/** 左侧栏入口图标（宿主传入 size：展开 18 / 收起 16；currentColor 跟随侧栏配色与选中态） */
+function QqBotSidebarIcon({ size = 16 }: { size?: number; active?: boolean }): ReactNode {
+  return createElement('svg', {
+    width: size, height: size, viewBox: '0 0 24 24', fill: 'none', 'aria-hidden': true,
+  },
+    createElement('path', { d: QQ_BOT_LOGO_PATH, fill: 'currentColor' }));
+}
+
+/** 插件详情「打开」按钮：仅在本包的 bundle / 组件行详情页渲染，其他插件不显示 */
+function OpenQqBotAction({ subject, packageName, onOpen }: {
+  subject?: { kind?: string; pkg?: { name?: string }; row?: { moduleName?: string } };
+  packageName: string;
+  onOpen: () => void;
+}): ReactNode {
+  if (subject?.kind !== 'bundle' && subject?.kind !== 'row') return null;
+  if (subject.pkg?.name !== packageName) return null;
+  if (subject.kind === 'row' && subject.row?.moduleName !== packageName) return null;
+  return createElement('button', {
+    type: 'button', className: 'imqb-pluginOpen', onClick: onOpen,
+  }, '打开');
+}
+
 export function apply(ctx: Context): void {
+  // 面板样式全局安装：插件详情按钮等面板外渲染的元素也需要可见
+  installPanelStyles();
   const tabs = (ctx as unknown as { sidebarRightTabs?: TabRegistryLike }).sidebarRightTabs;
   const right = (ctx as unknown as { sidebarRight?: SidebarRightLike }).sidebarRight;
   const slots = (ctx as unknown as { slots?: SlotsLike }).slots;
@@ -118,6 +154,47 @@ export function apply(ctx: Context): void {
     )));
     // 待绑定检测与自动引导
     disposers.push(watchAndPrompt(right));
+  }
+
+  // 3. 主面板 + 插件详情「打开」操作（layout.selectPanel 导航，
+  const ctxInject = (ctx as unknown as {
+    inject?: (deps: readonly string[], callback: (pageCtx: Context) => (() => void) | undefined) => unknown;
+  }).inject;
+  if (typeof ctxInject === 'function') {
+    // ctx.inject 返回 Fiber（非 disposer）：子插件随父插件卸载自动清理，
+    // 回调返回的清理函数由 cordis 在依赖变更/卸载时调用。
+    void ctxInject.call(ctx, ['layout'], (pageCtx: Context) => {
+      const pageSlots = (pageCtx as unknown as { slots?: SlotsLike }).slots;
+      const layout = (pageCtx as unknown as { layout?: { selectPanel(panelId: string | null): void } }).layout;
+      if (pageSlots === undefined || layout === undefined) return undefined;
+      const stopMain = pageSlots.inject('main', () => pageSlots.register(
+        { name: 'main', key: IM_MAIN_PANEL_ID },
+        QQBotPage,
+      ));
+      const stopActions = pageSlots.inject('plugins.detail.actions', () => pageSlots.register(
+        {
+          name: 'plugins.detail.actions', id: 'im-qqbot-open', order: 20,
+          inject: () => ({
+            packageName: PACKAGE_NAME,
+            onOpen: () => layout.selectPanel(IM_MAIN_PANEL_ID),
+          }),
+        },
+        OpenQqBotAction,
+      ));
+      // 左侧栏入口：id 与 main 席位 key 一致，宿主点击即 selectPanel
+      const stopSidebar = pageSlots.inject('sidebar.panellist', () => pageSlots.register(
+        {
+          name: 'sidebar.panellist', id: IM_MAIN_PANEL_ID,
+          order: 10, label: 'QQ 机器人',
+        },
+        QqBotSidebarIcon,
+      ));
+      return () => {
+        stopActions();
+        stopSidebar();
+        stopMain();
+      };
+    });
   }
 
   (ctx as unknown as { effect(fn: () => () => void, name?: string): void }).effect(() => () => {

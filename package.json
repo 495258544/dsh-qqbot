@@ -1,7 +1,8 @@
 {
   "name": "@tencent-connect/dsh-qqbot",
-  "version": "0.5.2",
-  "description": "QQ Bot IM channel plugin for deepseek-harness (dsh)",
+  "version": "0.5.3",
+  "icon": "./assets/icons/qq_logo.svg",
+  "description": "在 QQ 私聊和群聊里直接对话你的 AI 助手。 Chat with your AI assistant in QQ private and group chats.",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -12,7 +13,9 @@
     },
     "./client": {
       "default": "./lib/client.js"
-    }
+    },
+    "./locale/*.json": "./locale/*.json",
+    "./package.json": "./package.json"
   },
   "scripts": {
     "build": "tsc && tsdown --config tsdown.client.config.ts",
@@ -28,9 +31,13 @@
   "keywords": [
     "deepseek-harness",
     "dsh",
+    "dsh-plugin",
     "qqbot",
+    "qq",
     "cordis",
-    "plugin"
+    "plugin",
+    "chatbot",
+    "im"
   ],
   "license": "MIT",
   "engines": {

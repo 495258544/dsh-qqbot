@@ -31,16 +31,17 @@ const RETRY_POLL_MS = 3000;
 const STYLE_ID = 'im-qqbot-bind-panel-styles';
 
 /**
- * 注入面板样式（一次）。交互态（hover/active/focus）无法用 inline style
- * 表达，统一收敛到类；DSW 主题变量缺失时用中性值兜底。
+ * 注入面板样式（全局一次，幂等）。交互态（hover/active/focus）无法用 inline
+ * style 表达，统一收敛到类；DSW 主题变量缺失时用中性值兜底。
+ * 插件激活时即安装：插件详情按钮渲染在面板之外，需提前可见；
+ * 安装后不再随挂载移除，避免多个展示位互相清掉样式。
  */
-function usePanelStyles(): void {
-  useEffect(() => {
-    if (typeof document === 'undefined') return;
-    if (document.getElementById(STYLE_ID) !== null) return;
-    const style = document.createElement('style');
-    style.id = STYLE_ID;
-    style.textContent = `
+export function installPanelStyles(): void {
+  if (typeof document === 'undefined') return;
+  if (document.getElementById(STYLE_ID) !== null) return;
+  const style = document.createElement('style');
+  style.id = STYLE_ID;
+  style.textContent = `
 .imqb-panel {
   display: flex; flex-direction: column; align-items: center; justify-content: center;
   gap: 14px; padding: 24px; min-height: 320px; text-align: center; font-size: 14px;
@@ -76,6 +77,24 @@ function usePanelStyles(): void {
   font: inherit; font-size: 13px; cursor: pointer; color: inherit;
 }
 .imqb-ghost:hover { opacity: 1; text-decoration: underline; }
+/* 插件详情「打开」按钮：28px 高、12px 字号、细描边、小圆角，与宿主详情页操作按钮同规格 */
+.imqb-pluginOpen {
+  display: inline-flex; align-items: center; justify-content: center; gap: 4px;
+  box-sizing: border-box; height: 28px; padding: 0 10px;
+  border: 0.5px solid var(--dsw-alias-border-l3, rgba(128, 128, 128, 0.4));
+  border-radius: var(--dsw-radius-sm, 6px); background: transparent;
+  color: var(--dsw-alias-label-primary, inherit); font: inherit;
+  font-size: 12px; line-height: 18px; cursor: pointer;
+}
+.imqb-pluginOpen:hover { background: var(--dsw-alias-interactive-bg-hover, rgba(128, 128, 128, 0.12)); }
+.imqb-pluginOpen:focus-visible { outline: 2px solid var(--dsw-alias-brand, #4d6bfe); outline-offset: 1px; }
+/* 主面板页面容器（layout.selectPanel 目标）：滚动 + 留白 */
+.imqb-pluginPage {
+  height: 100%; min-height: 0; overflow: auto; box-sizing: border-box;
+  padding: 24px clamp(16px, 4vw, 48px) 32px;
+  color: var(--dsw-alias-label-primary, #1f2329);
+}
+.imqb-pluginPageContent { max-width: 1080px; margin: 0 auto; }
 .imqb-pill {
   padding: 5px 16px; border-radius: 999px; font-size: 13px;
   border: 1px solid var(--dsw-alias-border-l2, rgba(128, 128, 128, 0.4)); background: transparent;
@@ -99,8 +118,7 @@ function usePanelStyles(): void {
 .imqb-status-row { display: flex; align-items: center; gap: 12px; padding: 12px 0; }
 .imqb-status-icon { font-size: 24px; line-height: 1; flex: none; }
 .imqb-qqicon {
-  flex: none; display: block; border-radius: 8px;
-  background: #fff; /* 深色企鹅 logo 需浅底，暗色主题下保持可见 */
+  flex: none; display: block; border-radius: 8px; /* 透明底，QQ 蓝徽标在明暗主题下均清晰 */
 }
 .imqb-status-meta { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1; }
 .imqb-status-title { margin: 0; font-size: 14px; font-weight: 600; line-height: 1.5; }
@@ -119,9 +137,11 @@ function usePanelStyles(): void {
 .imqb-scanned-title { margin: 0; font-size: 15px; font-weight: 600; }
 .imqb-scanned-sub { margin: 0; font-size: 12px; opacity: 0.75; line-height: 1.6; }
     `;
-    document.head.appendChild(style);
-    return () => { style.remove(); };
-  }, []);
+  document.head.appendChild(style);
+}
+
+function usePanelStyles(): void {
+  useEffect(() => { installPanelStyles(); }, []);
 }
 
 /**
@@ -308,17 +328,19 @@ function ManualForm({ initialAppId }: { initialAppId?: string }): ReactNode {
   );
 }
 
-/** QQ 企鹅 logo（256×256 PNG data URI；深色图案配白底圆角，明暗主题下均可见） */
-const QQ_BOT_ICON_PNG =
-  'data:image/png;base64,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';
+/** QQ 机器人 logo 路径（assets/icons/qqbot_logo.svg，内嵌以保持 bundle 自包含） */
+export const QQ_BOT_LOGO_PATH =
+  'M19.3862 15.5001C19.3861 11.4203 16.0789 8.11296 11.999 8.11292C7.91915 8.11292 4.61203 11.4203 4.61182 15.5001V17.0001C4.61182 18.5949 5.90429 19.8873 7.49902 19.8873H16.499C18.0937 19.8873 19.3862 18.5949 19.3862 17.0001V15.5001ZM10.6118 14.0001C10.6118 14.6145 10.1129 15.1134 9.49853 15.1134C8.8843 15.1132 8.38672 14.6144 8.38672 14.0001V12.0006C8.38672 11.3863 8.8843 10.8875 9.49853 10.8873C10.1129 10.8873 10.6118 11.3862 10.6118 12.0006V14.0001ZM15.6113 14.0001C15.6113 14.6143 15.1136 15.1131 14.4995 15.1134C13.8851 15.1134 13.3862 14.6145 13.3862 14.0001V12.0006C13.3862 11.3862 13.8851 10.8873 14.4995 10.8873C15.1136 10.8876 15.6113 11.3864 15.6113 12.0006V14.0001ZM14.2607 3.04895C14.2607 3.89351 13.7957 4.62474 13.1108 5.0133V5.95374C17.8958 6.50514 21.6112 10.5676 21.6113 15.5001V17.0001C21.6113 19.8237 19.3225 22.1124 16.499 22.1124H7.49902C4.67546 22.1124 2.38672 19.8237 2.38672 17.0001V15.5001C2.38691 10.568 6.10139 6.50571 10.8857 5.95374V5.01185C10.2017 4.62305 9.73583 3.89286 9.73583 3.04895C9.73609 1.79961 10.7496 0.787231 11.999 0.787231C13.2484 0.787297 14.2605 1.79966 14.2607 3.04895Z';
 
-/** QQ 机器人图标（logo 图片，白底圆角容器内呈现） */
+/** QQ 机器人图标（logo 矢量渲染，透明底，随 size 缩放） */
 function QqBotIcon({ size = 28 }: { size?: number }): ReactNode {
-  return createElement('img', {
-    src: QQ_BOT_ICON_PNG, alt: 'QQ', width: size, height: size, className: 'imqb-qqicon',
-  });
+  return createElement('svg', {
+    width: size, height: size, viewBox: '0 0 24 24', fill: 'none',
+    'aria-hidden': true, className: 'imqb-qqicon',
+  },
+    createElement('path', { d: QQ_BOT_LOGO_PATH, fill: '#0085FF' }),
+  );
 }
-
 /** 已绑定视图：回显 appId + 更换凭据 / 解绑入口 */
 function BoundView({ appId, recheck }: { appId: string; recheck: () => void }): ReactNode {
   const [editing, setEditing] = useState(false);

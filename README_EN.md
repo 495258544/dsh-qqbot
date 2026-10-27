@@ -17,8 +17,8 @@ Scan to join the QQ group / channel
 
 <table>
 <tr>
-<td align="center" width="50%"><img src="./docs/assets/qqgroup.jpg" height="360" alt="QQ Group QR Code" /><br /><b>QQ Developer Group</b><br /><sub>Group ID: 1032635674</sub></td>
-<td align="center" width="50%"><img src="./docs/assets/qqchannel.jpg" height="360" alt="QQ Channel QR Code" /><br /><b>QQ Developer Channel</b><br /><sub>Channel ID: 20dnumts4z</sub></td>
+<td align="center" width="50%"><img src="./assets/docs/qqgroup.jpg" height="360" alt="QQ Group QR Code" /><br /><b>QQ Developer Group</b><br /><sub>Group ID: 1032635674</sub></td>
+<td align="center" width="50%"><img src="./assets/docs/qqchannel.jpg" height="360" alt="QQ Channel QR Code" /><br /><b>QQ Developer Channel</b><br /><sub>Channel ID: 20dnumts4z</sub></td>
 </tr>
 </table>
 
@@ -47,7 +47,7 @@ npx @deepseek-ai/dsh --profile qqbot
 
 On first launch, the plugin detects missing credentials and automatically starts the QR flow: a QR code is printed in the terminal → scan it with the QQ mobile app → credentials are saved to the profile, so subsequent launches require no re-scan.
 
-<img src="./docs/assets/qrcode.png" alt="QR code scan example" width="280" />
+<img src="./assets/docs/qrcode.png" alt="QR code scan example" width="280" />
 
 > **Note**: Upgrade to `0.4.0` or later for browser-link scanning, which avoids QR code misalignment in some terminals.
 
