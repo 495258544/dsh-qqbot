@@ -77,17 +77,18 @@ export function installPanelStyles(): void {
   font: inherit; font-size: 13px; cursor: pointer; color: inherit;
 }
 .imqb-ghost:hover { opacity: 1; text-decoration: underline; }
-/* 插件详情「打开」按钮：28px 高、12px 字号、细描边、小圆角，与宿主详情页操作按钮同规格 */
+/* 插件详情「设置」按钮：30px，略高于旁边的 sm 次要按钮 */
 .imqb-pluginOpen {
-  display: inline-flex; align-items: center; justify-content: center; gap: 4px;
-  box-sizing: border-box; height: 28px; padding: 0 10px;
-  border: 0.5px solid var(--dsw-alias-border-l3, rgba(128, 128, 128, 0.4));
-  border-radius: var(--dsw-radius-sm, 6px); background: transparent;
+  display: inline-flex; align-items: center; justify-content: center;
+  box-sizing: border-box; height: 30px; padding: 0 14px;
+  border: 1px solid var(--dsw-alias-border-l2, rgba(128, 128, 128, 0.4));
+  border-radius: 8px; background: var(--dsw-alias-bg-layer-1, transparent);
   color: var(--dsw-alias-label-primary, inherit); font: inherit;
-  font-size: 12px; line-height: 18px; cursor: pointer;
+  font-size: 13px; line-height: 20px; cursor: pointer;
 }
 .imqb-pluginOpen:hover { background: var(--dsw-alias-interactive-bg-hover, rgba(128, 128, 128, 0.12)); }
-.imqb-pluginOpen:focus-visible { outline: 2px solid var(--dsw-alias-brand, #4d6bfe); outline-offset: 1px; }
+.imqb-pluginOpen:focus-visible { outline: 2px solid var(--dsw-alias-brand, #4d6bfe); outline-offset: 3px; }
+@media (pointer: coarse) { .imqb-pluginOpen { height: 44px; } }
 /* 主面板页面容器（layout.selectPanel 目标）：滚动 + 留白 */
 .imqb-pluginPage {
   height: 100%; min-height: 0; overflow: auto; box-sizing: border-box;

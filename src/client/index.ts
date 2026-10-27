@@ -103,7 +103,7 @@ function QqBotSidebarIcon({ size = 16 }: { size?: number; active?: boolean }): R
     createElement('path', { d: QQ_BOT_LOGO_PATH, fill: 'currentColor' }));
 }
 
-/** 插件详情「打开」按钮：仅在本包的 bundle / 组件行详情页渲染，其他插件不显示 */
+/** 插件详情「设置」按钮：仅在本包的 bundle / 组件行详情页渲染，其他插件不显示 */
 function OpenQqBotAction({ subject, packageName, onOpen }: {
   subject?: { kind?: string; pkg?: { name?: string }; row?: { moduleName?: string } };
   packageName: string;
@@ -114,7 +114,7 @@ function OpenQqBotAction({ subject, packageName, onOpen }: {
   if (subject.kind === 'row' && subject.row?.moduleName !== packageName) return null;
   return createElement('button', {
     type: 'button', className: 'imqb-pluginOpen', onClick: onOpen,
-  }, '打开');
+  }, '设置');
 }
 
 export function apply(ctx: Context): void {
@@ -156,7 +156,7 @@ export function apply(ctx: Context): void {
     disposers.push(watchAndPrompt(right));
   }
 
-  // 3. 主面板 + 插件详情「打开」操作（layout.selectPanel 导航，
+  // 3. 主面板 + 插件详情「设置」操作（layout.selectPanel 导航，
   const ctxInject = (ctx as unknown as {
     inject?: (deps: readonly string[], callback: (pageCtx: Context) => (() => void) | undefined) => unknown;
   }).inject;
