@@ -35,7 +35,21 @@ QQ User → QQ WebSocket → dsh-qqbot → ctx.agents → dsh agent loop → LLM
 
 ## Installation
 
-### Method 1: Manual
+### Method 1: Desktop install (recommended)
+
+No command line needed — everything happens inside the app:
+
+1. **Install**: click "Plugins" in the left sidebar → "Add plugin" → enter `@tencent-connect/dsh-qqbot@latest` → install and start now
+
+<img src="./assets/docs/install.png" alt="In-app plugin install" width="560" />
+
+2. **Connect**: avatar at the bottom-left → Settings → "QQ Bots" → scan the QR code with mobile QQ
+
+<img src="./assets/docs/setting.png" alt="Settings QR binding" width="560" />
+
+Credentials are saved automatically after the scan; later launches need no re-scan.
+
+### Method 2: Manual
 
 ```bash
 # Add to a profile
@@ -47,11 +61,13 @@ npx @deepseek-ai/dsh --profile qqbot
 
 On first launch, the plugin detects missing credentials and automatically starts the QR flow: a QR code is printed in the terminal → scan it with the QQ mobile app → credentials are saved to the profile, so subsequent launches require no re-scan.
 
+In environments without the in-app binding page (pure CLI), set `QQBOT_BIND_OPEN_BROWSER=1` to additionally open a browser QR page as a fallback.
+
 <img src="./assets/docs/qrcode.png" alt="QR code scan example" width="280" />
 
 > **Note**: Upgrade to `0.4.0` or later for browser-link scanning, which avoids QR code misalignment in some terminals.
 
-### Method 2: Local path
+### Method 3: Local path
 
 ```bash
 # Build
@@ -66,7 +82,7 @@ export QQBOT_APPID="yourAppID" QQBOT_SECRET="yourAppSecret"
 npx @deepseek-ai/dsh --profile qqbot
 ```
 
-### Method 3: --patch dev mode
+### Method 4: --patch dev mode
 
 ```bash
 export QQBOT_APPID="yourAppID" QQBOT_SECRET="yourAppSecret"

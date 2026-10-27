@@ -35,7 +35,21 @@ QQ 用户 → QQ WebSocket → dsh-qqbot → ctx.agents → dsh agent loop → L
 
 ## 安装
 
-### 方式一：手动执行
+### 方式一：桌面版安装（推荐）
+
+无需命令行，全程在应用内完成：
+
+1. **安装**：左侧栏点击「插件」→「添加插件」→ 输入 `@tencent-connect/dsh-qqbot@latest` → 安装并立即启动
+
+<img src="./assets/docs/install.png" alt="端内添加插件" width="560" />
+
+2. **连接**：左下角头像 → 设置 →「QQ 机器人」→ 手机 QQ 扫码连接
+
+<img src="./assets/docs/setting.png" alt="设置页扫码连接" width="560" />
+
+扫码成功后凭据自动保存，后续启动无需再次扫码。
+
+### 方式二：手动执行
 
 ```bash
 # 安装到 profile
@@ -47,13 +61,13 @@ npx @deepseek-ai/dsh --profile qqbot
 
 首次启动时，插件检测到凭据未配置会自动进入扫码引导：终端输出二维码 → 手机 QQ 扫码绑定 → 凭据自动保存到 profile，后续启动无需再次扫码。
 
-DSH **桌面版 / Web** 下会自动打开应用内「QQ Bot 绑定」页（右侧边栏），端内渲染二维码并实时展示绑定状态，扫码成功后自动完成保存与插件重载；CLI 模式保持终端二维码引导。设置 `QQBOT_BIND_OPEN_BROWSER=1` 可在无端内页的环境额外拉起系统浏览器扫码页作为降级通道。
+无端内绑定页的环境（如纯 CLI）可设置 `QQBOT_BIND_OPEN_BROWSER=1`，额外拉起系统浏览器扫码页作为降级通道。
 
 <img src="./assets/docs/qrcode.png" alt="二维码扫码示意图" width="280" />
 
 > **提示**：建议升级至 `0.4.0` 以上版本扫码，支持点击链接在浏览器打开，避免部分终端二维码渲染错位的问题。
 
-### 方式二：本地路径安装
+### 方式三：本地路径安装
 
 ```bash
 # 构建
@@ -68,7 +82,7 @@ export QQBOT_APPID="你的AppID" QQBOT_SECRET="你的AppSecret"
 npx @deepseek-ai/dsh --profile qqbot
 ```
 
-### 方式三：--patch 开发模式
+### 方式四：--patch 开发模式
 
 ```bash
 export QQBOT_APPID="你的AppID" QQBOT_SECRET="你的AppSecret"
