@@ -52,6 +52,50 @@ export interface SendFileConfig {
   maxFiles: number;
 }
 
+/**
+ * 活人感（persona）配置 — 移植自 ai-companion-kit（MIT）
+ * 角色卡 / 按人记忆 / 唤醒判定 / 拟人化发送 / 日记 / 静默自我时间 / 主动预算
+ */
+export interface PersonaConfig {
+  /** 总开关 */
+  enabled: boolean;
+  /** 数据目录（默认 ~/.dsh-qqbot/persona） */
+  dataDir: string;
+  /** 角色卡文件路径（.md）；空 = 不注入人格 section */
+  roleCardPath: string;
+  /** 角色卡注入上限（字） */
+  roleMaxChars: number;
+  /** 唤醒判定开关（关 = 维持原 requireMention 行为） */
+  wakeEnabled: boolean;
+  /** 她的名字/昵称（消息里被叫到才醒） */
+  names: string[];
+  /** 关键词（命中即醒） */
+  keywords: string[];
+  /** 主人 openid 列表（发言必醒；own-life 静默投递给第一个） */
+  ownerOpenids: string[];
+  /** 群闲聊随机插话概率（0 = 纯潜水） */
+  groupProbability: number;
+  /** 拟人化发送开关（分条 + 停顿） */
+  humanizeEnabled: boolean;
+  /** 每字打字毫秒（ai-companion 作者实测真人值 110） */
+  msPerChar: number;
+  /** 一次最多分几条（官方被动回复限额，建议 ≤2） */
+  burstMax: number;
+  /** 条间停顿范围(ms) */
+  gapMinMs: number;
+  gapMaxMs: number;
+  /** own-life 静默唤醒开关 */
+  ownLifeEnabled: boolean;
+  /** 静默唤醒间隔(ms) */
+  ownLifeIntervalMs: number;
+  /** 静默唤醒每天最多几次 */
+  ownLifeMaxPerDay: number;
+  /** 主动消息：每 peer 每天上限 */
+  maxProactivePerDay: number;
+  /** 主动消息：两次之间最小间隔(ms) */
+  proactiveMinGapMs: number;
+}
+
 export interface ImQQBotConfig {
   /** QQ Bot AppID */
   appId: string;
@@ -97,6 +141,8 @@ export interface ImQQBotConfig {
   vision: VisionConfig;
   /** 附件发送（qqbot_send_file 工具与交付物投递共用） */
   sendFile: SendFileConfig;
+  /** 活人感 persona（ai-companion-kit 移植：角色卡/记忆/唤醒/拟人化/日记/自我时间） */
+  persona: PersonaConfig;
 }
 
 /** 访问控制子 Schema（独立导出：config 路由的服务端校验复用） */
@@ -169,4 +215,45 @@ export const ConfigSchema: Schema<ImQQBotConfig> = Schema.object({
     sendPresentedFiles: true,
     maxFiles: 4,
   }).description('附件发送配置'),
+  persona: Schema.object({
+    enabled: Schema.boolean().default(false).description('活人感总开关（角色卡/记忆/唤醒/拟人化/日记/自我时间）'),
+    dataDir: Schema.string().default('').description('persona 数据目录（默认 ~/.dsh-qqbot/persona）'),
+    roleCardPath: Schema.string().default('').description('角色卡 .md 路径（空=不注入人格）'),
+    roleMaxChars: Schema.number().default(12000).description('角色卡注入上限(字)'),
+    wakeEnabled: Schema.boolean().default(true).description('唤醒判定开关（关=维持 requireMention 行为）'),
+    names: Schema.array(Schema.string()).default([]).description('她的名字/昵称（被叫到才醒）'),
+    keywords: Schema.array(Schema.string()).default([]).description('关键词（命中即醒）'),
+    ownerOpenids: Schema.array(Schema.string()).default([]).description('主人 openid（发言必醒；own-life 投递目标）'),
+    groupProbability: Schema.number().default(0).description('群闲聊随机插话概率（0=纯潜水）'),
+    humanizeEnabled: Schema.boolean().default(true).description('拟人化发送（分条+停顿）'),
+    msPerChar: Schema.number().default(110).description('每字打字毫秒（真人实测约110）'),
+    burstMax: Schema.number().default(2).description('一次最多分几条（官方被动回复限额，建议≤2）'),
+    gapMinMs: Schema.number().default(700).description('条间停顿下限(ms)'),
+    gapMaxMs: Schema.number().default(2600).description('条间停顿上限(ms)'),
+    ownLifeEnabled: Schema.boolean().default(false).description('own-life 静默唤醒（给她自己的时间）'),
+    ownLifeIntervalMs: Schema.number().default(2.5 * 3600 * 1000).description('静默唤醒间隔(ms)，默认 2.5h'),
+    ownLifeMaxPerDay: Schema.number().default(6).description('静默唤醒每天最多几次'),
+    maxProactivePerDay: Schema.number().default(2).description('主动消息每 peer 每天上限'),
+    proactiveMinGapMs: Schema.number().default(2 * 3600 * 1000).description('主动消息两次之间最小间隔(ms)'),
+  }).default({
+    enabled: false,
+    dataDir: '',
+    roleCardPath: '',
+    roleMaxChars: 12000,
+    wakeEnabled: true,
+    names: [],
+    keywords: [],
+    ownerOpenids: [],
+    groupProbability: 0,
+    humanizeEnabled: true,
+    msPerChar: 110,
+    burstMax: 2,
+    gapMinMs: 700,
+    gapMaxMs: 2600,
+    ownLifeEnabled: false,
+    ownLifeIntervalMs: 2.5 * 3600 * 1000,
+    ownLifeMaxPerDay: 6,
+    maxProactivePerDay: 2,
+    proactiveMinGapMs: 2 * 3600 * 1000,
+  }).description('活人感 persona 配置（移植自 ai-companion-kit，默认关）'),
 });

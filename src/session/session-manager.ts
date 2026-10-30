@@ -26,6 +26,7 @@ import type { ModelRoute, ModelEntry } from '../model/types.ts';
 import { IdleEvictor } from './idle-evictor.ts';
 import type { QuestionChannel } from '../features/question-channel.ts';
 import type { ApprovalChannel } from '../features/approval-channel.ts';
+import type { PersonaService } from '../persona/service.ts';
 import type {
   SessionEventLike,
   DshAgent,
@@ -104,6 +105,8 @@ export class SessionManager {
   public questionChannel?: QuestionChannel;
   /** 由 bootstrap 注入的审批通道（approval/request → QQ），会话回收时清理其待批审批 */
   public approvalChannel?: ApprovalChannel;
+  /** 由 bootstrap 注入的活人感服务（人格/记忆/日记 section 注入，DESIGN §7） */
+  public persona?: PersonaService;
 
   constructor(
     ctx: Context,
@@ -155,12 +158,24 @@ export class SessionManager {
       const record = this.findByAgent(context.agent);
       if (!record) return assembled;
 
-      const prompt = record.scope === 'group' ? this.config.groupPrompt : this.config.directPrompt;
-      if (!prompt) return assembled;
+      // persona：注入人格角色卡 + 日记连续性（order 60~64，在 scope-prompt(90)
+      // 之前；见 DESIGN §2.3/§7）。c2c 额外注入"这个人的账"（群会话的
+      // senderId 是最后一个发言人，账本按人不按群，群里注入会串人）。
+      const personaSections = this.persona?.buildSections(
+        record.scope === 'c2c' ? record.senderId : undefined,
+      ) ?? [];
 
+      const prompt = record.scope === 'group' ? this.config.groupPrompt : this.config.directPrompt;
+      if (!prompt && personaSections.length === 0) return assembled;
+
+      const extra = personaSections;
       return {
         ...assembled,
-        sections: [...(assembled.sections ?? []), { name: 'qqbot:scope-prompt', order: 90, text: prompt }],
+        sections: [
+          ...(assembled.sections ?? []),
+          ...extra,
+          ...(prompt ? [{ name: 'qqbot:scope-prompt', order: 90, text: prompt }] : []),
+        ],
       };
     };
 
@@ -584,6 +599,14 @@ export class SessionManager {
       if (record.agent === agent) return record;
     }
     return undefined;
+  }
+
+  /**
+   * 查已存在的会话，**不创建**（DESIGN §1.2）。
+   * own-life 静默唤醒用：不为发一句"想干嘛干嘛"重建 30 分钟没动的会话。
+   */
+  peek(scope: ChatScope, peerId: string): SessionRecord | undefined {
+    return this.sessions.get(this.sessionKey(scope, peerId));
   }
 
   async remove(scope: ChatScope, peerId: string): Promise<void> {

@@ -70,8 +70,15 @@ export function setupMiddlewares(
   }));
 
   // 5. 群聊 @bot 门控
+  //    persona 启用且 Waker 接管时透传（只记录 state 不拦截）——唤醒决策交给
+  //    inbound 的 Waker（ai-companion 移植：@/名字/提问/关键词/概率，DESIGN §7）。
+  //    wakeEnabled=false 时 Waker 不实例化（见 PersonaService），inbound 没有
+  //    接管者，必须维持原 requireMention 硬门控——否则未 @ 的群消息会全部进
+  //    agent（成本 + 刷屏）。
+  const wakeByPersona = config.persona.enabled && config.persona.wakeEnabled;
   bot.use(mentionGate({
-    requireMentionInGroup: config.requireMention,
+    requireMentionInGroup: wakeByPersona ? false : config.requireMention,
+    passthrough: wakeByPersona,
   }));
 
   // 6. 内容清洗（去 @marker、表情标签、多余空白）

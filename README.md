@@ -147,6 +147,49 @@ npx @deepseek-ai/dsh web --patch /path/to/dsh-qqbot/cordis.dev.yml
 | `sendFile.restrictPaths` | boolean | `true` | 是否启用路径白名单（仅 media + cwd + extraRoots） |
 | `sendFile.extraRoots` | string[] | `[]` | 额外允许访问的根目录 |
 
+### 活人感（persona，默认关闭）
+
+移植自 [ai-companion-kit](https://github.com/pinganbbOvO/ai-companion-kit)（MIT）：
+角色卡注入、按人存的记忆账本、唤醒判定（Waker）、拟人化发送（气泡+停顿）、
+日记本、own-life 静默自我时间、主动消息预算与冷退避。
+`persona.enabled=false`（默认）时插件行为与原版完全一致。
+
+| 配置 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `persona.enabled` | boolean | `false` | 总开关 |
+| `persona.dataDir` | string | `~/.dsh-qqbot/persona` | 记忆/日记/状态落盘目录 |
+| `persona.roleCardPath` | string | `''` | 角色卡 .md 路径（空=不注入人格），见 `persona/role.example.md` |
+| `persona.roleMaxChars` | number | `12000` | 角色卡注入上限 |
+| `persona.wakeEnabled` | boolean | `true` | 唤醒判定接管群聊门控（关=维持 requireMention 行为） |
+| `persona.names` | string[] | `[]` | 她的名字/昵称（被叫到才醒） |
+| `persona.keywords` | string[] | `[]` | 关键词（命中即醒） |
+| `persona.ownerOpenids` | string[] | `[]` | 主人 openid（发言必醒；own-life 投递目标） |
+| `persona.groupProbability` | number | `0` | 群闲聊随机插话概率（0=纯潜水） |
+| `persona.humanizeEnabled` | boolean | `true` | 拟人化发送（分条+打字停顿；启用时私聊自动关流式） |
+| `persona.msPerChar` | number | `110` | 每字打字毫秒（真人实测值） |
+| `persona.burstMax` | number | `2` | 一次最多几条（官方被动回复限额，建议 ≤2） |
+| `persona.gapMinMs` / `gapMaxMs` | number | `700/2600` | 条间停顿范围 |
+| `persona.ownLifeEnabled` | boolean | `false` | 静默自我时间唤醒（需配 ownerOpenids） |
+| `persona.ownLifeIntervalMs` | number | `2.5h` | 唤醒间隔 |
+| `persona.ownLifeMaxPerDay` | number | `6` | 每天最多几次 |
+| `persona.maxProactivePerDay` | number | `2` | 主动消息每 peer 每天上限 |
+| `persona.proactiveMinGapMs` | number | `2h` | 主动消息最小间隔 |
+
+新增 agent 工具：`qq_write_diary`（写自己的日记）、`qq_read_diary`（翻日记）、
+`qq_memory_append`（往某个人的账上记 trait/fact/topic/pending）。
+
+快速启用：
+
+```yaml
+# cordis.yml
+im-qqbot:
+  persona:
+    enabled: true
+    roleCardPath: ./persona/role.example.md
+    names: [小深]
+    ownerOpenids: [你的openid]
+```
+
 ## 内置命令
 
 | 命令 | 说明 |
@@ -181,6 +224,15 @@ src/
 ├── gateway/                    # 网关装配
 │   ├── bootstrap.ts            # 启动装配（监听 session/event 等）
 │   └── middleware-setup.ts     # 中间件链配置
+├── persona/                    # 活人感（移植自 ai-companion-kit，默认关）
+│   ├── memory.ts               # 按人存的记忆账本 + 跨场合对话流水
+│   ├── wake.ts                 # Waker 唤醒判定（@/名字/提问/概率/潜水）
+│   ├── humanize.ts             # 拟人化发送（气泡/打字停顿/深夜变慢）
+│   ├── role.ts                 # 角色卡读取 + lint 体检 + section 渲染
+│   ├── diary.ts                # 日记本（index.jsonl + 可读 md）
+│   ├── own-life.ts             # 静默自我时间唤醒（日限/安静时段/落盘续期）
+│   ├── service.ts              # 装配 + ProactiveBudget 冷退避
+│   └── tools.ts                # qq_write_diary / qq_read_diary / qq_memory_append
 ├── transport/                  # 传输层
 │   ├── inbound.ts              # QQ 入站消息 → agent.followup()
 │   ├── outbound.ts             # session/event → QQ sendMarkdown

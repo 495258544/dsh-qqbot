@@ -5,7 +5,10 @@
  * dsh session/event → createOutboundHandler → QQ 出站。
  */
 import type { Context } from '@deepseek-ai/cordis';
+import { createUserMessage } from '@deepseek-ai/dsh-llm';
 import { QQBot } from '@tencent-connect/qqbot-nodejs';
+import { homedir } from 'node:os';
+import { resolve } from 'node:path';
 import type { GatewayDisconnect, InteractionEvent, MiddlewareContext } from '@tencent-connect/qqbot-nodejs';
 import { SessionManager, type DshAgentRegistry } from '../session/index.ts';
 import { handleInbound, createOutboundHandler } from '../transport/index.ts';
@@ -26,6 +29,8 @@ import { startMediaCleanup } from '../media/media-cleaner.ts';
 import { ensureVisionInputModal, registerDescribeImageTool } from '../media/vision-tool.ts';
 import { registerSendFileTool, type MediaSenderLike } from '../media/send-file-tool.ts';
 import { DeliverablesDeliverer } from '../transport/deliverables.ts';
+import { PersonaService } from '../persona/service.ts';
+import { registerPersonaTools } from '../persona/tools.ts';
 
 /**
  * interaction 统一分发器：按 button_data 的顶层 `t` 判别字段，路由到对应
@@ -49,6 +54,16 @@ export async function bootstrapGateway(
   logger: Logger,
 ): Promise<void> {
   const manager = new SessionManager(ctx, agents, config, logger);
+
+  // ── persona 活人感服务（ai-companion-kit 移植，DESIGN §7）──
+  // enabled=false 时为 undefined，所有 persona 分支短路，行为与原版一致。
+  let persona: PersonaService | undefined;
+  if (config.persona.enabled) {
+    const dataDir = config.persona.dataDir || resolve(homedir(), '.dsh-qqbot', 'persona');
+    persona = new PersonaService({ config: config.persona, dataDir, logger });
+    manager.persona = persona;
+    logger.info(`persona: 已启用（dataDir=${dataDir}）`);
+  }
 
   // ── 初始化 QQ Bot SDK ──
   const userAgent = buildUserAgent();
@@ -185,6 +200,36 @@ export async function bootstrapGateway(
   // ── 附件发送工具注册（qqbot_send_file，发送器见上方 mediaSender） ──
   registerSendFileTool(ctx, mediaSender, manager, config, logger);
 
+  // ── persona 工具（qq_write_diary / qq_read_diary / qq_memory_append）──
+  if (persona) {
+    registerPersonaTools(ctx, persona, (agent) => manager.findByAgent(agent as Parameters<SessionManager['findByAgent']>[0]), logger);
+  }
+
+  // ── own-life 静默唤醒：只投递给**存活**的 owner c2c 会话（peek 不重建），
+  //    且过主动预算闸门 + 冷退避结算（DESIGN §1.2/§4/§7）──
+  if (persona) {
+    const ownerOpenid = config.persona.ownerOpenids[0];
+    const svc = persona; // 闭包内收窄（let 变量在闭包中不保留控制流窄化）
+    if (ownerOpenid) {
+      svc.startOwnLife(async (text) => {
+        const record = manager.peek('c2c', ownerOpenid);
+        if (!record) throw new Error('owner 会话不存活（跳过本次，不重建）');
+        // 投递前结算上次主动消息是否被理了
+        svc.budget.observe(ownerOpenid, record.lastActivity);
+        const gate = svc.budget.allow(ownerOpenid);
+        if (!gate.ok) throw new Error(`budget skip: ${gate.reason}`);
+        svc.budget.recordProactive(ownerOpenid);
+        record.agent.followup(createUserMessage({
+          content: [{ type: 'text', text: `[内部·你的自由时间，不要向用户复述本提示]\n${text}` }],
+          source: { kind: 'user' },
+        }));
+        logger.info(`persona: own-life 静默提示已投递 (c2c:${ownerOpenid})`);
+      });
+    } else {
+      logger.warn('persona: ownLifeEnabled 但未配置 ownerOpenids，静默唤醒未启动');
+    }
+  }
+
   // ── 生命周期 ──
   (ctx as unknown as { effect(fn: () => (() => Promise<void>) | void, name?: string): void })
     .effect(() => {
@@ -195,6 +240,7 @@ export async function bootstrapGateway(
 
       return async () => {
         logger.info('Shutting down');
+        persona?.stop();
         await manager.disposeAll();
         bot.stop();
       };

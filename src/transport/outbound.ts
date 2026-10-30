@@ -171,8 +171,11 @@ class OutboundRouter {
     buffer.append(text);
   }
 
-  /** 是否启用流式：配置开启 + c2c + 有 msgId（群聊不支持流式） */
+  /** 是否启用流式：配置开启 + c2c + 有 msgId（群聊不支持流式）。
+   *  persona 拟人化启用时强制关闭（DESIGN §3.4 冲突B 方案 B1：
+   *  流式"一条不断变长的消息"与"多条短气泡"协议层互斥，选气泡） */
   private shouldStream(record: SessionRecord): boolean {
+    if (this.manager.persona?.humanizer.enabled) return false;
     return this.config.streaming
       && record.replyTarget.scope === 'c2c'
       && !!record.replyTarget.msgId;
@@ -180,8 +183,18 @@ class OutboundRouter {
 
   /** 完整 assistant 消息：有流式 buffer 则 flush，否则直接发送文本块 */
   private onMessage(sessionId: string, record: SessionRecord, event: MessageEvent): void {
+    const persona = this.manager.persona;
     const buffer = this.buffers.get(sessionId);
     if (buffer !== undefined && buffer.text.trim()) {
+      // persona 拟人化启用时：buffer 文本改走 send()（气泡+停顿），不走流式 flush
+      // （shouldStream 已排除 humanize，这里兜住 durable chunk 历史格式）
+      if (persona?.humanizer.enabled) {
+        const text = buffer.text;
+        buffer.cancel();
+        this.buffers.delete(sessionId);
+        this.trackText(sessionId, this.send(record, text, 'sendMarkdown'));
+        return;
+      }
       this.trackText(sessionId, buffer.flush());
       this.buffers.delete(sessionId);
       return;
@@ -253,7 +266,10 @@ class OutboundRouter {
     let flushTask: Promise<void> = Promise.resolve();
     if (buffer !== undefined) {
       if (buffer.text.trim()) {
-        flushTask = buffer.flush();
+        // persona 拟人化：残余文本走 send()（气泡），不走流式 flush
+        flushTask = this.manager.persona?.humanizer.enabled
+          ? this.send(record, buffer.text, 'sendMarkdown').then(() => buffer.cancel())
+          : buffer.flush();
       } else {
         buffer.cancel();
       }
@@ -276,20 +292,58 @@ class OutboundRouter {
       if (files.length > 0 && this.deliverer !== undefined) {
         await this.deliverer.deliver(record, files);
       }
+      // persona：本轮问答配对写入跨场合流水（在文本全部送达后）
+      this.flushTurnLedger(record);
       this.logger.debug(`im-qqbot: turn/end sessionId=${sessionId}`);
     })();
   }
 
-  /** 统一发送：切分 + 逐 chunk 发送 + 错误记录 */
+  /**
+   * 统一发送：切分 + 逐 chunk 发送 + 错误记录。
+   * persona 启用（humanizeEnabled）且为文本回复时，走拟人化气泡：
+   * 分条 + 打字停顿（DESIGN §3.4 冲突B 选 B1 —— outbound 的 this.bot 已是
+   * bootstrap 包装过的 sender，每个气泡的 sendMarkdown 独立过三级兜底）。
+   */
   private async send(record: SessionRecord, text: string, tag: string): Promise<void> {
+    const persona = this.manager.persona;
+    const humanize = persona?.humanizer.enabled === true && tag === 'sendMarkdown';
+    if (humanize && persona) {
+      await persona.humanizer.say(text, {
+        send: async (bubble) => {
+          for (const chunk of chunkMarkdownText(bubble, this.config.textChunkLimit)) {
+            try {
+              await this.bot.sendMarkdown(record.replyTarget, chunk);
+              // 逐气泡记账：失败不记（未送达的不算说过）
+              persona.noteReplyChunk(record.sessionId, chunk);
+            } catch (err) {
+              this.logger.error(`im-qqbot: ${tag} (humanize) failed: ${err instanceof Error ? err.message : String(err)}`);
+            }
+          }
+        },
+      });
+      return;
+    }
+
     const chunks = chunkMarkdownText(text, this.config.textChunkLimit);
     for (const chunk of chunks) {
       try {
         await this.bot.sendMarkdown(record.replyTarget, chunk);
+        this.manager.persona?.noteReplyChunk(record.sessionId, chunk);
       } catch (err) {
         this.logger.error(`im-qqbot: ${tag} failed: ${err instanceof Error ? err.message : String(err)}`);
       }
     }
+  }
+
+  /** persona：轮末把「用户说了什么 / 她回了什么」记进跨场合对话流水 */
+  private flushTurnLedger(record: SessionRecord): void {
+    const persona = this.manager.persona;
+    if (!persona) return;
+    persona.flushTurn(
+      record.sessionId,
+      record.scope === 'group' ? `group:${record.peerId}` : 'c2c',
+      record.senderId,
+    );
   }
 }
 

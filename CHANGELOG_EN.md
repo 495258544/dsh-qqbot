@@ -6,6 +6,27 @@ This file records significant dsh-qqbot updates from a product perspective, focu
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [0.5.5] - 2026-10-30
+
+### Added: persona layer (human-like presence, disabled by default)
+
+Ported from the open-source [ai-companion-kit](https://github.com/pinganbbOvO/ai-companion-kit) (MIT), adapted for the official QQ Bot API channel. With `persona.enabled=false` (default) behavior is identical to 0.5.4.
+
+- **Role card injection** via the system-prompt waterfall (order 60), replacing the static persona string; startup lint checks for customer-service tone, missing boundaries, oversized paragraphs.
+- **Per-person memory ledger**: memory keyed by user (openid), not by session — someone you met in DMs is still recognized in groups. Traits/facts/topics/pending plus a cross-context turn log.
+- **Waker**: group gating upgraded from mention-only to multi-condition (@ / name / question / keyword / probability / owner-always-wake); unmatched messages get silence.
+- **Humanized sending**: semantic bubbles (default ≤2, respecting the passive-reply quota), typing duration by length, jittered gaps, slower at night; forces streaming off for c2c when enabled (streaming and bubbles are mutually exclusive at protocol level).
+- **Diary** (`qq_write_diary` / `qq_read_diary`): her own day, stored separately from the memory ledger; last 3 entries injected for continuity.
+- **own-life silent wake**: periodic invisible prompt "this is your time — do anything or nothing". Quiet hours, daily cap, failures not counted, no replay after restart.
+- **Proactive budget & cold-backoff**: per-peer daily cap and minimum gap; escalating cooldown when unanswered (2 → 3 days, 3 → 14 days, 5 → permanently muted).
+- **`qq_memory_append` tool** for incidental bookkeeping.
+
+### Internal
+
+- `SessionManager.peek(scope, peerId)` (lookup without create); persona injection point on assemble waterfall.
+- mentionGate passthrough only when Waker takes over; hard gate preserved otherwise.
+- 27 new unit tests (persona), 235 total passing.
+
 ## [0.5.4] - 2026-10-28
 
 ### ⚠️ Behavior Changes (secure defaults)

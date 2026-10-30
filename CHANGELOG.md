@@ -6,6 +6,38 @@
 
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/)。
 
+## [0.5.5] - 2026-10-30
+
+### 新增：活人感（persona，默认关闭）
+
+移植自开源项目 [ai-companion-kit](https://github.com/pinganbbOvO/ai-companion-kit)（MIT），
+经 QQ 官方 Bot API 通道适配。`persona.enabled=false`（默认）时行为与 0.5.4 完全一致。
+
+- **角色卡人格注入**：`persona.roleCardPath` 指向 .md 角色卡，经 system-prompt waterfall
+  注入（order 60），替换固定 directPrompt 的常量人设；启动时 `Role.lint()` 体检
+  客服腔/缺边界/超长段落。示例见 `persona/role.example.md`。
+- **按人存的记忆账本**：记忆挂人（openid）不挂会话——私聊认识的人，群里还认识。
+  traits/facts/topics/pending 四栏 + 跨场合对话流水，自动裁剪。
+- **唤醒判定（Waker）**：群聊从"必须 @bot"升级为多条件（@/名字/提问/关键词/
+  概率/指定人必醒），未命中一个字都不说；`groupProbability=0` 即纯潜水。
+- **拟人化发送**：回复按语义切气泡（默认 ≤2 条，尊重官方被动回复限额）、
+  打字时长随字数、条间随机停顿、深夜变慢；启用时私聊自动关闭流式
+  （流式"一条不断变长的消息"与多条气泡协议层互斥）。
+- **日记本**：`qq_write_diary` / `qq_read_diary` 工具——她自己的每一天，
+  与"关于你的账"分开存；最近 3 条注入保持连续性。
+- **own-life 静默自我时间**：定期向存活会话投一条静默提示（QQ 上不可见）
+  "现在是你的时间，想干嘛干嘛，也可以什么都不干"。凌晨不叫、日上限、
+  投递失败不计、重启不补发。
+- **主动消息预算与冷退避**：每 peer 日限 + 最小间隔；对方连续不回自动
+  指数冷却（2 次冷 3 天 / 3 次冷 14 天 / 5 次永久静默该 peer）。
+- **`qq_memory_append` 工具**：agent 顺手记账（trait/fact/topic/pending）。
+
+### 内部
+
+- SessionManager 新增 `peek(scope, peerId)`（查不建）与 `persona` 注入点。
+- mentionGate 在 Waker 接管时透传（passthrough），唤醒决策统一在 inbound。
+- 新增单测 27 例（persona/persona.test.ts），全量 235 例通过。
+
 ## [0.5.4] - 2026-10-28
 
 ### ⚠️ 行为变更（安全默认）
