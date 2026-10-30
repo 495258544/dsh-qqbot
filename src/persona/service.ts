@@ -15,6 +15,7 @@ import { Diary } from './diary.ts';
 import { Role } from './role.ts';
 import { Waker } from './wake.ts';
 import { SelfProfileService } from './self.ts';
+import { VoiceService } from './voice.ts';
 import { Humanizer } from './humanize.ts';
 import { createOwnLife, type OwnLifeHandle, type OwnLifeDeliverResult } from './own-life.ts';
 import type { PersonaConfig } from '../config.ts';
@@ -153,6 +154,8 @@ export class PersonaService {
   public readonly waker: Waker | undefined;
   /** 她自己的画像（称呼偏好 / 兴趣 / 话痨度 / 冲浪见闻） */
   public readonly self: SelfProfileService;
+  /** 她的口癖（M11：从"被接住的话"里长出来的说话习惯） */
+  public readonly voice: VoiceService;
   public readonly humanizer: Humanizer;
   public readonly budget: ProactiveBudget;
   public ownLife: OwnLifeHandle | undefined;
@@ -166,6 +169,7 @@ export class PersonaService {
     this.memory = new Memory({ dir: path.join(dataDir, 'memory') });
     this.diary = new Diary(path.join(dataDir, 'diary'));
     this.self = new SelfProfileService(dataDir, (m) => logger.info(m));
+    this.voice = new VoiceService(dataDir, (m) => logger.info(m));
     if (config.roleCardPath) {
       this.role = new Role({ cardPath: config.roleCardPath, maxChars: config.roleMaxChars });
       const l = this.role.lint();
@@ -221,6 +225,10 @@ export class PersonaService {
       const text = this.role.renderSection();
       if (text) out.push({ name: 'qqbot:persona-role', order: 60, text });
     }
+    // M11 口癖（order 61，紧跟角色卡）：只有被确认的口癖才会注入
+    const voiceSec = this.voice.renderSection();
+    if (voiceSec) out.push({ name: 'qqbot:persona-voice', order: 61, text: voiceSec });
+
     if (personKey) {
       const ledger = this.memory.renderPerson(personKey);
       if (ledger) out.push({ name: 'qqbot:persona-memory', order: 62, text: ledger });
@@ -278,6 +286,14 @@ export class PersonaService {
   noteReplyChunk(sessionId: string, text: string): void {
     const cur = this.turnLedger.get(sessionId) ?? { reply: '' };
     this.turnLedger.set(sessionId, { user: cur.user, who: cur.who, reply: (cur.reply + ' ' + text).slice(0, 300) });
+    // M11：记下她说的话，等后续判定是否被"接住"（key 用 sessionId 即可，只需同会话判定）
+    this.voice.recordUtterance(`${sessionId}#${Date.now()}`, sessionId, text);
+  }
+
+  /** inbound：判定她之前的发言是否被接住（M11） */
+  judgeVoice(sessionId: string, humanText: string): void {
+    if (!humanText) return;
+    this.voice.judgeIncoming(sessionId, humanText);
   }
 
   /** outbound turn/end：配对写入跨场合流水并清暂存。

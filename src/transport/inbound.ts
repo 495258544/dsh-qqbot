@@ -205,7 +205,12 @@ export async function handleInbound(
   });
 
   // persona 记账：暂存本轮用户消息，outbound turn/end 时与回复配对写入流水
-  if (persona) persona.noteUserTurn(record.sessionId, (msg.content ?? '').trim(), msg.senderName ?? msg.senderId);
+  if (persona) {
+    const humanText = (msg.content ?? '').trim();
+    persona.noteUserTurn(record.sessionId, humanText, msg.senderName ?? msg.senderId);
+    // M11：判定她上一句是否被这条消息"接住"（正样本采集）
+    persona.judgeVoice(record.sessionId, humanText);
+  }
 
   record.agent.followup(message);
   logger.info(`→ followup sent: key=${scope}:${peerId}`);
