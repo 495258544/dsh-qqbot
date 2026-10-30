@@ -37,12 +37,27 @@ export interface SelfName {
 export interface SelfInterest {
   /** 话题名 */
   topic: string;
-  /** 权重 0~1 */
+  /** 权重 0~1（兼容旧字段，实际取 strength） */
   weight: number;
+  /**
+   * 强度 0~1 —— 真正参与衰减计算的字段。
+   * 与 weight 同步（weight 作为兼容别名保留）。
+   */
+  strength?: number;
+  /**
+   * 兴趣类型（M12 两库化，调研结论）：
+   * durable = 长期品味（永不衰减，如"喝咖啡"）
+   * current = 正在追（会衰减，如"当前在玩的游戏"）
+   */
+  kind?: 'durable' | 'current';
   /** 累计提及次数 */
   count: number;
-  /** 最近提及时间 */
+  /** 最近提及时间（用于衰减基准，召回时重置） */
   lastAt: number;
+  /** 最近被召回时间（MemoryBank：每次召回 S+=1 且 t 重置） */
+  lastRecalledAt?: number;
+  /** 冻结态（强度跌破 freeze 线但未删除；再涨过 revive 线才复活） */
+  frozen?: boolean;
   /** 自主冲浪收集到的见闻（摘要） */
   findings?: Array<{ at: number; summary: string; source?: string }>;
 }
@@ -96,14 +111,22 @@ export interface SelfProfile {
   wishes: WishRequest[];
 }
 
-/** 兴趣权重下限，低于则移除 */
-const MIN_INTEREST_WEIGHT = 0.1;
+/** 冻结线：强度低于此值 → 冻结（不删除，保留可追溯） */
+const FREEZE_THRESHOLD = 0.1;
+/** 复活线：冻结态强度涨过此值 → 解冻（双阈值滞回，防抖） */
+const REVIVE_THRESHOLD = 0.15;
+/** 衰减半衰期：24 小时（MaiBot A_memorix 默认值） */
+const HALF_LIFE_MS = 24 * 3600_000;
+/** ACCESS 强化系数（她主动用了一次/被召回） */
+const ALPHA_ACCESS = 0.05;
+/** ACCESS 冷却期（60 分钟内重复不叠加） */
+const ACCESS_COOLDOWN_MS = 60 * 60 * 1000;
+/** EVIDENCE 强化直接置为该档（用户明确表态） */
+const EVIDENCE_STRENGTH = 1.0;
+/** 活跃兴趣上限（Reddit 研究：人的活跃兴趣数量极少） */
+const MAX_ACTIVE_INTERESTS = 5;
 /** 兴趣上限 */
 const MAX_INTEREST_WEIGHT = 1.0;
-/** 无提及多少天后开始衰减 */
-const DECAY_AFTER_MS = 7 * 24 * 3600_000;
-/** 每天衰减系数 */
-const DECAY_FACTOR = 0.95;
 /** 称呼被叫多少次才进入"候选"（还需她表态接受） */
 const NAME_ACCEPT_THRESHOLD = 3;
 
@@ -218,59 +241,130 @@ export class SelfProfileService {
     return true;
   }
 
-  // ───────────── 兴趣 ─────────────
+  // ───────────── 兴趣（M12：两库 + 事件分型 + 饱和强化 + 双阈值滞回） ─────────────
+  //
+  // 设计来源（research-digest.md §二）：
+  //   - MaiBot A_memorix：s·2^(-Δt/HL)，s ← s + α(1-s)，freeze 0.1 / revive 0.15
+  //   - elizaOS：durable（永不衰减）/ current（会衰减）两层
+  //   - MemoryBank（arXiv 2305.10250）：每次召回 S+=1 且 t 重置
+  //   - Reddit 710万用户（arXiv 1912.09210）：兴趣是 drift/shift，不是平滑衰减
 
-  /** 提到某兴趣：权重 +0.05，计数 +1 */
+  /** 取强度（兼容旧 weight 字段） */
+  private strengthOf(e: SelfInterest): number {
+    return typeof e.strength === 'number' ? e.strength : e.weight;
+  }
+
+  /** 写回强度（同时同步 weight 兼容别名） */
+  private setStrength(e: SelfInterest, v: number): void {
+    const clamped = Math.max(0, Math.min(1, v));
+    e.strength = clamped;
+    e.weight = clamped;
+  }
+
+  /**
+   * 饱和强化：s ← s + α(1-s)
+   * 越接近 1 涨得越慢 —— 符合人性（已经很喜欢的不会因为再提一次就更喜欢）。
+   */
+  private saturate(e: SelfInterest, alpha: number): void {
+    const cur = this.strengthOf(e);
+    this.setStrength(e, cur + alpha * (1 - cur));
+  }
+
+  /**
+   * ACCESS 事件：她主动用了一次 / 被召回（弱事件，带冷却）。
+   * 对应 MaiBot 的 α_access=0.05 + 60min 冷却。
+   */
   touchInterest(topic: string): void {
     const now = Date.now();
     let e = this.data.interests.find((i) => i.topic === topic);
     if (!e) {
-      e = { topic, weight: 0.3, count: 0, lastAt: now };
+      e = { topic, weight: 0.3, strength: 0.3, kind: 'current', count: 0, lastAt: now };
       this.data.interests.push(e);
     }
     e.count += 1;
-    e.weight = Math.min(MAX_INTEREST_WEIGHT, e.weight + 0.05);
+    // 冷却：60 分钟内重复提及不叠加（防刷分）
+    const cooled = now - (e.lastRecalledAt ?? 0) >= ACCESS_COOLDOWN_MS;
+    if (cooled) {
+      this.saturate(e, ALPHA_ACCESS);
+      e.lastRecalledAt = now;
+    }
+    // 召回即重置衰减计时（MemoryBank：t 重置）
     e.lastAt = now;
+    // 双阈值滞回：越过 revive 线才解冻
+    if (e.frozen && this.strengthOf(e) >= REVIVE_THRESHOLD) {
+      e.frozen = false;
+      this.log?.(`self: 兴趣「${topic}」解冻复活`);
+    }
     this.save();
   }
 
-  /** 因兴趣接话、且被回应 → 更"喜欢" */
-  reinforceInterest(topic: string): void {
+  /**
+   * EVIDENCE 事件：用户明确表达喜好（"我超喜欢X"）→ 强度直接置满。
+   * 对应 MaiBot 的 α_evidence（直接 1.0）。
+   */
+  reinforceInterest(topic: string, explicit = false): void {
     const e = this.data.interests.find((i) => i.topic === topic);
     if (!e) return;
-    e.weight = Math.min(MAX_INTEREST_WEIGHT, e.weight + 0.1);
+    if (explicit) {
+      this.setStrength(e, EVIDENCE_STRENGTH);
+      if (e.frozen) e.frozen = false;
+    } else {
+      // 非明确证据：较强但非满值（α=0.5）
+      this.saturate(e, 0.5);
+      if (e.frozen && this.strengthOf(e) >= REVIVE_THRESHOLD) e.frozen = false;
+    }
+    e.lastAt = Date.now();
     this.save();
   }
 
-  /** 因兴趣接话但没人理 → 兴趣降温 */
+  /** 因兴趣接话但没人理 → 兴趣降温（线性小幅下调，不参与衰减曲线） */
   dampenInterest(topic: string): void {
     const e = this.data.interests.find((i) => i.topic === topic);
     if (!e) return;
-    e.weight = Math.max(0, e.weight - 0.05);
+    this.setStrength(e, this.strengthOf(e) - 0.05);
     this.save();
   }
 
-  /** 按当前时间做衰减（7 天未提，按天 ×0.95），低于下限则移除 */
+  /**
+   * 惰性衰减：durable 永不衰减；current 按 s·2^(-Δt/HL) 衰减。
+   * 跌破 FREEZE 线 → 冻结（**不删除**，保留可追溯）；未冻结的不动。
+   * 返回新冻结的数量。
+   */
   decayInterests(now = Date.now()): number {
-    let removed = 0;
-    for (const e of [...this.data.interests]) {
+    let frozen = 0;
+    for (const e of this.data.interests) {
+      const kind = e.kind ?? 'current';
+      if (kind === 'durable') continue;      // 长期品味不衰减
+      if (e.frozen) continue;                 // 已冻结的不再算
       const idle = now - e.lastAt;
-      if (idle <= DECAY_AFTER_MS) continue;
-      const days = Math.floor((idle - DECAY_AFTER_MS) / (24 * 3600_000));
-      e.weight *= Math.pow(DECAY_FACTOR, days);
-      if (e.weight < MIN_INTEREST_WEIGHT) {
-        this.data.interests = this.data.interests.filter((x) => x.topic !== e.topic);
-        removed += 1;
+      if (idle <= 0) continue;
+      // s·2^(-Δt/HL)
+      const strength = this.strengthOf(e) * Math.pow(2, -idle / HALF_LIFE_MS);
+      this.setStrength(e, strength);
+      if (strength < FREEZE_THRESHOLD && this.strengthOf(e) < FREEZE_THRESHOLD) {
+        e.frozen = true;
+        frozen += 1;
       }
     }
-    if (removed > 0) this.log?.(`self: 淡忘 ${removed} 个兴趣`);
+    if (frozen > 0) this.log?.(`self: 冻结 ${frozen} 个兴趣（保留可追溯，未删除）`);
     this.save();
-    return removed;
+    return frozen;
   }
 
-  /** 取权重最高的前 n 个兴趣 */
+  /**
+   * 取强度最高的前 n 个兴趣（**只读，不写回** —— 写回由 touchInterest 负责）。
+   * 排除已冻结的。
+   */
   topInterests(n = 3): SelfInterest[] {
-    return [...this.data.interests].sort((a, b) => b.weight - a.weight).slice(0, n);
+    return this.data.interests
+      .filter((i) => !i.frozen)
+      .sort((a, b) => this.strengthOf(b) - this.strengthOf(a))
+      .slice(0, Math.min(n, MAX_ACTIVE_INTERESTS));
+  }
+
+  /** 全部未冻结兴趣数量（用于"活跃兴趣上限"检查） */
+  activeInterestCount(): number {
+    return this.data.interests.filter((i) => !i.frozen).length;
   }
 
   /** 记录一次冲浪成果 */
