@@ -10,9 +10,39 @@
  * - budget.markReplied 保持对全部消息生效（社交层"理你了"不限于唤醒消息）
  * - memory.touch（涨 interactions、建账）只在醒后执行，防虚高
  */
+import { appendFileSync } from 'node:fs';
 import type { Middleware, MiddlewareContext } from '@tencent-connect/qqbot-nodejs';
 import type { PersonaService } from '../persona/service.ts';
 import type { Logger } from '../types.ts';
+
+/** 诊断：记录每条群/私聊消息的唤醒判定 + 附件情况（排查"图片收不到"） */
+function logWakeDbg(sp: string, key: string, msg: any, decision: any, extra: string): void {
+  try {
+    const atts = (msg.attachments ?? []) as Array<Record<string, unknown>>;
+    appendFileSync(
+      '/root/.dsh-qqbot/debug-wakegate.jsonl',
+      `${JSON.stringify({
+        t: new Date().toISOString(),
+        stage: sp,
+        key,
+        kind: msg.kind,
+        content: String(msg.content ?? '').slice(0, 100),
+        msgType: msg.msgType,
+        attachmentsCount: atts.length,
+        attachments: atts.map((a) => ({
+          ct: a.content_type,
+          fn: a.filename,
+          size: a.size,
+          url: String(a.url ?? '').slice(0, 100),
+        })),
+        decision,
+        extra,
+      })}\n`,
+    );
+  } catch {
+    /* 诊断失败不影响主流程 */
+  }
+}
 
 export function personaWakeGate(
   persona: PersonaService,
@@ -40,10 +70,25 @@ export function personaWakeGate(
             isAtMe: ctx.state.mention?.wasMentioned === true,
           })
         : { wake: true, reason: 'c2c' as string };
-      if (!decision.wake) {
+      logWakeDbg('decision', key, msg, decision, `mentioned=${ctx.state.mention?.wasMentioned === true} implicit=${ctx.state.mention?.implicit === true}`);
+
+      // 带附件的消息：只有在"明确冲着 bot 来"时才放行，避免把群友闲聊的图也收进库。
+      // 判定口径（与唤醒口径一致）：
+      //   - c2c 私聊：恒算（decision.wake 已为 true）
+      //   - 群聊：@了小羽 / 文本含"小羽" / 回复小羽的消息 / 提问
+      // 纯图片消息 content 为空，shouldWake 只按文本判会误判"潜水"→ctx.stop()→附件不下载→
+      // agent 永远收不到图。所以这里用"是否冲 bot 说"作为放行条件，而不是"有附件就放"。
+      const addressedToBot =
+        decision.wake
+        || (ctx.state.mention?.wasMentioned === true)
+        || (ctx.state.mention?.implicit === true);
+      if (!addressedToBot) {
         logger.debug(`persona: wake-gate stop ${key}`);
         ctx.stop(`persona:not-woken`);
         return;
+      }
+      if (decision.wake === false) {
+        logger.debug(`persona: wake-gate pass ${key} reason=addressed-to-bot`);
       }
       logger.debug(`persona: wake-gate pass ${key} reason=${decision.reason}`);
       // 醒后才涨互动计数（m1①），并记录本次唤醒（潜水状态机消费 lastWakeAt）
