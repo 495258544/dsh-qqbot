@@ -213,14 +213,20 @@ export class PersonaService {
     return out;
   }
 
-  /** P6：时间感上下文——"几点了 / 周几"，让人格有现实锚点（今日起这么早？这种话需此）
-   *  只注入时间，不注入会话历史；距上次对话由调用方另加（本方法无会话访问权）。 */
-  static timeSection(now: Date = new Date()): { name: string; order: number; text: string } | undefined {
+  /** P6：时间感上下文——"几点了 / 周几 / 距上次聊了多久"，给人格现实锚点。
+   *  距上次由调用方传入 lastActivityAt（ms）；缺省则不拼该句。 */
+  static timeSection(now: Date = new Date(), lastActivityAt?: number): { name: string; order: number; text: string } | undefined {
     const week = ['日', '一', '二', '三', '四', '五', '六'][now.getDay()];
+    const hhmm = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
+    let mindist = '';
+    if (lastActivityAt) {
+      const mins = Math.max(0, Math.round((now.getTime() - lastActivityAt) / 60000));
+      if (mins >= 1) mindist = ` · 距上次聊了约 ${mins >= 60 ? `${Math.floor(mins / 60)}小时${mins % 60 ? `${mins % 60}分` : ''}` : `${mins}分`}`;
+    }
     return {
       name: 'qqbot:persona-clock',
       order: 63,
-      text: `[当前时间 ${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')} · 星期${week}]`,
+      text: `[当前时间 ${hhmm} · 星期${week}${mindist}]`,
     };
   }
 

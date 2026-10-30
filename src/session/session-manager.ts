@@ -166,7 +166,7 @@ export class SessionManager {
       ) ?? [];
       // P6：时间感锚点（几人现在/周几）拼在日记之前
       if (this.persona) {
-        const clock = PersonaService.timeSection();
+        const clock = PersonaService.timeSection(new Date(), record.lastActivity);
         if (clock) personaSections.push(clock);
       }
 
