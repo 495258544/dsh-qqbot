@@ -48,11 +48,20 @@ export class Waker {
   private readonly keywords: string[];
   private readonly defaultProbability: number;
   private readonly configs = new Map<string, WakeConfig>();
+  /** 唤醒后保持"活跃"的时长（毫秒）。活跃期内即使没被 @ 也照常对话。 */
+  private readonly activeWindowMs: number;
 
-  constructor(opts: { names?: string[]; keywords?: string[]; ownerIds?: string[]; probability?: number } = {}) {
+  constructor(opts: {
+    names?: string[];
+    keywords?: string[];
+    ownerIds?: string[];
+    probability?: number;
+    activeWindowMs?: number;
+  } = {}) {
     this.names = (opts.names ?? []).filter(Boolean);
     this.keywords = (opts.keywords ?? []).filter(Boolean);
     this.defaultProbability = opts.probability ?? 0.05;
+    this.activeWindowMs = opts.activeWindowMs ?? 10 * 60 * 1000;
   }
 
   /** 给某个会话设置唤醒配置 */
@@ -85,11 +94,27 @@ export class Waker {
     return Date.now() < c.until;
   }
 
-  /** 把它从潜水里叫起来 */
+  /**
+   * 把它从潜水里叫起来，并进入「活跃」状态一段时间。
+   * 活跃期内（activeWindowMs）即使没被 @ 也照常对话，超时自动回潜水。
+   * （修复：原实现只写 lastWakeAt 不改 mode，导致状态机形同虚设）
+   */
   wake(key: string): void {
     const c = this.getConfig(key);
-    c.lastWakeAt = Date.now();
+    const now = Date.now();
+    c.mode = 'active';
+    c.infinite = false;
+    c.until = now + this.activeWindowMs;
+    c.lastWakeAt = now;
     c.wakeCount = (c.wakeCount ?? 0) + 1;
+  }
+
+  /** 现在是否处于活跃对话期（被 @ 过且在窗口内） */
+  isActive(key: string): boolean {
+    const c = this.getConfig(key);
+    if (c.mode !== 'active') return false;
+    if (c.infinite) return true;
+    return Date.now() < c.until;
   }
 
   /**
@@ -111,9 +136,10 @@ export class Waker {
     return removed;
   }
 
-  /** 让它继续潜水（可以指定潜多久） */
+  /** 让它继续潜水（可以指定潜多久）。立即退出活跃态。 */
   dive(key: string, ms = 0): void {
     const c = this.getConfig(key);
+    c.mode = 'diving';
     c.infinite = !ms;
     c.until = ms ? Date.now() + ms : 0;
   }

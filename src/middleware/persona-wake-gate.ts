@@ -77,19 +77,18 @@ export function personaWakeGate(
       // 因此叠加一条「对话窗口」规则：某个会话最近被唤醒过（默认 15 分钟内），
       // 同一会话里后续的带附件消息就算冲 bot 来的——用户先 @ / 喊小羽一句，
       // 小羽回复后，紧接着单独发图即可被收下。
-      const cfg = waker.getConfig(key) as { lastWakeAt?: number };
-      const windowMs = 15 * 60 * 1000;
-      const inChatWindow =
-        typeof cfg.lastWakeAt === 'number' && Date.now() - cfg.lastWakeAt < windowMs;
+      // 活跃对话期（被 @ 后 10 分钟）：期间即使没 @ 也照常对话，不打断话头
+      const inChatWindow = waker.isActive(key);
       const hasAttachments = (msg.attachments?.length ?? 0) > 0;
 
       const addressedToBot =
         decision.wake
         || (ctx.state.mention?.wasMentioned === true)
         || (ctx.state.mention?.implicit === true)
+        // 活跃期内（刚跟她说上话）→ 继续对话
+        || inChatWindow
         // 对话窗口内 + 带附件：视为正在跟 bot 交流时发的图
-        || (inChatWindow && hasAttachments
-        );
+        || (inChatWindow && hasAttachments);
       // 关键：带附件的消息一律放行（让 attachmentProcessor 下载并归档），
       // 但"非唤醒"的打上 collectOnly 标记，下游只归档不回复（用户选择：不打扰）。
       // 同时把下载结果存进待领缓存，供"先发图、后 @ 我"场景在唤醒时一并领走。
