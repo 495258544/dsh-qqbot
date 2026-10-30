@@ -9,5 +9,34 @@ export { Humanizer } from './humanize.ts';
 export type { HumanizerOptions } from './humanize.ts';
 export { createOwnLife } from './own-life.ts';
 export type { OwnLifeHandle, OwnLifeOptions } from './own-life.ts';
+export {
+  createScreenWatch,
+  createBridgeProbe,
+  checkForegroundApp,
+  containsSensitiveText,
+  isNotificationShade,
+  focusDiverged,
+  matchInterests,
+  inActiveHours,
+  parseDeviceOverview,
+  parseWindowFocus,
+  parseDumpContent,
+  unwrapBridgeResult,
+  renderScreenNudge,
+} from './screen-watch.ts';
+export type {
+  ScreenProbe,
+  ScreenWatchHandle,
+  ScreenWatchOptions,
+  ScreenWatchState,
+  ScreenTickResult,
+  ScreenNudge,
+  ScreenDeliverResult,
+  DeviceOverview,
+  WindowFocus,
+  DumpContent,
+  InterestMatch,
+  PrivacyVerdict,
+} from './screen-watch.ts';
 export { PersonaService, ProactiveBudget } from './service.ts';
 export { registerPersonaTools } from './tools.ts';

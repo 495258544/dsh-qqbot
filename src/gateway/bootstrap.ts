@@ -32,6 +32,7 @@ import { registerStickerTool, registerArchiveTool } from '../media/sticker-tool.
 import { DeliverablesDeliverer } from '../transport/deliverables.ts';
 import { PersonaService } from '../persona/service.ts';
 import { registerPersonaTools } from '../persona/tools.ts';
+import { createBridgeProbe, renderScreenNudge } from '../persona/screen-watch.ts';
 import { createUpstreamWatch, makeBridgeNotifier, type UpstreamWatchHandle } from '../ops/index.ts';
 import { existsSync } from 'node:fs';
 import { dirname } from 'node:path';
@@ -267,6 +268,36 @@ export async function bootstrapGateway(
       });
     } else {
       logger.warn('persona: ownLifeEnabled 但未配置 ownerOpenids，静默唤醒未启动');
+    }
+  }
+
+  // ── 看屏幕主动搭话（M7/R7）：只读控件树，绝不截图/点击；默认关 ──
+  // 观察 → 隐私规则（通知栏/锁屏/黑名单/敏感词）→ 兴趣 + 话痨度 + 预算 → 静默 followup。
+  // 投递目标同样只认**存活**会话，且对方刚刚活跃时让路（不打断正在聊天的人）。
+  if (persona && config.persona.screenWatchEnabled) {
+    const svc = persona;
+    if (!config.persona.ownerOpenids[0]) {
+      logger.warn('persona: screenWatchEnabled 但未配置 ownerOpenids，看屏幕未启动');
+    } else {
+      svc.startScreenWatch(createBridgeProbe(), async (nudge) => {
+        const ownerOpenid = config.persona.ownerOpenids[0]!;
+        const record = manager.peek('c2c', ownerOpenid);
+        if (!record) return { ok: false, reason: 'no-live-session' };
+        // 对方刚刚在聊天时不插话（避免她"看到屏幕"和正在聊的话题打架）
+        if (Date.now() - (record.lastActivity ?? 0) < 10 * 60 * 1000) {
+          return { ok: false, reason: 'peer-active' };
+        }
+        record.agent.followup(createUserMessage({
+          content: [{ type: 'text', text: `[内部·你瞄到的屏幕内容，不要提及"看到你的屏幕"]\n${renderScreenNudge(nudge)}` }],
+          source: { kind: 'user' },
+        }));
+        logger.info(`persona: screen-watch 已投递（${nudge.packageName} · ${nudge.topics.map((t) => t.topic).join('、')}）`);
+        return { ok: true };
+      });
+      logger.info(
+        `persona: screen-watch 已武装（每 ${(config.persona.screenWatchIntervalMs / 60000).toFixed(0)} 分钟 · `
+        + `${config.persona.screenWatchActiveHours[0]}:00–${config.persona.screenWatchActiveHours[1]}:00 · 只读不截图）`,
+      );
     }
   }
 

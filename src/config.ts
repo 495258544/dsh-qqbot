@@ -104,6 +104,14 @@ export interface PersonaConfig {
   surfMaxTopics: number;
   /** 是否抓正文（深度模式，更慢但内容更实） */
   surfDeep: boolean;
+  /** 看手机屏幕主动搭话（M7/R7）：默认关 */
+  screenWatchEnabled: boolean;
+  /** 允许观察的 App 包名白名单（空 = 不限制；支付/聊天/系统界面的硬黑名单始终生效） */
+  screenWatchAllowedApps: string[];
+  /** 观察间隔(ms)，默认 30 分钟 */
+  screenWatchIntervalMs: number;
+  /** 观察时段 [起, 止)（小时，默认 [9,23)，避免半夜打扰） */
+  screenWatchActiveHours: [number, number];
   /** 主动消息：每 peer 每天上限 */
   maxProactivePerDay: number;
   /** 主动消息：两次之间最小间隔(ms) */
@@ -189,6 +197,16 @@ export interface ImQQBotConfig {
   persona: PersonaConfig;
   /** 运维巡检（独立模块，与 persona 无关）：上游同步检查 */
   ops: OpsConfig;
+}
+
+/** 观察时段归一：取前两项、夹到 0~23、缺项回落默认 [9,23)。
+ *  形状统一成 [number, number]，下游 inActiveHours 才不用到处判空。 */
+function activeHoursOf(v: number[] | undefined): [number, number] {
+  const clamp = (n: unknown, fallback: number): number => {
+    const x = typeof n === 'number' && Number.isFinite(n) ? Math.floor(n) : fallback;
+    return Math.max(0, Math.min(23, x));
+  };
+  return [clamp(v?.[0], 9), clamp(v?.[1], 23)];
 }
 
 /** 访问控制子 Schema（独立导出：config 路由的服务端校验复用） */
@@ -287,6 +305,10 @@ export const ConfigSchema: Schema<ImQQBotConfig> = Schema.object({
     surfToHour: Schema.number().default(7).description('冲浪时段止（小时，默认7点）'),
     surfMaxTopics: Schema.number().default(2).description('每轮冲浪最多几个兴趣话题'),
     surfDeep: Schema.boolean().default(false).description('冲浪时抓正文（更慢但内容更实）'),
+    screenWatchEnabled: Schema.boolean().default(false).description('看手机屏幕主动搭话（M7/R7：只读控件树，绝不截图/点击；默认关）'),
+    screenWatchAllowedApps: Schema.array(Schema.string()).default([]).description('允许观察的 App 包名白名单（支持 com.example.* 通配；空=不限制。支付/聊天/系统界面的硬黑名单始终生效，不可放宽）'),
+    screenWatchIntervalMs: Schema.number().default(30 * 60 * 1000).description('观察间隔(ms)，默认 30 分钟'),
+    screenWatchActiveHours: Schema.transform(Schema.array(Schema.number()), (v) => activeHoursOf(v)).default([9, 23] as [number, number]).description('观察时段 [起,止)（小时），默认 [9,23)：半夜不看'),
     maxProactivePerDay: Schema.number().default(2).description('主动消息每 peer 每天上限'),
     proactiveMinGapMs: Schema.number().default(2 * 3600 * 1000).description('主动消息两次之间最小间隔(ms)'),
   }).default({
@@ -313,6 +335,10 @@ export const ConfigSchema: Schema<ImQQBotConfig> = Schema.object({
     surfToHour: 7,
     surfMaxTopics: 2,
     surfDeep: false,
+    screenWatchEnabled: false,
+    screenWatchAllowedApps: [],
+    screenWatchIntervalMs: 30 * 60 * 1000,
+    screenWatchActiveHours: [9, 23],
     maxProactivePerDay: 2,
     proactiveMinGapMs: 2 * 3600 * 1000,
   }).description('活人感 persona 配置（移植自 ai-companion-kit，默认关）'),

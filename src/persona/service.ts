@@ -16,8 +16,10 @@ import { Role } from './role.ts';
 import { Waker } from './wake.ts';
 import { SelfProfileService } from './self.ts';
 import { VoiceService } from './voice.ts';
+import { SelfNoteService } from './self-note.ts';
 import { Humanizer } from './humanize.ts';
 import { createOwnLife, type OwnLifeHandle, type OwnLifeDeliverResult } from './own-life.ts';
+import { createScreenWatch, type ScreenWatchHandle, type ScreenWatchOptions, type ScreenNudge, type ScreenDeliverResult } from './screen-watch.ts';
 import type { PersonaConfig } from '../config.ts';
 import type { Logger } from '../types.ts';
 
@@ -156,9 +158,13 @@ export class PersonaService {
   public readonly self: SelfProfileService;
   /** 她的口癖（M11：从"被接住的话"里长出来的说话习惯） */
   public readonly voice: VoiceService;
+  /** 她对自己的认识（M16：L4 层，她自己写的成长叙述） */
+  public readonly selfNote: SelfNoteService;
   public readonly humanizer: Humanizer;
   public readonly budget: ProactiveBudget;
   public ownLife: OwnLifeHandle | undefined;
+  /** 看屏幕观察（M7/R7，默认关；只在 screenWatchEnabled 时存在） */
+  public screenWatch: ScreenWatchHandle | undefined;
   /** 轮内记账暂存（sessionId → 用户/回复文本），turn/end 配对写流水后清除。
    *  刻意不挂 SessionRecord：deliverables 等既有路径对 record 做深比较 */
   private readonly turnLedger = new Map<string, { user?: string; reply: string; who?: string }>();
@@ -170,6 +176,7 @@ export class PersonaService {
     this.diary = new Diary(path.join(dataDir, 'diary'));
     this.self = new SelfProfileService(dataDir, (m) => logger.info(m));
     this.voice = new VoiceService(dataDir, (m) => logger.info(m));
+    this.selfNote = new SelfNoteService(dataDir, (m) => logger.info(m));
     if (config.roleCardPath) {
       this.role = new Role({ cardPath: config.roleCardPath, maxChars: config.roleMaxChars });
       const l = this.role.lint();
@@ -235,6 +242,10 @@ export class PersonaService {
     }
     const diaryCtx = this.diary.context(3);
     if (diaryCtx) out.push({ name: 'qqbot:persona-diary', order: 64, text: diaryCtx });
+
+    // M16 L4 selfNote：她对自己的认识（只在有内容时注入）
+    const selfSec = this.selfNote.renderSection();
+    if (selfSec) out.push({ name: 'qqbot:persona-selfnote', order: 65, text: selfSec });
     return out;
   }
 
@@ -271,8 +282,35 @@ export class PersonaService {
     this.ownLife.start();
   }
 
+  /**
+   * 启动看屏幕定时观察（M7/R7）。
+   * deliver 由 bootstrap 注入：只向**存活的** owner 会话静默 followup，
+   * 不发 QQ 消息；预算闸与话痨度闸都在 screen-watch 内部过。
+   */
+  startScreenWatch(probe: ScreenWatchOptions['probe'], deliver: (nudge: ScreenNudge) => Promise<ScreenDeliverResult>): ScreenWatchHandle | undefined {
+    const cfg = this.deps.config;
+    if (!cfg.screenWatchEnabled) return undefined;
+    const ownerId = cfg.ownerOpenids[0] ?? 'owner';
+    this.screenWatch = createScreenWatch({
+      probe,
+      deliver,
+      interests: () => this.self.topInterests(8).map((i) => ({ topic: i.topic, weight: i.strength ?? i.weight })),
+      chattiness: () => this.self.chattiness(),
+      allowProactive: () => this.budget.allow(ownerId),
+      markProactive: () => this.budget.recordProactive(ownerId),
+      allowedApps: cfg.screenWatchAllowedApps,
+      intervalMs: cfg.screenWatchIntervalMs,
+      activeHours: cfg.screenWatchActiveHours,
+      statePath: path.join(this.deps.dataDir, 'state', 'screen-watch.json'),
+      log: (m) => this.deps.logger.info(`persona: screen-watch ${m}`),
+    });
+    this.screenWatch.start();
+    return this.screenWatch;
+  }
+
   stop(): void {
     this.ownLife?.stop();
+    this.screenWatch?.stop();
     if (this.pruneTimer) clearInterval(this.pruneTimer);
   }
 
