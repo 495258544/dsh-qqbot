@@ -72,23 +72,38 @@ export function personaWakeGate(
         : { wake: true, reason: 'c2c' as string };
       logWakeDbg('decision', key, msg, decision, `mentioned=${ctx.state.mention?.wasMentioned === true} implicit=${ctx.state.mention?.implicit === true}`);
 
-      // 带附件的消息：只有在"明确冲着 bot 来"时才放行，避免把群友闲聊的图也收进库。
-      // 判定口径（与唤醒口径一致）：
-      //   - c2c 私聊：恒算（decision.wake 已为 true）
-      //   - 群聊：@了小羽 / 文本含"小羽" / 回复小羽的消息 / 提问
-      // 纯图片消息 content 为空，shouldWake 只按文本判会误判"潜水"→ctx.stop()→附件不下载→
-      // agent 永远收不到图。所以这里用"是否冲 bot 说"作为放行条件，而不是"有附件就放"。
+      // 「是不是冲 bot 说的」判定。手机端无法同时 @ + 发图，纯图片消息 content 为空，
+      // shouldWake 只按文本判会误判"潜水"→ctx.stop()→附件不下载→agent 永远收不到图。
+      // 因此叠加一条「对话窗口」规则：某个会话最近被唤醒过（默认 15 分钟内），
+      // 同一会话里后续的带附件消息就算冲 bot 来的——用户先 @ / 喊小羽一句，
+      // 小羽回复后，紧接着单独发图即可被收下。
+      const cfg = waker.getConfig(key) as { lastWakeAt?: number };
+      const windowMs = 15 * 60 * 1000;
+      const inChatWindow =
+        typeof cfg.lastWakeAt === 'number' && Date.now() - cfg.lastWakeAt < windowMs;
+      const hasAttachments = (msg.attachments?.length ?? 0) > 0;
+
       const addressedToBot =
         decision.wake
         || (ctx.state.mention?.wasMentioned === true)
-        || (ctx.state.mention?.implicit === true);
-      if (!addressedToBot) {
+        || (ctx.state.mention?.implicit === true)
+        // 对话窗口内 + 带附件：视为正在跟 bot 交流时发的图
+        || (inChatWindow && hasAttachments
+        );
+      // 关键：带附件的消息一律放行（让 attachmentProcessor 下载并归档），
+      // 但"非唤醒"的打上 collectOnly 标记，下游只归档不回复（用户选择：不打扰）。
+      // 同时把下载结果存进待领缓存，供"先发图、后 @ 我"场景在唤醒时一并领走。
+      const stopIt = !addressedToBot && !hasAttachments;
+      if (stopIt) {
         logger.debug(`persona: wake-gate stop ${key}`);
         ctx.stop(`persona:not-woken`);
         return;
       }
       if (decision.wake === false) {
-        logger.debug(`persona: wake-gate pass ${key} reason=addressed-to-bot`);
+        const st = ctx.state as Record<string, unknown>;
+        st.collectOnly = true;
+        st.awaitAttachmentFetch = true; // 交给下游：下载完后存进待领缓存
+        logger.debug(`persona: wake-gate pass ${key} reason=collect-only`);
       }
       logger.debug(`persona: wake-gate pass ${key} reason=${decision.reason}`);
       // 醒后才涨互动计数（m1①），并记录本次唤醒（潜水状态机消费 lastWakeAt）

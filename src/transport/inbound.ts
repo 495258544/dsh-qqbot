@@ -21,6 +21,7 @@ import {
   type MediaKind,
 } from './attachment.ts';
 import { clearGroupHistory } from '../features/history-store.ts';
+import { stashPendingAttachments, takePendingAttachments, pendingKey } from '../features/pending-attachments.ts';
 import type { MiddlewareContext } from '@tencent-connect/qqbot-nodejs';
 
 // ── 类型定义 ──
@@ -109,8 +110,39 @@ export async function handleInbound(
   // （审查 M2：未醒消息不得穿过附件下载/斜杠命令）。此处仅取服务实例备用。
   const persona = manager.persona;
 
+  // ── 只收图模式（非唤醒的带附件消息）──
+  // 附件已在 attachmentProcessor 里下载并归档到 media.archiveDir。
+  // 这里把它们存进"待领缓存"，等同一人随后唤醒 bot 时一并交给 agent
+  // （手机端无法同时 @ + 发图，用户常先发图再补一句 @）。
+  // 同时不进入 agent 回复流程，避免小羽对每张图都回话（用户要求：不打扰）。
+  if ((mwState as Record<string, unknown>).collectOnly === true) {
+    const files = mwState.downloadedFiles ?? [];
+    if (files.length > 0) {
+      stashPendingAttachments(pendingKey(scope, peerId, msg.senderId), files);
+    }
+    logger.info(`收集模式: scope=${scope} peerId=${peerId} 附件 ${files.length} 个已归档待领`);
+    return;
+  }
+
+  // ── 唤醒消息：领走同一人刚发但没被唤醒的图（"先发图、后 @" 场景）──
+  let carriedFiles: DownloadedFile[] = [];
+  {
+    carriedFiles = takePendingAttachments(pendingKey(scope, peerId, msg.senderId));
+    if (carriedFiles.length > 0) {
+      mwState.downloadedFiles = [...(mwState.downloadedFiles ?? []), ...carriedFiles];
+      logger.info(`领走先前 ${carriedFiles.length} 个待领附件 → 本次唤醒一并交给 agent`);
+    }
+  }
+
   // ── 组装 agentBody（下载结果经 mwState.downloadedFiles 提供） ──
-  const agentBody = assembleAgentBody(msg, mwState, scope, logger);
+  let agentBody = assembleAgentBody(msg, mwState, scope, logger);
+
+  // 把"先发的图"补进 agentBody，否则 agent 不知道这几张图的存在
+  if (carriedFiles.length > 0) {
+    const lines = carriedFiles.map((f) => `- image: ${f.localPath}`).join('\n');
+    const note = `[对方在你被唤醒前刚发的图片]\n${lines}\n`;
+    agentBody = agentBody === null ? note : `${note}${agentBody}`;
+  }
 
   if (!agentBody) return;
 
