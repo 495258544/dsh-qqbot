@@ -22,6 +22,7 @@ import {
 } from './attachment.ts';
 import { clearGroupHistory } from '../features/history-store.ts';
 import { stashPendingAttachments, takePendingAttachments, pendingKey } from '../features/pending-attachments.ts';
+
 import type { MiddlewareContext } from '@tencent-connect/qqbot-nodejs';
 
 // ── 类型定义 ──
@@ -135,7 +136,9 @@ export async function handleInbound(
   }
 
   // ── 组装 agentBody（下载结果经 mwState.downloadedFiles 提供） ──
-  let agentBody = assembleAgentBody(msg, mwState, scope, logger);
+  // M13 抗漂移：硬约束锚点（只在 persona 启用且角色卡存在时注入）
+  const anchor = manager.persona?.role?.renderAnchor();
+  let agentBody = assembleAgentBody(msg, mwState, scope, logger, anchor);
 
   // 把"先发的图"补进 agentBody，否则 agent 不知道这几张图的存在
   if (carriedFiles.length > 0) {
@@ -232,6 +235,7 @@ function assembleAgentBody(
   state: MiddlewareState,
   scope: ChatScope,
   logger: Logger,
+  anchor?: string,
 ): string | null {
   const isGroup = scope === 'group';
   const wasMentioned = state.mention?.wasMentioned ?? false;
@@ -246,7 +250,7 @@ function assembleAgentBody(
   const dynamicCtx = buildDynamicCtx(msg, state);
 
   const base = dynamicCtx ? `${dynamicCtx}${userMessage}` : userMessage;
-  const agentBody = buildAgentBody(base, state.history, isGroup, wasMentioned);
+  const agentBody = buildAgentBody(base, state.history, isGroup, wasMentioned, anchor);
 
   return agentBody;
 }
@@ -414,9 +418,11 @@ function buildAgentBody(
   history: HistoryEntry[] | undefined,
   isGroup: boolean,
   wasMentioned: boolean,
+  anchor?: string,
 ): string {
+  const tail = anchor ? `\n${anchor}` : '';
   if (!isGroup || !wasMentioned || !history || history.length === 0) {
-    return base;
+    return base + tail;
   }
 
   const historyLines = history.map(h => {
@@ -431,6 +437,8 @@ function buildAgentBody(
     '[Chat history ends]',
     '[Current message]',
     base,
+    // M13 抗漂移锚点：放在**历史之后、贴近生成点**的位置（CCv3 post_history_instructions）
+    ...(anchor ? ['', anchor] : []),
   ].join('\n');
 }
 

@@ -106,13 +106,16 @@ describe('Role · 角色卡', () => {
     expect(l.warn.some((w) => w.includes('助手'))).toBe(true);
   });
 
-  it('renderSection 超限截断且带基本规矩', () => {
+  it('renderSection 超限截断（M13 后只放角色卡，硬约束移到 anchor）', () => {
     const card = path.join(dir, 'role.md');
     fs.writeFileSync(card, 'x'.repeat(500));
     const role = new Role({ cardPath: card, maxChars: 100 });
     const s = role.renderSection();
     expect(s.length).toBeLessThan(500);
-    expect(s).toContain('基本规矩');
+    // M13：BASE_RULES 不再塞进 renderSection，改由 renderAnchor 在历史之后注入
+    expect(s).not.toContain('基本规矩');
+    expect(role.renderAnchor()).toContain('此刻提醒');
+    expect(role.renderAnchor()).toContain('不是 AI 助手');
   });
 });
 
