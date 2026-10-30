@@ -143,7 +143,19 @@ function pickFromIndex(idx: StickerIndex, args: PickStickerArgs): StickerEntry[]
     if (pa !== pb) return pb - pa;
     return Math.random() - 0.5;
   });
-  return pool.slice(0, count);
+
+  // 去重：同一张图可能以不同文件名存了多份（微博带 _后缀 的重复导出）。
+  // 用「文件名主干去掉尾缀 _xxxxxx」作为指纹，避免一次返回两张一样的图。
+  const seen = new Set<string>();
+  const out: StickerEntry[] = [];
+  for (const s of pool) {
+    const base = (s.path.split('/').pop() ?? '').replace(/\.\w+$/, '').replace(/_[0-9a-f]{4,}$/i, '');
+    if (seen.has(base)) continue;
+    seen.add(base);
+    out.push(s);
+    if (out.length >= count) break;
+  }
+  return out;
 }
 
 /** 注册 qq_pick_sticker（tools 服务缺失时优雅降级） */
