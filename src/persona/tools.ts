@@ -374,5 +374,86 @@ export function registerPersonaTools(
     },
   });
 
-  logger.info('im-qqbot: persona 工具已注册（日记/记忆/称呼/兴趣/需求，共 8 个）');
+// ── 口癖表态：她可以接受或拒绝学到的新口头禅 ──
+  tools.register({
+    name: 'qq_decide_voice',
+    description:
+      '系统从你被接住的话里提炼出一些说话习惯，你来表态接不接受。'
+      + '喜欢的就接受（以后聊天会自然带上），不像你的就拒绝。',
+    parameters: {
+      type: 'object',
+      properties: {
+        id: { type: 'string', description: '口癖 id（从 qq_list_voice 查）' },
+        accept: { type: 'boolean', description: 'true=接受，false=拒绝' },
+      },
+      required: ['id', 'accept'],
+      additionalProperties: false,
+    },
+    output: {
+      schema: {
+        type: 'object',
+        properties: { ok: { type: 'boolean' }, activeCount: { type: 'integer' } },
+        required: ['ok', 'activeCount'],
+        additionalProperties: false,
+      },
+      render: (_a: unknown, v: unknown): ContentBlock[] => {
+        const r = v as { ok: boolean; activeCount: number };
+        return [{ type: 'text', text: r.ok ? `已记录，现有 ${r.activeCount} 条口癖` : '记录失败' }];
+      },
+    },
+    async execute(args: unknown): Promise<Record<string, unknown>> {
+      const a = args as { id: string; accept: boolean };
+      const ok = persona.voice.decideHabit(a.id, a.accept);
+      return { ok, activeCount: persona.voice.activeHabits().length };
+    },
+  });
+
+  // ── 查看口癖 ──
+  tools.register({
+    name: 'qq_list_voice',
+    description: '查看你当前的说话习惯（候选/生效中）。',
+    parameters: { type: 'object', properties: {}, required: [], additionalProperties: false },
+    output: {
+      schema: {
+        type: 'object',
+        properties: {
+          habits: {
+            type: 'array',
+            items: {
+              type: 'object',
+              properties: {
+                id: { type: 'string' },
+                situation: { type: 'string' },
+                style: { type: 'string' },
+                state: { type: 'string' },
+                count: { type: 'integer' },
+              },
+              required: ['id', 'situation', 'style', 'state', 'count'],
+              additionalProperties: false,
+            },
+          },
+        },
+        required: ['habits'],
+        additionalProperties: false,
+      },
+      render: (_a: unknown, v: unknown): ContentBlock[] => {
+        const r = v as { habits: { situation: string; style: string; state: string; count: number }[] };
+        if (r.habits.length === 0) return [{ type: 'text', text: '还没有形成说话习惯。' }];
+        return [{ type: 'text', text: r.habits.map((h) => `· [${h.state}] 当"${h.situation}"时用"${h.style}"（${h.count}次）`).join('\n') }];
+      },
+    },
+    async execute(): Promise<Record<string, unknown>> {
+      return {
+        habits: persona.voice.snapshot().habits.map((h) => ({
+          id: h.id,
+          situation: h.situation,
+          style: h.style,
+          state: h.state,
+          count: h.count,
+        })),
+      };
+    },
+  });
+
+  logger.info('im-qqbot: persona 工具已注册（日记/记忆/称呼/兴趣/需求/口癖，共 10 个）');
 }
