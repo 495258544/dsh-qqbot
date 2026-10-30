@@ -10,6 +10,7 @@
  */
 import type { ContentBlock } from '@deepseek-ai/dsh-llm';
 import { createUserMessage } from '@deepseek-ai/dsh-llm';
+import { appendFileSync } from 'node:fs';
 import type { SessionManager } from '../session/index.ts';
 import type { ImQQBotConfig } from '../config.ts';
 import type { ChatScope, Logger, QuotedAttachment, RawAttachment, ReplyTarget } from '../types.ts';
@@ -114,6 +115,31 @@ export async function handleInbound(
   if (!agentBody) return;
 
   logger.info(`Processing: scope=${scope} peerId=${peerId} body="${agentBody.slice(0, 200)}"`);
+
+  // ── 诊断：把进来的消息（含附件/下载结果）追加到调试文件，便于排查"图片收不到" ──
+  try {
+    const dbg = '/root/.dsh-qqbot/debug-inbound.jsonl';
+    const atts = (msg.attachments ?? []).map((a) => ({
+      content_type: a.content_type,
+      filename: a.filename,
+      size: a.size,
+      url: (a.url ?? '').slice(0, 120),
+    }));
+    appendFileSync(
+      dbg,
+      `${JSON.stringify({
+        t: new Date().toISOString(),
+        scope,
+        peerId,
+        senderId: msg.senderId,
+        attachments: atts,
+        downloaded: (mwState.downloadedFiles ?? []).map((d) => d.localPath),
+        bodyHead: agentBody.slice(0, 400),
+      })}\n`,
+    );
+  } catch {
+    /* 诊断失败不影响主流程 */
+  }
 
   // ── 获取或创建会话 ──
   let record;
