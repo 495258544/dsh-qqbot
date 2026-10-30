@@ -21,6 +21,8 @@ export interface MediaConfig {
   maxMB: number;
   /** 富媒体存活时长（小时，TTL），默认 24，0 = 永不过期 */
   ttlHours: number;
+  /** 图片自动归档目录（空 = 不归档；用于把群聊里合适的图攒成表情素材） */
+  archiveDir: string;
 }
 
 export interface VisionConfig {
@@ -182,10 +184,12 @@ export const ConfigSchema: Schema<ImQQBotConfig> = Schema.object({
     enabled: Schema.boolean().default(true).description('是否启用富媒体理解（图片/视频下载 + 工具分析）'),
     maxMB: Schema.number().default(200).description('富媒体下载大小上限(MB)'),
     ttlHours: Schema.number().default(24).description('富媒体存活时长(小时)，0=永不过期'),
+    archiveDir: Schema.string().default('').description('群聊/私聊图片自动归档目录（留空=不归档；填 /sdcard/表情包/_群聊收集 可攒表情素材）'),
   }).default({
     enabled: true,
     maxMB: 200,
     ttlHours: 24,
+    archiveDir: '',
   }).description('富媒体理解配置'),
   vision: Schema.object({
     enabled: Schema.boolean().default(false).description('是否启用视觉理解（qqbot_describe_image 工具）'),

@@ -6,8 +6,9 @@
  * 下载目录固定为 ~/.dsh-qqbot/media，
  * 文件名用时间戳+随机数防重名，不依赖 agent cwd，便于 qqbot_describe_image / tool-fs 等工具稳定访问。
  */
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, writeFileSync, copyFileSync, existsSync, readFileSync, readdirSync } from 'node:fs';
 import { basename, extname, join, sep } from 'node:path';
+import { createHash } from 'node:crypto';
 import { randomBytes } from 'node:crypto';
 import * as dns from 'node:dns';
 import type { Logger, RawAttachment } from '../types.ts';
@@ -27,6 +28,58 @@ export interface DownloadedFile {
   contentType: 'image' | 'video' | 'file';
   /** 本地绝对路径 */
   localPath: string;
+}
+
+/** 归档目录内的 md5 -> 路径 索引（懒加载，避免每次扫描） */
+let archiveIndex: Map<string, string> | null = null;
+
+/** 懒加载归档目录的 md5 索引 */
+function getArchiveIndex(dir: string): Map<string, string> {
+  if (archiveIndex) return archiveIndex;
+  const idx = new Map<string, string>();
+  try {
+    if (existsSync(dir)) {
+      for (const name of readdirSync(dir)) {
+        const p = join(dir, name);
+        try {
+          const h = createHash('md5').update(readFileSync(p)).digest('hex');
+          idx.set(h, p);
+        } catch {
+          /* 读不了就跳过 */
+        }
+      }
+    }
+  } catch {
+    /* 目录不可用则索引为空 */
+  }
+  archiveIndex = idx;
+  return idx;
+}
+
+/**
+ * 把下载好的图片归档到 archiveDir（按 MD5 去重）。
+ * 归档失败不影响主流程，仅记日志。
+ */
+function archiveImage(localPath: string, filename: string, dir: string, logger: Logger): void {
+  try {
+    mkdirSync(dir, { recursive: true });
+    const idx = getArchiveIndex(dir);
+    const buf = readFileSync(localPath);
+    const md5 = createHash('md5').update(buf).digest('hex');
+    if (idx.has(md5)) {
+      logger.debug(`im-qqbot: 归档跳过（重复）${filename}`);
+      return;
+    }
+    // 保留原扩展名；文件名用 md5 前 12 位 + 原名（去重后唯一且可读）
+    const ext = extname(filename) || '.jpg';
+    const stem = basename(filename, ext).replace(/[^\w\u4e00-\u9fa5-]/g, '_').slice(0, 40);
+    const dest = join(dir, `${md5.slice(0, 12)}_${stem}${ext}`);
+    copyFileSync(localPath, dest);
+    idx.set(md5, dest);
+    logger.info(`im-qqbot: 图片已归档 ${filename} → ${dest}`);
+  } catch (err) {
+    logger.warn(`im-qqbot: 图片归档失败 ${filename}: ${err instanceof Error ? err.message : String(err)}`);
+  }
 }
 
 /** 附件归类（QQ 网关的 content_type 是 MIME 类型，如 image/png、video/mp4、audio/silk） */
@@ -183,6 +236,11 @@ export async function downloadMediaAttachments(
       continue; // 下载失败不加入结果，由 buildDynamicCtx 回退为描述
     }
     logger.debug(`im-qqbot: attachment downloaded: ${att.filename} (${formatSize(bytes)}) → ${localPath}`);
+
+    // 群聊/私聊图片自动归档（可选，按 MD5 去重，不影响主流程）
+    if (contentType === 'image' && media.archiveDir) {
+      archiveImage(localPath, att.filename, media.archiveDir, logger);
+    }
 
     results.push({ filename: att.filename, contentType, localPath });
   }
