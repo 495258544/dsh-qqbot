@@ -66,6 +66,24 @@ export interface SelfScreenWatch {
   intervalMs: number;
 }
 
+/** 她想要的功能/需求（会提给用户，被拒后 1 个月可再提） */
+export interface WishRequest {
+  /** 唯一 id */
+  id: string;
+  /** 她想要什么 */
+  wish: string;
+  /** 为什么想要（一句话） */
+  why: string;
+  /** 提出时间 */
+  raisedAt?: number;
+  /** 用户拒绝的时间（0=未拒） */
+  rejectedAt?: number;
+  /** 被拒后多久可再提（默认 30 天） */
+  retryAfterMs: number;
+  /** 状态 */
+  status: 'pending' | 'raised' | 'rejected' | 'accepted';
+}
+
 /** 完整自我画像 */
 export interface SelfProfile {
   names: SelfName[];
@@ -74,6 +92,8 @@ export interface SelfProfile {
   screenWatch: SelfScreenWatch;
   /** 自主冲浪：上次活动时间 */
   lastSurfAt?: number;
+  /** 她想要的功能（提给用户的） */
+  wishes: WishRequest[];
 }
 
 /** 兴趣权重下限，低于则移除 */
@@ -94,6 +114,7 @@ function emptyProfile(): SelfProfile {
     interests: [],
     engagement: { chattiness: 1.0, lastComplainedAt: 0, complaints: 0 },
     screenWatch: { enabled: false, allowedApps: [], intervalMs: 30 * 60 * 1000 },
+    wishes: [],
   };
 }
 
@@ -120,6 +141,7 @@ export class SelfProfileService {
         engagement: { ...base.engagement, ...(raw.engagement ?? {}) },
         screenWatch: { ...base.screenWatch, ...(raw.screenWatch ?? {}) },
         lastSurfAt: raw.lastSurfAt,
+        wishes: Array.isArray(raw.wishes) ? raw.wishes : base.wishes,
       };
     } catch (err) {
       this.log?.(`self: 读取失败，用空画像: ${err instanceof Error ? err.message : String(err)}`);
@@ -297,5 +319,70 @@ export class SelfProfileService {
   /** 当前话痨度 */
   chattiness(): number {
     return this.data.engagement.chattiness;
+  }
+
+  // ───────────── 需求（她想让用户实现的功能） ─────────────
+
+  /** 提出一条需求（每周最多 2 条由调用方限制） */
+  raiseWish(wish: string, why: string): WishRequest {
+    const now = Date.now();
+    const existing = this.data.wishes.find((w) => w.wish === wish);
+    if (existing) {
+      existing.raisedAt = now;
+      existing.status = 'raised';
+      this.save();
+      return existing;
+    }
+    const req: WishRequest = {
+      id: `w${now}`,
+      wish,
+      why,
+      raisedAt: now,
+      rejectedAt: 0,
+      retryAfterMs: 30 * 24 * 3600_000, // 用户确认：被拒后 1 个月可再提
+      status: 'raised',
+    };
+    this.data.wishes.push(req);
+    this.save();
+    return req;
+  }
+
+  /** 用户拒绝某需求 → 记录时间，1 个月后可再提 */
+  rejectWish(id: string): boolean {
+    const w = this.data.wishes.find((x) => x.id === id);
+    if (!w) return false;
+    w.rejectedAt = Date.now();
+    w.status = 'rejected';
+    this.log?.(`self: 需求「${w.wish}」被拒，${Math.round(w.retryAfterMs / 86400000)}天后可再提`);
+    this.save();
+    return true;
+  }
+
+  /** 用户接受某需求 */
+  acceptWish(id: string): boolean {
+    const w = this.data.wishes.find((x) => x.id === id);
+    if (!w) return false;
+    w.status = 'accepted';
+    this.save();
+    return true;
+  }
+
+  /** 当前可以提的需求（未被拒，或已过 1 个月冷静期） */
+  raisableWishes(now = Date.now()): WishRequest[] {
+    return this.data.wishes.filter((w) => {
+      if (w.status === 'accepted') return false;
+      if (w.status === 'rejected') return now - (w.rejectedAt ?? 0) >= w.retryAfterMs;
+      return true;
+    });
+  }
+
+  /** 本周已提过几条（用于限流：每周最多 2 条） */
+  wishesRaisedSince(sinceMs: number): number {
+    return this.data.wishes.filter((w) => (w.raisedAt ?? 0) >= sinceMs).length;
+  }
+
+  /** 全部需求快照 */
+  allWishes(): WishRequest[] {
+    return this.data.wishes;
   }
 }
