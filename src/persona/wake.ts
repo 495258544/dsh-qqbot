@@ -46,14 +46,12 @@ export interface WakeDecision {
 export class Waker {
   private readonly names: string[];
   private readonly keywords: string[];
-  private readonly ownerIds: string[];
   private readonly defaultProbability: number;
   private readonly configs = new Map<string, WakeConfig>();
 
   constructor(opts: { names?: string[]; keywords?: string[]; ownerIds?: string[]; probability?: number } = {}) {
     this.names = (opts.names ?? []).filter(Boolean);
     this.keywords = (opts.keywords ?? []).filter(Boolean);
-    this.ownerIds = (opts.ownerIds ?? []).map(String);
     this.defaultProbability = opts.probability ?? 0.05;
   }
 
@@ -126,8 +124,9 @@ export class Waker {
     const text = String(msg.text ?? '');
     const uid = String(msg.userId ?? '');
 
-    // 主人（或指定的人）说话 → 一定醒
-    if (this.ownerIds.includes(uid) && c.mode !== 'active') return { wake: true, reason: 'owner' };
+    // 潜水优先：owner 说话同样遵循潜水规则（方案A，不 @ 不醒）。
+    // owner 身份不再强制叫醒——否则 owner 在群里发任何消息都会打断潜水，
+    // 无法验证"不@→潜水→@→唤醒"的完整链路。
     if (Array.isArray(c.speakerIds) && c.speakerIds.map(String).includes(uid)) {
       return { wake: true, reason: 'speaker' };
     }

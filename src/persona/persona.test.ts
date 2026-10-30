@@ -124,11 +124,14 @@ describe('Waker · 该不该说话', () => {
     expect(d.wake).toBe(false);
   });
 
-  it('@ 必醒 / 名字必醒 / owner 必醒', () => {
+  it('@ 必醒 / 名字必醒 / owner 不@也潜水', () => {
     const w = new Waker({ names: ['小鱼'], ownerIds: ['boss'] });
     expect(w.shouldWake({ key: 'group:1', userId: 'u2', text: '@小鱼 在吗', isAtMe: true }).reason).toBe('atMention');
     expect(w.shouldWake({ key: 'group:1', userId: 'u2', text: '小鱼你看' }).reason).toContain('name:');
-    expect(w.shouldWake({ key: 'group:1', userId: 'boss', text: '随便一句' }).reason).toBe('owner');
+    // 方案A：潜水优先——owner 说话不再强制必醒，不@ 就走潜水
+    expect(w.shouldWake({ key: 'group:1', userId: 'boss', text: '随便一句' }).wake).toBe(false);
+    // 但 owner @自己名字仍会命中名字规则（潜水规则对 owner 同样生效）
+    expect(w.shouldWake({ key: 'group:1', userId: 'boss', text: '小鱼在吗' }).reason).toContain('name:');
   });
 
   it('提问特征醒，闲聊概率 0 不醒', () => {
