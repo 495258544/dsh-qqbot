@@ -72,6 +72,40 @@ export function registerPersonaTools(
       },
       additionalProperties: false,
     },
+    output: {
+      schema: {
+        type: 'object',
+        properties: {
+          count: { type: 'number' },
+          entries: {
+            type: 'array',
+            items: {
+              type: 'object',
+              properties: {
+                day: { type: 'string' },
+                time: { type: 'string' },
+                mood: { type: 'string' },
+                title: { type: 'string' },
+                text: { type: 'string' },
+              },
+              additionalProperties: false,
+            },
+          },
+          stats: {
+            type: 'object',
+            additionalProperties: true,
+          },
+        },
+        required: ['count', 'entries'],
+        additionalProperties: false,
+      },
+      render: (_args: unknown, value: unknown): ContentBlock[] => {
+        const v = value as { count: number; entries: { day: string; time: string; text: string }[] };
+        const head = `共 ${v.count} 条日记`;
+        const lines = v.entries.slice(0, 5).map((e) => `${e.day} ${e.time} ${e.text.slice(0, 40)}`);
+        return [{ type: 'text', text: [head, ...lines].join('\n') }];
+      },
+    },
     async execute(args: unknown): Promise<Record<string, unknown>> {
       const { n, day } = args as { n?: number; day?: string };
       // 审查加固：n 夹到 [1,20]，避免负数/异常值
@@ -105,6 +139,18 @@ export function registerPersonaTools(
       },
       required: ['kind', 'content'],
       additionalProperties: false,
+    },
+    output: {
+      schema: {
+        type: 'object',
+        properties: { ok: { type: 'boolean' } },
+        required: ['ok'],
+        additionalProperties: false,
+      },
+      render: (_args: unknown, value: unknown): ContentBlock[] => {
+        const v = value as { ok: boolean };
+        return [{ type: 'text', text: v.ok ? '已记下。' : '未记录' }];
+      },
     },
     async execute(args: unknown, exec: { signal: AbortSignal; agent?: unknown }): Promise<Record<string, unknown>> {
       const { kind, content, person, name } = args as {
