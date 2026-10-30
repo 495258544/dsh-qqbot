@@ -11,6 +11,9 @@
  * - memory.touch（涨 interactions、建账）只在醒后执行，防虚高
  */
 import { appendFileSync } from 'node:fs';
+
+/** 「被嫌吵」的抱怨特征词 */
+const COMPLAINT_RE = /太吵|别刷屏|刷屏了|安静点|安静些|闭嘴|别发了|少说点|烦死了|别吵|能不能别发|话太多/;
 import type { Middleware, MiddlewareContext } from '@tencent-connect/qqbot-nodejs';
 import type { PersonaService } from '../persona/service.ts';
 import type { Logger } from '../types.ts';
@@ -57,6 +60,16 @@ export function personaWakeGate(
     // 社交层记账：任何来自对方的消息都算"理你了"（含未唤醒的群闲聊）
     persona.budget.markReplied(peerId);
     if (msg.senderId !== peerId) persona.budget.markReplied(msg.senderId);
+
+    // ── 被嫌吵检测（M5）：命中抱怨词 → 降低话痨度，之后少接话但仍读会话 ──
+    const content = String(msg.content ?? '');
+    if (content && COMPLAINT_RE.test(content)) {
+      const now = persona.self.registerComplaint();
+      logger.info(`persona: 被嫌吵「${content.slice(0, 20)}」→ chattiness=${now.toFixed(2)}`);
+    } else if (content && msg.senderId !== peerId && /在吗|小羽|hi|hello/i.test(content)) {
+      // 对方主动找她说话 → 稍微回暖
+      persona.self.warmUp(0.2);
+    }
 
     const waker = persona.waker;
     if (waker) {

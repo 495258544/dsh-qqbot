@@ -14,6 +14,7 @@ import { Memory } from './memory.ts';
 import { Diary } from './diary.ts';
 import { Role } from './role.ts';
 import { Waker } from './wake.ts';
+import { SelfProfileService } from './self.ts';
 import { Humanizer } from './humanize.ts';
 import { createOwnLife, type OwnLifeHandle, type OwnLifeDeliverResult } from './own-life.ts';
 import type { PersonaConfig } from '../config.ts';
@@ -150,6 +151,8 @@ export class PersonaService {
   public readonly diary: Diary;
   public readonly role: Role | undefined;
   public readonly waker: Waker | undefined;
+  /** 她自己的画像（称呼偏好 / 兴趣 / 话痨度 / 冲浪见闻） */
+  public readonly self: SelfProfileService;
   public readonly humanizer: Humanizer;
   public readonly budget: ProactiveBudget;
   public ownLife: OwnLifeHandle | undefined;
@@ -162,6 +165,7 @@ export class PersonaService {
     const { config, dataDir, logger } = deps;
     this.memory = new Memory({ dir: path.join(dataDir, 'memory') });
     this.diary = new Diary(path.join(dataDir, 'diary'));
+    this.self = new SelfProfileService(dataDir, (m) => logger.info(m));
     if (config.roleCardPath) {
       this.role = new Role({ cardPath: config.roleCardPath, maxChars: config.roleMaxChars });
       const l = this.role.lint();
@@ -169,12 +173,25 @@ export class PersonaService {
       else logger.info('persona: 角色卡体检通过');
     }
     if (config.wakeEnabled) {
-      this.waker = new Waker({
-        names: config.names,
+      const baselineNames = [...config.names];
+      const waker = new Waker({
+        names: baselineNames,
         keywords: config.keywords,
         ownerIds: config.ownerOpenids,
         probability: config.groupProbability,
       });
+      // 兴趣驱动唤醒：从 self.json 实时取兴趣与话痨度
+      waker.setInterestProvider(() => ({
+        interests: this.self.snapshot().interests.map((i) => ({ topic: i.topic, weight: i.weight })),
+        chattiness: this.self.chattiness(),
+        baseProbability: config.interestBaseProbability,
+      }));
+      // 动态称呼：配置名 ∪ 她自己接受的称呼
+      waker.setNameProvider(() => {
+        const extra = this.self.activeNames();
+        return extra.length > 0 ? [...new Set([...baselineNames, ...extra])] : baselineNames;
+      });
+      this.waker = waker;
     }
     this.humanizer = new Humanizer({
       enabled: config.humanizeEnabled,

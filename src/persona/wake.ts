@@ -156,6 +156,19 @@ export class Waker {
 
   /** 兴趣上下文提供者（由外部注入，未注入则不做兴趣唤醒） */
   private interestProvider?: () => InterestContext | undefined;
+  /** 名字提供者（动态名字：配置名 + 她接受的称呼） */
+  private nameProvider?: () => string[];
+
+  /** 注入动态名字来源（SelfProfileService.acceptName 后自动生效） */
+  setNameProvider(fn: () => string[]): void {
+    this.nameProvider = fn;
+  }
+
+  /** 当前生效的称呼列表（配置名 ∪ 动态名） */
+  private currentNames(): string[] {
+    const dyn = this.nameProvider?.();
+    return dyn && dyn.length > 0 ? [...new Set([...this.names, ...dyn])] : this.names;
+  }
 
   /** 注入兴趣上下文来源（SelfProfileService 接入用） */
   setInterestProvider(fn: () => InterestContext | undefined): void {
@@ -197,7 +210,7 @@ export class Waker {
     if (c.atMention && (msg.isAtMe || msg.isQuoteMe)) return { wake: true, reason: 'atMention' };
 
     if (c.nameMention) {
-      const hit = this.names.find((n) => text.includes(n));
+      const hit = this.currentNames().find((n) => n && text.includes(n));
       if (hit) return { wake: true, reason: 'name:' + hit };
     }
 

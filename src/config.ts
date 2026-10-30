@@ -77,6 +77,8 @@ export interface PersonaConfig {
   ownerOpenids: string[];
   /** 群闲聊随机插话概率（0 = 纯潜水） */
   groupProbability: number;
+  /** 兴趣命中时的基础唤醒概率（实际 = chattiness × 兴趣权重 × 本值） */
+  interestBaseProbability: number;
   /** 拟人化发送开关（分条 + 停顿） */
   humanizeEnabled: boolean;
   /** 每字打字毫秒（ai-companion 作者实测真人值 110） */
@@ -229,6 +231,7 @@ export const ConfigSchema: Schema<ImQQBotConfig> = Schema.object({
     keywords: Schema.array(Schema.string()).default([]).description('关键词（命中即醒）'),
     ownerOpenids: Schema.array(Schema.string()).default([]).description('主人 openid（发言必醒；own-life 投递目标）'),
     groupProbability: Schema.number().default(0).description('群闲聊随机插话概率（0=纯潜水）'),
+    interestBaseProbability: Schema.number().default(0.5).description('兴趣命中时的基础唤醒概率（实际=chattiness×权重×本值）'),
     humanizeEnabled: Schema.boolean().default(true).description('拟人化发送（分条+停顿）'),
     msPerChar: Schema.number().default(110).description('每字打字毫秒（真人实测约110）'),
     burstMax: Schema.number().default(2).description('一次最多分几条（官方被动回复限额，建议≤2）'),
@@ -249,6 +252,7 @@ export const ConfigSchema: Schema<ImQQBotConfig> = Schema.object({
     keywords: [],
     ownerOpenids: [],
     groupProbability: 0,
+    interestBaseProbability: 0.5,
     humanizeEnabled: true,
     msPerChar: 110,
     burstMax: 2,
