@@ -74,7 +74,9 @@ export function registerPersonaTools(
     },
     async execute(args: unknown): Promise<Record<string, unknown>> {
       const { n, day } = args as { n?: number; day?: string };
-      const rows = day ? persona.diary.day(day) : persona.diary.recent(Math.min(n ?? 5, 20));
+      // 审查加固：n 夹到 [1,20]，避免负数/异常值
+      const count = Math.max(1, Math.min(Math.floor(Number(n) || 5), 20));
+      const rows = day ? persona.diary.day(day) : persona.diary.recent(count);
       return {
         count: rows.length,
         entries: rows.map((r) => ({

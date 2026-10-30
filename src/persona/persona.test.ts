@@ -152,6 +152,21 @@ describe('Waker · 该不该说话', () => {
       r();
     }, 60));
   });
+
+  it('m9: prune 清理久远唤醒过的会话，保留近期唤醒/纯潜水', () => {
+    const w = new Waker();
+    w.setConfig('group:old', {});   // 未唤醒过 → 保守保留
+    w.wake('group:old');            // wake 但很久以前（模拟，手动改 lastWakeAt）
+    // 手动改写两个 key 的时间
+    const oldCfg = w.getConfig('group:old');
+    oldCfg.lastWakeAt = Date.now() - 60 * 24 * 3600_000;       // 60 天前
+    w.setConfig('group:fresh', {});
+    w.wake('group:fresh');           // 刚唤醒
+    w.setConfig('group:never', {});  // 从未唤醒 → 保守保留
+    expect(w.prune(30 * 24 * 3600_000)).toBe(1);               // 只删 old
+    // fresh 仍在 → 再次 prune 因 fresh 已存在 getConfig 不再重建 old，返回 0
+    expect(w.prune(30 * 24 * 3600_000)).toBe(0);
+  });
 });
 
 describe('Humanizer · 像人打字', () => {
@@ -359,5 +374,15 @@ describe('ProactiveBudget · 冷退避', () => {
     b.observe('p1', Date.now() - 99999); // 第二次不重复计
     b.markUnanswered('p1'); // 手动补一次凑到 2
     expect(b.allow('p1').ok).toBe(false);
+  });
+
+  it('m9: prune 只清纯占位空壳，保留活跃/冷却/静默', () => {
+    const b = new ProactiveBudget(10, 0, silentLogger);
+    b.allow('empty1');          // 触发惰性建空壳（无任何主动/冷却）
+    b.allow('empty2');
+    b.recordProactive('active'); // 活跃，保留
+    b.markUnanswered('cooldown');
+    b.markUnanswered('cooldown'); // streak≥2 冷却
+    expect(b.prune(30 * 24 * 3600_000)).toBe(2); // 只清 empty1/empty2
   });
 });

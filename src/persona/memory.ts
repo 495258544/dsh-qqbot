@@ -54,6 +54,8 @@ export class Memory {
   private readonly turnsFile: string;
   private readonly maxTopics: number;
   private readonly maxTurns: number;
+  /** turns.jsonl 当前行数缓存（避免每次 logTurn 全文件扫描，审查 m8） */
+  private turnLineHint = -1;
 
   constructor({ dir, maxTopics = 20, maxTurns = 400 }: { dir: string; maxTopics?: number; maxTurns?: number }) {
     this.peopleFile = path.join(dir, 'people.json');
@@ -171,10 +173,15 @@ export class Memory {
     };
     if (!rec.text && !rec.reply) return;
     try {
-      fs.appendFileSync(this.turnsFile, JSON.stringify(rec) + '\n', 'utf8');
-      const lines = fs.readFileSync(this.turnsFile, 'utf8').trim().split('\n');
-      if (lines.length > this.maxTurns) {
-        fs.writeFileSync(this.turnsFile, lines.slice(-this.maxTurns).join('\n') + '\n', 'utf8');
+      const line = JSON.stringify(rec);
+      fs.appendFileSync(this.turnsFile, line + '\n', 'utf8');
+      this.turnLineHint += 1;
+      // 超过上限才裁剪（平时只 append，不整文件重读）
+      if (this.turnLineHint > this.maxTurns) {
+        const lines = fs.readFileSync(this.turnsFile, 'utf8').trim().split('\n');
+        const keep = lines.slice(-this.maxTurns);
+        fs.writeFileSync(this.turnsFile, keep.join('\n') + '\n', 'utf8');
+        this.turnLineHint = keep.length;
       }
     } catch {
       /* 写失败不影响主流程 */

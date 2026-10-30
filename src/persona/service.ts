@@ -120,6 +120,22 @@ export class ProactiveBudget {
       this.markUnanswered(peerId);
     }
   }
+
+  /** 定期清理（审查 m9）：清掉从未主动推送过的纯占位空壳。
+   *  正在冷退避、永久静默、以及近期主动过的 peer 保留（语义不能丢）。 */
+  prune(staleMs = 30 * 24 * 3600_000): number {
+    const now = Date.now();
+    let removed = 0;
+    for (const [id, p] of this.peers) {
+      const active = p.lastProactiveAt > 0 && now - p.lastProactiveAt < staleMs;
+      const inCooldown = p.mutedUntil !== 0; // >0 冷却中，-1 永久静默
+      if (!active && !inCooldown && p.unansweredStreak === 0) {
+        this.peers.delete(id);
+        removed += 1;
+      }
+    }
+    return removed;
+  }
 }
 
 export interface PersonaDeps {
@@ -140,6 +156,7 @@ export class PersonaService {
   /** 轮内记账暂存（sessionId → 用户/回复文本），turn/end 配对写流水后清除。
    *  刻意不挂 SessionRecord：deliverables 等既有路径对 record 做深比较 */
   private readonly turnLedger = new Map<string, { user?: string; reply: string; who?: string }>();
+  private readonly pruneTimer: ReturnType<typeof setInterval> | undefined;
 
   constructor(private readonly deps: PersonaDeps) {
     const { config, dataDir, logger } = deps;
@@ -166,6 +183,18 @@ export class PersonaService {
       gapRange: config.gapMinMs && config.gapMaxMs ? [config.gapMinMs, config.gapMaxMs] : undefined,
     });
     this.budget = new ProactiveBudget(config.maxProactivePerDay, config.proactiveMinGapMs, logger);
+    // 周期清理 Waker/Budget 的过期会话状态（审查 m9）——每 6h 一次
+    this.pruneTimer = setInterval(() => this.pruneStale(), 6 * 3600_000);
+    if (typeof this.pruneTimer.unref === 'function') this.pruneTimer.unref();
+  }
+
+
+  /** 清掉长期无活跃的会话配置/预算占位（waker + budget） */
+  private pruneStale(): void {
+    const SW = 30 * 24 * 3600_000;
+    const a = this.waker?.prune(SW) ?? 0;
+    const b = this.budget.prune(SW);
+    if (a || b) this.deps.logger.info(`persona: prune 清理 waker=${a} budget=${b}`);
   }
 
   /** 该 peer 的注入 section（人格 + 该人的账 + 日记连续性）；空数组 = 不注入 */
@@ -210,6 +239,7 @@ export class PersonaService {
 
   stop(): void {
     this.ownLife?.stop();
+    if (this.pruneTimer) clearInterval(this.pruneTimer);
   }
 
   /** inbound：本轮用户消息与其发言人（空串也记，覆盖上一轮残留） */
