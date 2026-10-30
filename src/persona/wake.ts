@@ -38,6 +38,16 @@ export interface WakeMessage {
   isQuoteMe?: boolean;
 }
 
+/** 外部注入的「她的兴趣与话痨度」，用于兴趣驱动唤醒（由 SelfProfileService 提供） */
+export interface InterestContext {
+  /** 兴趣词 -> 权重(0~1) */
+  interests: Array<{ topic: string; weight: number }>;
+  /** 话痨度 0~1，被嫌吵会降低 */
+  chattiness: number;
+  /** 兴趣命中时的基础唤醒概率（默认 0.5） */
+  baseProbability?: number;
+}
+
 export interface WakeDecision {
   wake: boolean;
   reason: string;
@@ -144,6 +154,30 @@ export class Waker {
     c.until = ms ? Date.now() + ms : 0;
   }
 
+  /** 兴趣上下文提供者（由外部注入，未注入则不做兴趣唤醒） */
+  private interestProvider?: () => InterestContext | undefined;
+
+  /** 注入兴趣上下文来源（SelfProfileService 接入用） */
+  setInterestProvider(fn: () => InterestContext | undefined): void {
+    this.interestProvider = fn;
+  }
+
+  /**
+   * 兴趣匹配：返回命中的兴趣及综合权重。
+   * 权重 = Σ(命中兴趣的 weight)，再按话痨度折算。
+   */
+  matchInterest(text: string): { hit: boolean; topics: string[]; probability: number } {
+    const ctx = this.interestProvider?.();
+    if (!ctx || ctx.interests.length === 0) return { hit: false, topics: [], probability: 0 };
+    const hits = ctx.interests.filter((i) => i.weight > 0 && text.includes(i.topic));
+    if (hits.length === 0) return { hit: false, topics: [], probability: 0 };
+    const sumWeight = Math.min(1, hits.reduce((a, b) => a + b.weight, 0));
+    const base = ctx.baseProbability ?? 0.5;
+    // 被嫌吵后 chattiness 降低，接话概率同步下降
+    const probability = Math.max(0, Math.min(1, ctx.chattiness * sumWeight * base));
+    return { hit: true, topics: hits.map((h) => h.topic), probability };
+  }
+
   /** 判定一条消息要不要唤醒 */
   shouldWake(msg: WakeMessage): WakeDecision {
     const c = this.getConfig(msg.key);
@@ -171,6 +205,12 @@ export class Waker {
     if (kw.length) {
       const hit = kw.find((k) => k && text.includes(k));
       if (hit) return { wake: true, reason: 'keyword:' + hit };
+    }
+
+    // 兴趣驱动唤醒：命中她自己的兴趣 → 按 chattiness × 权重 × 基础概率 决定是否接话
+    const it = this.matchInterest(text);
+    if (it.hit && it.probability > 0 && Math.random() < it.probability) {
+      return { wake: true, reason: 'interest:' + it.topics.join(',') };
     }
 
     if (c.question && QUESTION_HINTS.test(text) && [...text].length >= 4) {
