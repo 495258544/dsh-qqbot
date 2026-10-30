@@ -94,6 +94,16 @@ export interface PersonaConfig {
   ownLifeIntervalMs: number;
   /** 静默唤醒每天最多几次 */
   ownLifeMaxPerDay: number;
+  /** 自主冲浪开关（低峰时段上网搜集她感兴趣的内容） */
+  surfEnabled: boolean;
+  /** 冲浪时段起（小时，默认3） */
+  surfFromHour: number;
+  /** 冲浪时段止（小时，默认7） */
+  surfToHour: number;
+  /** 每轮冲浪最多几个话题 */
+  surfMaxTopics: number;
+  /** 是否抓正文（深度模式，更慢但内容更实） */
+  surfDeep: boolean;
   /** 主动消息：每 peer 每天上限 */
   maxProactivePerDay: number;
   /** 主动消息：两次之间最小间隔(ms) */
@@ -240,6 +250,11 @@ export const ConfigSchema: Schema<ImQQBotConfig> = Schema.object({
     ownLifeEnabled: Schema.boolean().default(false).description('own-life 静默唤醒（给她自己的时间）'),
     ownLifeIntervalMs: Schema.number().default(2.5 * 3600 * 1000).description('静默唤醒间隔(ms)，默认 2.5h'),
     ownLifeMaxPerDay: Schema.number().default(6).description('静默唤醒每天最多几次'),
+    surfEnabled: Schema.boolean().default(false).description('自主冲浪：低峰时段上网搜集她感兴趣的内容'),
+    surfFromHour: Schema.number().default(3).description('冲浪时段起（小时，默认3点）'),
+    surfToHour: Schema.number().default(7).description('冲浪时段止（小时，默认7点）'),
+    surfMaxTopics: Schema.number().default(2).description('每轮冲浪最多几个兴趣话题'),
+    surfDeep: Schema.boolean().default(false).description('冲浪时抓正文（更慢但内容更实）'),
     maxProactivePerDay: Schema.number().default(2).description('主动消息每 peer 每天上限'),
     proactiveMinGapMs: Schema.number().default(2 * 3600 * 1000).description('主动消息两次之间最小间隔(ms)'),
   }).default({
@@ -261,6 +276,11 @@ export const ConfigSchema: Schema<ImQQBotConfig> = Schema.object({
     ownLifeEnabled: false,
     ownLifeIntervalMs: 2.5 * 3600 * 1000,
     ownLifeMaxPerDay: 6,
+    surfEnabled: false,
+    surfFromHour: 3,
+    surfToHour: 7,
+    surfMaxTopics: 2,
+    surfDeep: false,
     maxProactivePerDay: 2,
     proactiveMinGapMs: 2 * 3600 * 1000,
   }).description('活人感 persona 配置（移植自 ai-companion-kit，默认关）'),
