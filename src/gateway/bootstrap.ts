@@ -32,6 +32,31 @@ import { registerStickerTool, registerArchiveTool } from '../media/sticker-tool.
 import { DeliverablesDeliverer } from '../transport/deliverables.ts';
 import { PersonaService } from '../persona/service.ts';
 import { registerPersonaTools } from '../persona/tools.ts';
+import { createUpstreamWatch, makeBridgeNotifier, type UpstreamWatchHandle } from '../ops/index.ts';
+import { existsSync } from 'node:fs';
+import { dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+/**
+ * 定位 dsh-qqbot 自身仓库根（用于 ops 巡检的默认 repo）。
+ * 源码布局：src/gateway/bootstrap.ts → 上两级到 src，再上两级到根。
+ * 构建产物：lib/gateway/bootstrap.js → 同样上两级到 lib、再到根。
+ * 判据：含 .git 且 package.json 的 name 是 im-qqbot（避免误判到宿主进程 cwd）。
+ */
+function detectPluginRepoRoot(): string | undefined {
+  try {
+    let dir = dirname(fileURLToPath(import.meta.url));
+    for (let i = 0; i < 6; i += 1) {
+      if (existsSync(dir + '/.git') && existsSync(dir + '/package.json')) return dir;
+      const up = dirname(dir);
+      if (up === dir) break;
+      dir = up;
+    }
+  } catch {
+    /* import.meta 不可用时放弃 */
+  }
+  return undefined;
+}
 
 /**
  * interaction 统一分发器：按 button_data 的顶层 `t` 判别字段，路由到对应
@@ -245,6 +270,32 @@ export async function bootstrapGateway(
     }
   }
 
+  // ── ops 上游同步巡检（独立模块，**不依赖 persona**）──
+  // 只读：只报告"上游有多少提交、哪些可自动合并、冲突预演结果"，绝不 merge/reset/commit。
+  let upstreamWatch: UpstreamWatchHandle | undefined;
+  if (config.ops.upstreamWatchEnabled) {
+    const repo = config.ops.upstreamWatchRepo || detectPluginRepoRoot();
+    if (!repo) {
+      logger.warn('ops: upstreamWatch 已开启但定位不到插件仓库根目录，未启动');
+    } else {
+      upstreamWatch = createUpstreamWatch({
+        repo,
+        stateDir: config.ops.upstreamWatchStateDir || undefined,
+        remote: config.ops.upstreamWatchRemote,
+        upstreamBranch: config.ops.upstreamWatchBranch,
+        apiRepo: config.ops.upstreamWatchApiRepo,
+        runHour: config.ops.upstreamWatchRunHour,
+        windowMinutes: config.ops.upstreamWatchWindowMinutes,
+        tickIntervalMs: config.ops.upstreamWatchTickMs,
+        apiToken: config.ops.upstreamWatchToken || process.env.GITHUB_TOKEN || undefined,
+        notify: config.ops.upstreamWatchNotify ? makeBridgeNotifier() : undefined,
+        log: (m: string) => logger.info(`ops: ${m}`),
+      });
+      upstreamWatch.start();
+      logger.info(`ops: 上游巡检已武装（repo=${repo}，北京 ${config.ops.upstreamWatchRunHour}:00 起 ${config.ops.upstreamWatchWindowMinutes}min 窗口）`);
+    }
+  }
+
   // ── 生命周期 ──
   (ctx as unknown as { effect(fn: () => (() => Promise<void>) | void, name?: string): void })
     .effect(() => {
@@ -256,6 +307,7 @@ export async function bootstrapGateway(
       return async () => {
         logger.info('Shutting down');
         persona?.stop();
+        upstreamWatch?.stop();
         await manager.disposeAll();
         bot.stop();
       };

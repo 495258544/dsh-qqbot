@@ -190,6 +190,42 @@ im-qqbot:
     ownerOpenids: [你的openid]
 ```
 
+### 上游同步巡检（ops，默认关闭）
+
+`src/ops/upstream-watch.ts` 巡检 dsh-qqbot 自己 fork 的上游仓库：抓取上游 tip →
+比对落后/领先 → 逐 commit 分级（AUTO 可自动合并 / REVIEW 需人工）→ 冲突预演 →
+落盘报告，需要人拍板时推手机通知。
+
+**默认关闭**，与 persona 完全解耦（不依赖角色卡/记忆/会话）。
+
+| 配置 | 默认 | 说明 |
+|------|------|------|
+| `ops.upstreamWatchEnabled` | `false` | 总开关 |
+| `ops.upstreamWatchRepo` | `''` | 被巡检仓库绝对路径（空=自动探测插件自身） |
+| `ops.upstreamWatchRemote` / `Branch` | `upstream` / `main` | 上游 remote 与分支 |
+| `ops.upstreamWatchApiRepo` | `tencent-connect/dsh-qqbot` | API 主通道 slug（空=只用 git） |
+| `ops.upstreamWatchRunHour` | `5` | **北京时间**几点跑（IANA 换算，不看容器时区） |
+| `ops.upstreamWatchWindowMinutes` | `45` | 窗口分钟数，只在窗口内触发 |
+| `ops.upstreamWatchTickMs` | `5min` | 检查窗口的间隔 |
+| `ops.upstreamWatchStateDir` | `~/.dsh-qqbot/ops/upstream-watch` | state/报告目录（**别放仓库内**） |
+| `ops.upstreamWatchNotify` | `true` | 需要人工处理时推手机通知 |
+| `ops.upstreamWatchToken` | `''` | GitHub token（可选；未认证 API 限额 60/h 易撞限流） |
+
+**只读保证**：不执行 `merge`/`commit`/`reset`/`checkout`/`push`。冲突预演用
+`git merge-tree --write-tree`（纯内存，不碰工作树，同一路径并行提交也不会被 `reset`
+吃掉）。工作树脏时**照常出结论**，不会降级成"无法判断"，更不会 reset。
+
+手动触发 / 兜底常驻：
+
+```bash
+node lib/ops/cli.js --once       # 立刻跑一次
+node lib/ops/cli.js --snapshot   # 只看状态
+node lib/ops/cli.js --watch      # 常驻循环（自判窗口）
+bash scripts/install-upstream-watch-autostart.sh   # 装 profile.d 兜底（--uninstall 卸载）
+```
+
+> 巡检改的是源码，**合并后必须 `npm run build`**（`lib/` 是入库构建产物）。
+
 ## 内置命令
 
 | 命令 | 说明 |

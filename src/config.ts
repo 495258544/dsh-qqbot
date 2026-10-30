@@ -110,6 +110,36 @@ export interface PersonaConfig {
   proactiveMinGapMs: number;
 }
 
+/**
+ * 运维巡检配置（`src/ops/`）。
+ * 与 persona 完全解耦：persona 关掉、甚至没配置角色卡，这个模块照样能跑。
+ * 全部默认关——巡检会碰 git 与网络，不该在用户不知情时自动启用。
+ */
+export interface OpsConfig {
+  /** 上游同步巡检开关 */
+  upstreamWatchEnabled: boolean;
+  /** 被巡检仓库绝对路径（空=自动探测 dsh-qqbot 自身） */
+  upstreamWatchRepo: string;
+  /** git remote 名 */
+  upstreamWatchRemote: string;
+  /** 上游分支 */
+  upstreamWatchBranch: string;
+  /** 上游 slug（API 主通道；空=只用 git） */
+  upstreamWatchApiRepo: string;
+  /** 北京时间几点跑（IANA 换算，不依赖容器时区） */
+  upstreamWatchRunHour: number;
+  /** 窗口分钟数 */
+  upstreamWatchWindowMinutes: number;
+  /** 检查窗口的间隔(ms) */
+  upstreamWatchTickMs: number;
+  /** state/report 目录（空=默认 ~/.dsh-qqbot/ops/upstream-watch） */
+  upstreamWatchStateDir: string;
+  /** 需要人工处理时推手机通知 */
+  upstreamWatchNotify: boolean;
+  /** GitHub token（可选，提高 API 限额） */
+  upstreamWatchToken: string;
+}
+
 export interface ImQQBotConfig {
   /** QQ Bot AppID */
   appId: string;
@@ -157,6 +187,8 @@ export interface ImQQBotConfig {
   sendFile: SendFileConfig;
   /** 活人感 persona（ai-companion-kit 移植：角色卡/记忆/唤醒/拟人化/日记/自我时间） */
   persona: PersonaConfig;
+  /** 运维巡检（独立模块，与 persona 无关）：上游同步检查 */
+  ops: OpsConfig;
 }
 
 /** 访问控制子 Schema（独立导出：config 路由的服务端校验复用） */
@@ -284,4 +316,29 @@ export const ConfigSchema: Schema<ImQQBotConfig> = Schema.object({
     maxProactivePerDay: 2,
     proactiveMinGapMs: 2 * 3600 * 1000,
   }).description('活人感 persona 配置（移植自 ai-companion-kit，默认关）'),
+  ops: Schema.object({
+    upstreamWatchEnabled: Schema.boolean().default(false).description('上游同步巡检（只读：只报告，不自动合并）'),
+    upstreamWatchRepo: Schema.string().default('').description('被巡检仓库绝对路径（空=自动探测 dsh-qqbot 自身）'),
+    upstreamWatchRemote: Schema.string().default('upstream').description('git remote 名'),
+    upstreamWatchBranch: Schema.string().default('main').description('上游分支'),
+    upstreamWatchApiRepo: Schema.string().default('tencent-connect/dsh-qqbot').description('上游 slug（API 主通道，如 owner/repo；空=只用 git）'),
+    upstreamWatchRunHour: Schema.number().default(5).description('北京时间几点跑（默认 5；按 IANA Asia/Shanghai 换算，不受容器时区影响）'),
+    upstreamWatchWindowMinutes: Schema.number().default(45).description('窗口分钟数：只在 [runHour:00, runHour:window) 内触发'),
+    upstreamWatchTickMs: Schema.number().default(300 * 1000).description('检查窗口的间隔(ms)，默认 5min'),
+    upstreamWatchStateDir: Schema.string().default('').description('state/report 目录（默认 ~/.dsh-qqbot/ops/upstream-watch；绝不要放在被巡检仓库里）'),
+    upstreamWatchNotify: Schema.boolean().default(true).description('需要人工处理时推手机通知（走 DSHA 3090 桥）'),
+    upstreamWatchToken: Schema.string().default('').description('GitHub token（可选，提高 API 限额；未认证 60/h 容易撞限流）'),
+  }).default({
+    upstreamWatchEnabled: false,
+    upstreamWatchRepo: '',
+    upstreamWatchRemote: 'upstream',
+    upstreamWatchBranch: 'main',
+    upstreamWatchApiRepo: 'tencent-connect/dsh-qqbot',
+    upstreamWatchRunHour: 5,
+    upstreamWatchWindowMinutes: 45,
+    upstreamWatchTickMs: 300 * 1000,
+    upstreamWatchStateDir: '',
+    upstreamWatchNotify: true,
+    upstreamWatchToken: '',
+  }).description('运维巡检配置（上游同步；默认关）'),
 });
