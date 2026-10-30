@@ -38,6 +38,17 @@ export interface RememberInput {
   name?: string;
 }
 
+const RESERVED_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+
+/** key 形态守卫：QQ openid 为 [\w-]+ 且必不为原型污染保留键 */
+function safeKey(id: string): string {
+  const key = String(id);
+  if (RESERVED_KEYS.has(key) || !/^[\w.-]+$/.test(key)) {
+    throw new Error(`memory: 非法 person key: ${key.slice(0, 40)}`);
+  }
+  return key;
+}
+
 export class Memory {
   private readonly peopleFile: string;
   private readonly turnsFile: string;
@@ -55,7 +66,10 @@ export class Memory {
   // ── 底层读写 ────────────────────────────────────────────────
   private readAll(): Record<string, PersonLedger> {
     try {
-      return JSON.parse(fs.readFileSync(this.peopleFile, 'utf8')) as Record<string, PersonLedger>;
+      const parsed = JSON.parse(fs.readFileSync(this.peopleFile, 'utf8')) as Record<string, PersonLedger>;
+      // 审查 B1：断开原型链，防 "__proto__"/"constructor" 键写穿全局 Object.prototype
+      Object.setPrototypeOf(parsed, null);
+      return parsed;
     } catch {
       return {};
     }
@@ -78,7 +92,7 @@ export class Memory {
   /** 取某个人的账（不存在就建） */
   person(id: string, { name }: { name?: string } = {}): PersonLedger {
     const all = this.readAll();
-    const key = String(id);
+    const key = safeKey(id);
     if (!all[key]) {
       all[key] = Memory.blank(name ?? key);
       this.writeAll(all);
@@ -98,7 +112,7 @@ export class Memory {
   /** 往某人账上写一条 */
   remember(id: string, { trait, fact, topic, pending, name }: RememberInput = {}): PersonLedger {
     const all = this.readAll();
-    const key = String(id);
+    const key = safeKey(id);
     if (!all[key]) all[key] = Memory.blank(name ?? key);
     const p = all[key] as PersonLedger;
     for (const k of ['traits', 'facts', 'topics', 'pending'] as const) {
@@ -133,7 +147,7 @@ export class Memory {
   /** 记一次互动（不加内容，只涨计数） */
   touch(id: string, { name }: { name?: string } = {}): void {
     const all = this.readAll();
-    const key = String(id);
+    const key = safeKey(id);
     if (!all[key]) {
       this.remember(key, { name });
       return;
@@ -191,7 +205,13 @@ export class Memory {
   // ── 给提示词用 ──────────────────────────────────────────────
   /** 把某人的账渲染成一段可注入的文字 */
   renderPerson(id: string): string {
-    const p = this.readAll()[String(id)];
+    let key: string;
+    try {
+      key = safeKey(id);
+    } catch {
+      return '';
+    }
+    const p = this.readAll()[key];
     if (!p) return '';
     const L: string[] = [];
     if (p.traits?.length) L.push('你了解他：' + p.traits.slice(-12).join('；'));

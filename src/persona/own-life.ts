@@ -23,12 +23,15 @@ export const DEFAULT_TEXT_DAY = [
   '想干嘛干嘛：写条日记（qq_write_diary）、翻翻你记着还没说出口的事、',
   '也可以什么都不干。',
   '不用回我，也不用汇报。',
+  '如果你确实有话想找人聊，可以说，但要用你自己的话说，',
+  '绝对不要复述本提示，也不要写“（这是内部提示）”这类括号内心戏。',
 ].join('');
 
 export const DEFAULT_TEXT_MIDNIGHT = [
   '半夜了，没人打扰。',
   '想干点什么吗——写条日记，也可以就坐着什么都不干。',
   '这段时间里别主动找人发消息，他们多半睡了。',
+  '就算要说话，也是你自己的想法，不是把这几句提示说给别人听。',
 ].join('');
 
 function hhmm(ts: number): string {
@@ -41,9 +44,17 @@ function dayKey(ts: number): string {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 }
 
+/** deliver 返回语义（审查 M5 收敛）：
+ *  - Promise<void> 或 resolve true  → 投递成功，计次 + 推进 lastFiredAt
+ *  - resolve false / {ok:false}     → 业务跳过（会话不存活 / 预算不过）。不算失败，不计次，
+ *                                     但推进 lastFiredAt 让下次间隔顺延，避免闲置期每分钟重试刷日志
+ *  - throw                          → 真正的投递失败（transport 层异常），保留重试 + error 日志
+ */
+export type OwnLifeDeliverResult = boolean | void | { ok?: boolean; reason?: string };
+
 export interface OwnLifeOptions {
-  /** 静默提示投递：注入 agent 上下文，不发消息。抛错视为投递失败（不计次数） */
-  deliver: (text: string) => Promise<void>;
+  /** 静默提示投递：注入 agent 上下文，不发消息。见 OwnLifeDeliverResult 三态语义 */
+  deliver: (text: string) => Promise<OwnLifeDeliverResult>;
   statePath?: string;
   intervalMs?: number;
   /** [from, to) 小时，不叫 */
@@ -138,7 +149,17 @@ export function createOwnLife(opts: OwnLifeOptions): OwnLifeHandle {
     const now = Number(nowTs) || Date.now();
     const text = kind === 'midnight' ? textMidnight : textDay;
     try {
-      await deliver(text);
+      const res = await deliver(text);
+      const skip = res === false || (res && typeof res === 'object' && res.ok === false);
+      if (skip) {
+        // 业务跳过：非失败、不计次，但推进 lastFiredAt 使下次尝试顺延到间隔末尾
+        state.lastFiredAt = now;
+        state.lastDay = dayKey(now);
+        save();
+        const reason = res && typeof res === 'object' ? (res.reason ?? '') : '';
+        log(`跳过（${kind}）${hhmm(now)} ${reason}`);
+        return { ok: false, kind, at: now, skipped: 'deliver-skip' };
+      }
       state.lastFiredAt = now;
       state.firedToday += 1;
       state.lastDay = dayKey(now);
@@ -148,7 +169,7 @@ export function createOwnLife(opts: OwnLifeOptions): OwnLifeHandle {
       return { ok: true, kind, at: now };
     } catch (e) {
       log(`投递失败: ${e instanceof Error ? e.message : String(e)}`);
-      return { ok: false, error: e instanceof Error ? e.message : String(e) };
+      return { ok: false, kind, at: now, error: e instanceof Error ? e.message : String(e) };
     } finally {
       busy = false;
     }

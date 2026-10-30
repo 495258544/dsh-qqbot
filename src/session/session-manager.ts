@@ -26,7 +26,7 @@ import type { ModelRoute, ModelEntry } from '../model/types.ts';
 import { IdleEvictor } from './idle-evictor.ts';
 import type { QuestionChannel } from '../features/question-channel.ts';
 import type { ApprovalChannel } from '../features/approval-channel.ts';
-import type { PersonaService } from '../persona/service.ts';
+import { PersonaService } from '../persona/service.ts';
 import type {
   SessionEventLike,
   DshAgent,
@@ -164,6 +164,11 @@ export class SessionManager {
       const personaSections = this.persona?.buildSections(
         record.scope === 'c2c' ? record.senderId : undefined,
       ) ?? [];
+      // P6：时间感锚点（几人现在/周几）拼在日记之前
+      if (this.persona) {
+        const clock = PersonaService.timeSection();
+        if (clock) personaSections.push(clock);
+      }
 
       const prompt = record.scope === 'group' ? this.config.groupPrompt : this.config.directPrompt;
       if (!prompt && personaSections.length === 0) return assembled;

@@ -57,6 +57,19 @@ describe('Memory · 按人存', () => {
     expect(rows).toHaveLength(1);
     expect(rows[0]?.text).toBe('在吗');
   });
+
+  it('B1 回归：__proto__ 不能写穿全局原型链', () => {
+    const mem = new Memory({ dir });
+    expect(() => mem.remember('__proto__', { fact: 'x' })).toThrow();
+    expect(({} as Record<string, unknown>).interactions).toBeUndefined();
+  });
+
+  it('B1 回归：constructor 保留键被拒', () => {
+    const mem = new Memory({ dir });
+    expect(() => mem.remember('constructor', { trait: '顿悟' })).toThrow();
+    // 合法 openid 形态（含 . - ）不受影响
+    expect(() => mem.remember('u.abc-def_1', { trait: 'ok' })).not.toThrow();
+  });
 });
 
 describe('Diary · 她自己的一天', () => {
@@ -241,6 +254,33 @@ describe('own-life · 静默唤醒约束', () => {
     const r = await life2.tick(Date.now());
     expect(r.skipped).toBe('not-yet');
     expect(count).toBe(1);
+  });
+
+  it('M5 回归：deliver 返回 {ok:false} 业务跳过 → 不计次但推进 lastFiredAt', async () => {
+    const statePath = path.join(dir, 'm5.json');
+    let count = 0;
+    const life = createOwnLife({
+      deliver: async () => { count += 1; return { ok: false, reason: 'no-live-session' }; },
+      intervalMs: 0, quiet: [0, 0], midnightAt: '00:00',
+      statePath, log: () => {},
+    });
+    const r = await life.tick(Date.now());
+    expect(r.skipped).toBe('deliver-skip');
+    expect(count).toBe(1);
+    expect(life.snapshot().firedToday).toBe(0); // 不计次
+    // 间隔 0，本可立即再试；但跳过已推进 lastFiredAt → 再次 tick 仍 counted=0（不刷 error）
+    const r2 = await life.tick(Date.now());
+    expect(r2.skipped).toBe('deliver-skip');
+    expect(life.snapshot().firedToday).toBe(0);
+  });
+
+  it('deliver 返回 true/void = 成功，正常计次', async () => {
+    const life = createOwnLife({
+      deliver: async () => {}, intervalMs: 0, quiet: [0, 0], midnightAt: '00:00',
+      statePath: path.join(dir, 'm5b.json'), log: () => {},
+    });
+    await life.tick(Date.now());
+    expect(life.snapshot().firedToday).toBe(1);
   });
 });
 

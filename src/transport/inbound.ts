@@ -104,36 +104,9 @@ export async function handleInbound(
     msgId: msg.messageId,
   };
 
-  // ── persona：社交层记账 —— 对方主动说话 = "理你了"，清冷启动计数。
-  //    注意 c2c 的 peerId 即 senderId（inbound.ts:99），budget 以会话 peer 记账，
-  //    与 own-life 的 ownerOpenid（=其 c2c peerId）对齐。──
+  // persona 的唤醒判定与社交记账已前移到 middleware/persona-wake-gate.ts
+  // （审查 M2：未醒消息不得穿过附件下载/斜杠命令）。此处仅取服务实例备用。
   const persona = manager.persona;
-  if (persona) {
-    // 双 key 清计数：c2c 下两者相同；群聊里主人在任何群发言也算"理你了"
-    persona.budget.markReplied(peerId);
-    if (msg.senderId !== peerId) persona.budget.markReplied(msg.senderId);
-    persona.memory.touch(msg.senderId, { name: msg.senderName });
-  }
-
-  // ── persona：唤醒判定（替代单一 requireMention 门控）──
-  // 未醒 = 一个字都不说（DESIGN §1.4：沉默是主动性的另一半）。
-  // requireMention 语义并入：群聊 atMention-only（probability=0 时即纯潜水）。
-  if (persona?.waker) {
-    const wasMentioned = mwState.mention?.wasMentioned ?? false;
-    const decision = persona.waker.shouldWake({
-      key: `${scope}:${peerId}`,
-      userId: msg.senderId,
-      name: msg.senderName,
-      text: msg.content ?? '',
-      isAtMe: wasMentioned,
-    });
-    if (!decision.wake) {
-      logger.debug(`persona: waker skip (${scope}:${peerId}) reason=none`);
-      return;
-    }
-    persona.waker.wake(`${scope}:${peerId}`);
-    logger.debug(`persona: waker wake reason=${decision.reason}`);
-  }
 
   // ── 组装 agentBody（下载结果经 mwState.downloadedFiles 提供） ──
   const agentBody = assembleAgentBody(msg, mwState, scope, logger);

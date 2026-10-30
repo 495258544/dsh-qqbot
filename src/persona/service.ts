@@ -15,7 +15,7 @@ import { Diary } from './diary.ts';
 import { Role } from './role.ts';
 import { Waker } from './wake.ts';
 import { Humanizer } from './humanize.ts';
-import { createOwnLife, type OwnLifeHandle } from './own-life.ts';
+import { createOwnLife, type OwnLifeHandle, type OwnLifeDeliverResult } from './own-life.ts';
 import type { PersonaConfig } from '../config.ts';
 import type { Logger } from '../types.ts';
 
@@ -184,8 +184,19 @@ export class PersonaService {
     return out;
   }
 
+  /** P6：时间感上下文——"几点了 / 周几"，让人格有现实锚点（今日起这么早？这种话需此）
+   *  只注入时间，不注入会话历史；距上次对话由调用方另加（本方法无会话访问权）。 */
+  static timeSection(now: Date = new Date()): { name: string; order: number; text: string } | undefined {
+    const week = ['日', '一', '二', '三', '四', '五', '六'][now.getDay()];
+    return {
+      name: 'qqbot:persona-clock',
+      order: 63,
+      text: `[当前时间 ${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')} · 星期${week}]`,
+    };
+  }
+
   /** 启动 own-life 静默唤醒（deliver 由 bootstrap 注入：向 owner 存活会话 followup 一条静默消息） */
-  startOwnLife(deliver: (text: string) => Promise<void>): void {
+  startOwnLife(deliver: (text: string) => Promise<OwnLifeDeliverResult>): void {
     if (!this.deps.config.ownLifeEnabled) return;
     this.ownLife = createOwnLife({
       deliver,

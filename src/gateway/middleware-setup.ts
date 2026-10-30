@@ -26,6 +26,7 @@ import { buildCommandList } from '../commands/index.ts';
 import { attachmentProcessor } from '../middleware/attachment.ts';
 import { questionAnswer } from '../middleware/question-answer.ts';
 import { getHistoryStore, historyGroupKey } from '../features/history-store.ts';
+import { personaWakeGate } from '../middleware/persona-wake-gate.ts';
 
 export function setupMiddlewares(
   bot: QQBot,
@@ -70,11 +71,9 @@ export function setupMiddlewares(
   }));
 
   // 5. 群聊 @bot 门控
-  //    persona 启用且 Waker 接管时透传（只记录 state 不拦截）——唤醒决策交给
-  //    inbound 的 Waker（ai-companion 移植：@/名字/提问/关键词/概率，DESIGN §7）。
-  //    wakeEnabled=false 时 Waker 不实例化（见 PersonaService），inbound 没有
-  //    接管者，必须维持原 requireMention 硬门控——否则未 @ 的群消息会全部进
-  //    agent（成本 + 刷屏）。
+  //    persona 启用且 Waker 接管时透传（只记录 state 不拦截）——唤醒决策由
+  //    personaWakeGate（本文件末尾注册，位于附件/命令之前）统一执行。
+  //    wakeEnabled=false 时 Waker 不实例化，维持原 requireMention 硬门控。
   const wakeByPersona = config.persona.enabled && config.persona.wakeEnabled;
   bot.use(mentionGate({
     requireMentionInGroup: wakeByPersona ? false : config.requireMention,
@@ -88,6 +87,14 @@ export function setupMiddlewares(
 
   // 7. 三层限流（sender / group / global）
   bot.use(rateLimiter());
+
+  // 7.5 persona 唤醒门（审查 M2 修复）：必须早于 slashCommand 与
+  //     attachmentProcessor——未醒消息 ctx.stop()，命令不解析（群内越权
+  //     /stop /new 回归）、附件不下载（成本翻倍）一并归零。
+  //     依赖：mentionGate(5) 的 ctx.state.mention、contentSanitizer(6) 的清洗文本。
+  if (manager.persona) {
+    bot.use(personaWakeGate(manager.persona, logger));
+  }
 
   // 8. 斜杠命令（在 concurrencyGuard 之前，命令匹配后不排队直接响应）
   const slash = slashCommand({
