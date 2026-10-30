@@ -28,6 +28,7 @@ import { setupMiddlewares } from './middleware-setup.ts';
 import { startMediaCleanup } from '../media/media-cleaner.ts';
 import { ensureVisionInputModal, registerDescribeImageTool } from '../media/vision-tool.ts';
 import { registerSendFileTool, type MediaSenderLike } from '../media/send-file-tool.ts';
+import { registerStickerTool } from '../media/sticker-tool.ts';
 import { DeliverablesDeliverer } from '../transport/deliverables.ts';
 import { PersonaService } from '../persona/service.ts';
 import { registerPersonaTools } from '../persona/tools.ts';
@@ -203,6 +204,9 @@ export async function bootstrapGateway(
 
   // ── 附件发送工具注册（qqbot_send_file，发送器见上方 mediaSender） ──
   registerSendFileTool(ctx, mediaSender, manager, config, logger);
+
+  // ── 表情包挑选工具（qq_pick_sticker，从 /sdcard/表情包 索引按情绪检索） ──
+  registerStickerTool(ctx, config, logger);
 
   // ── persona 工具（qq_write_diary / qq_read_diary / qq_memory_append）──
   if (persona) {
