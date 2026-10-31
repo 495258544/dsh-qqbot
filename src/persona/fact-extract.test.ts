@@ -105,3 +105,44 @@ describe('diary-auto · 日记不编造', () => {
     expect(shouldWriteDiary(10, false)).toBe(true);
   });
 });
+
+describe('diary-auto · 不把裸 openid 写进日记', () => {
+  it('who 是 openid 时用泛称"跟人聊了"，不糊一串 id', () => {
+    const turns = [
+      { t: 1, where: 'group:g', who: '2DA749E82EB6FC4B2FCCD4102A3EB0AC', text: '这是谁发的', reply: '某人' },
+      { t: 2, where: 'group:g', who: 'jmx的大蠢鱼', text: '今天加班', reply: '累坏了吧' },
+    ];
+    const m = pickDiaryMaterial(turns);
+    // openid 不能出现在素材里
+    expect(m.people).not.toContain('2DA749E82EB6FC4B2FCCD4102A3EB0AC');
+    expect(m.people).toContain('jmx的大蠢鱼');
+  });
+
+  it('全是 openid 时，正文用"跟人聊了几句"，不出现任何 id', () => {
+    const turns = [
+      { t: 1, where: 'group:g', who: '2DA749E82EB6FC4B2FCCD4102A3EB0AC', text: '嗯', reply: '好' },
+    ];
+    const text = composeDiaryText(pickDiaryMaterial(turns));
+    expect(text).toContain('跟人聊了几句');
+    expect(text).not.toMatch(/[A-Fa-f0-9]{20,}/);
+  });
+});
+
+describe('fact-extract · 对真实语料的克制（宁可少抽）', () => {
+  it('小羽的真实对话大多是闲聊，不该大量命中', () => {
+    // 取自 turns.jsonl 真实原话
+    const realChat = [
+      '你今天有什么安排？',
+      '忙是忙 但听见吃的还是会回头',
+      '行 喊吃饭我肯定到',
+      '翻篇',
+      '我耳朵一直开着呢 你以为我潜水就听不见了',
+      '饭点是我唯一准时的东西',
+      '这活我接',
+      '啊 这就超限了',
+    ];
+    const hits = realChat.filter((t) => extractFact(t) !== undefined);
+    // 这些都不含"关于他自己的具体事实"，应该几乎不命中
+    expect(hits.length).toBeLessThanOrEqual(1);
+  });
+});

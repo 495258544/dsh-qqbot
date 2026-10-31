@@ -27,6 +27,11 @@ export interface TurnRecordLike {
 }
 
 /** 从当天对话里提炼可写进日记的素材 */
+/** 判断是不是裸 openid（QQ 的 openid 是 32 位十六进制） */
+function looksLikeOpenid(v: string): boolean {
+  return /^[A-Fa-f0-9]{20,}$/.test(v);
+}
+
 export function pickDiaryMaterial(turns: TurnRecordLike[]): {
   people: string[];
   topics: string[];
@@ -39,7 +44,9 @@ export function pickDiaryMaterial(turns: TurnRecordLike[]): {
     /(游戏|新番|动画|电影|音乐|咖啡|奶茶|读书|小说|考研|上班|加班|学校|公司|旅行|出差|健身|跑步|猫|狗|吃饭|睡觉|下雨|天气|演唱会|比赛)/;
 
   for (const t of turns) {
-    if (t.who) people.add(t.who);
+    // 日记里不能出现裸 openid（她不可能管人叫 2DA749E82EB6...）：
+    // who 有时是 openid（QQ 没给昵称时回落而来），这种就不往日记里放
+    if (t.who && !looksLikeOpenid(t.who)) people.add(t.who);
     const hit = `${t.text} ${t.reply}`.match(TOPIC_HINT);
     if (hit?.[0]) topics.add(hit[0]);
   }
@@ -61,6 +68,9 @@ export function composeDiaryText(m: ReturnType<typeof pickDiaryMaterial>): strin
   if (people.length > 0) {
     const who = people.slice(0, 3).join('、');
     parts.push(`今天跟${who}聊了几句。`);
+  } else {
+    // 只知道 openid、不知道昵称时，用泛称，不要糊一串 id 上去
+    parts.push('今天跟人聊了几句。');
   }
   if (topics.length > 0) {
     const tt = topics.slice(0, 3).join('、');
