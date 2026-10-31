@@ -36,9 +36,10 @@ describe('buildQuotePart · 发送者归属', () => {
     expect(out).toMatch(/来自「/);
   });
 
-  it('完全查不到发送者时如实说"未知"，不冒充用户', () => {
-    const out = buildQuotePart({ text: '某句话' });
-    expect(out).toContain('引文发送者未知');
+  it('完全查不到发送者时如实说"不明"，并明确"不要假定是正在跟你说话的人"', () => {
+    const out = buildQuotePart({ text: '某句话' }, []);
+    expect(out).toContain('引文发送者不明');
+    expect(out).toContain('不要假定是正在跟你说话的人');
   });
 });
 
@@ -90,5 +91,39 @@ describe('buildQuotePart · 边界', () => {
     expect(out).not.toContain('=== 消息');
     expect(out).toContain('今天吃啥');
     expect(out).toContain('阿三');
+  });
+});
+
+describe('buildQuotePart · 历史反查（QQ 合并转发不给发送者）', () => {
+  const HIST = [
+    { senderId: 'BOT', senderName: '小羽', content: '这活我接', timestamp: 0, messageId: 'm1' },
+    { senderId: 'CFD96F1AEAFD07BDA2A9', senderName: 'jmx的大蠢鱼', content: '卡了就别催了 我这边也动不了', timestamp: 0, messageId: 'm2' },
+  ];
+
+  it('store 查不到时，用内容在历史里反查到是谁说的', () => {
+    const out = buildQuotePart({ text: '卡了就别催了 我这边也动不了' }, HIST);
+    expect(out).toContain('jmx的大蠢鱼');
+    expect(out).toContain('不是你正在对话的那个人');
+  });
+
+  it('合并转发逐条反查：不同人的话各自归位（不整块套一个人）', () => {
+    const out = buildQuotePart({
+      text: '=== 消息 1 ===\n[消息内容] 这活我接\n\n=== 消息 2 ===\n[消息内容] 卡了就别催了 我这边也动不了',
+    }, HIST);
+    // 两条必须分别标明，且不能是同一个人
+    expect(out).toContain('小羽');
+    expect(out).toContain('jmx的大蠢鱼');
+  });
+
+  it('反查到是自己说的 → 明确说"是你自己之前说过的话"（不当成别人在跟她说话）', () => {
+    const out = buildQuotePart({ text: '这活我接' }, HIST, 'BOT');
+    expect(out).toContain('你自己之前说过的话');
+  });
+
+  it('历史里也没有 → 如实说"不明"，绝不瞎猜成对话对象', () => {
+    const out = buildQuotePart({ text: '一句历史里没有的话' }, HIST);
+    expect(out).toContain('引文发送者不明');
+    expect(out).not.toContain('jmx的大蠢鱼');
+    expect(out).not.toContain('小羽');
   });
 });
