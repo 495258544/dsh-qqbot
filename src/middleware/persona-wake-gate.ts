@@ -53,6 +53,19 @@ export function personaWakeGate(
 ): Middleware {
   return async (ctx: MiddlewareContext, next: () => Promise<void>): Promise<void> => {
     const msg = ctx.message;
+
+    // ── 硬门禁：不处理其他机器人发来的消息（防 A↔B 无限互聊）──
+    // 场景：群里可能接了多个 robot。两个 bot 都会在"活跃期"里接对方的话，
+    // 于是 A 回 B、B 回 A，无限循环，刷屏且烧钱。
+    // SDK 的 author.bot 会标出来（senderIsBot），但 messageFilter 没有这个开关，
+    // 所以必须自己挡，而且要在**任何记账/唤醒之前**挡掉。
+    const fromBot = (msg as unknown as { senderIsBot?: boolean }).senderIsBot === true;
+    if (fromBot) {
+      logger.debug('persona: 忽略其他机器人发来的消息');
+      ctx.stop('from-bot');
+      return;
+    }
+
     const scope = msg.kind === 'group' ? 'group' : 'c2c';
     const peerId = scope === 'group' ? (msg.groupOpenid ?? msg.senderId) : msg.senderId;
     const key = `${scope}:${peerId}`;
