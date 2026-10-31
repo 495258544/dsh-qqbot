@@ -43,7 +43,7 @@ interface ProcessedMessage {
 
 interface ResolvedQuote {
   text?: string;
-  entry?: { senderId?: string; content?: string };
+  entry?: { senderId?: string; senderName?: string; content?: string; isBot?: boolean };
   attachments?: QuotedAttachment[];
 }
 
@@ -304,13 +304,87 @@ function buildUserContent(msg: ProcessedMessage, state: MiddlewareState, logger:
 
 /**
  * Layer 2: 引用消息块
+ *
+ * 关键：**必须带发送者归属**。
+ * 之前这里只拼引文正文、不拼是谁说的，模型看到的是
+ *   [Quoted message begins] 卡了就别催了 [Quoted message ends]
+ *   [Current message] [……] (@you)
+ * 两条都没有署名 → 模型认为引文也是"你"说的，于是出现
+ * 「刚不是你那边卡了」这种把别人的话算到用户头上的错。
+ *
+ * 另外合并转发（msgType=103）本身带「=== 消息 N ===」编号，但编号同样没有署名，
+ * 需要逐条标注。已知小羽自己发的运维提示（⚠️ 本轮异常结束）不应参与对话，
+ * 这里一并过滤，避免它被当成聊天素材复述。
  */
-function buildQuotePart(quote?: ResolvedQuote): string {
+export function buildQuotePart(quote?: ResolvedQuote): string {
   if (!quote?.text && !quote?.entry?.content) return '';
 
-  const quoteText = quote.text || quote.entry?.content || 'Original content unavailable';
+  const raw = quote.text || quote.entry?.content || 'Original content unavailable';
 
-  return `[Quoted message begins]\n${quoteText}\n[Quoted message ends]\n[Current message]\n`;
+  // 归属：优先 store 里的 senderName，其次短 id
+  const senderId = quote.entry?.senderId;
+  const senderName = quote.entry?.senderName
+    ?? (senderId ? shortSenderId(senderId) : undefined);
+
+  /**
+   * 运维提示的正判据：内容本身长得像运行状态播报。
+   * 不能只看 entry.isBot —— 小羽自己的正常回复也是 bot 发的。
+   */
+  const OPS_NOTICE = /(⚠️\s*本轮异常结束|RATE_LIMIT|MISSING_CREDENTIAL|NO_ADAPTER|UNSUPPORTED_REASONING|SERVER:|超限|本轮异常)/;
+
+  /**
+   * 合并转发（msgType=103）：一条消息里套了多条别人的话。
+   *
+   * 关键：**每条都要独立判断是谁说的**。
+   * 事故里的结构是「消息1=系统限流提示（小羽自己发的）+ 消息2=jmx 说的话」，
+   * 如果整体判一次归属，就会把 jmx 的话也标成系统提示 —— 正是要避免的错。
+   */
+  const isMerge = raw.includes('=== 消息');
+  let quoteText: string;
+
+  if (isMerge) {
+    const sections = raw.split(/^===\s*消息\s*\d+\s*===\s*$/m);
+    const headers: string[] = [];
+    for (const m of raw.matchAll(/^===\s*消息\s*\d+\s*===\s*$/gm)) headers.push(m[0].trim());
+
+    const out: string[] = [];
+    sections.slice(1).forEach((body, i) => {
+      const text = body.trim();
+      if (!text) return;
+      const content = text.replace(/^\[消息内容\]\s*/, '').trim();
+      const isOps = OPS_NOTICE.test(content);
+
+      if (isOps) {
+        // 系统代发的运行状态：整条丢掉，不留在上下文里被复述
+        out.push(`${headers[i] ?? `=== 消息 ${i + 1} ===`}\n[消息内容] （系统提示，已略去）`);
+        return;
+      }
+      const who = senderName ? `${senderName}${senderId ? ` (${senderId})` : ''}` : '某人';
+      out.push(`${headers[i] ?? `=== 消息 ${i + 1} ===`}\n[消息内容] （${who}）${content}`);
+    });
+    quoteText = out.join('\n\n');
+
+    // 合并转发里所有条目都是系统播报 → 整块不参与对话
+    const allOps = sections.slice(1).every((b) => {
+      const c = b.trim().replace(/^\[消息内容\]\s*/, '');
+      return !c || OPS_NOTICE.test(c);
+    });
+    if (allOps) {
+      return '[Quoted message begins]\n（下面全是系统代你发出的运行状态提示，不是在跟任何人聊天）\n'
+        + quoteText + '\n[Quoted message ends]\n[Current message]\n';
+    }
+  } else if (OPS_NOTICE.test(raw)) {
+    return '[Quoted message begins]\n（这是系统代你发出的运行状态提示，不是别人在跟你聊天）\n'
+      + '[消息内容] （系统提示，已略去）\n[Quoted message ends]\n[Current message]\n';
+  } else {
+    quoteText = raw;
+  }
+
+  const attribution = senderName
+    ? `[Quoted message begins]\n（这段引文来自「${senderName}」${senderId ? ` (${senderId})` : ''}，不是你正在对话的那个人）\n`
+    : '[Quoted message begins]\n（引文发送者未知）\n';
+
+  return `${attribution}${quoteText}\n[Quoted message ends]\n[Current message]\n`;
 }
 
 /**

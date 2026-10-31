@@ -64,6 +64,26 @@ const SILENT_TURN_ERROR_CODES = new Set(['STREAM_CLOSED']);
 const ERROR_NOTICE_COOLDOWN_MS = 10 * 60 * 1000;   // 10 分钟
 
 /**
+ * 错误提示是否允许透露技术细节。
+ *
+ * 真实事故（2026-10-31）：群里出现
+ *   ⚠️ 本轮异常结束 / `RATE_LIMIT`: raccoon: 您的模型请求频率超限，请稍后重试
+ * 这条是**系统代小羽发的运维文案**，但它以"小羽发言"的形式进了群，随后被用户引用，
+ * 又被喂回给小羽 —— 她照着这段话编出"我这边也遇到了限流"，还把别人的话算到用户头上。
+ *
+ * 因此：群里只发一句人能听懂的「这轮没接上」，错误码/通道名只在私聊给 owner 看。
+ */
+const OPS_ERROR_CODES = new Set([
+  'RATE_LIMIT', 'MISSING_CREDENTIAL', 'NO_ADAPTER', 'SERVER', 'UNSUPPORTED_REASONING_EFFORT',
+  'TIMEOUT', 'NETWORK', 'OVERLOADED', 'CONTEXT_TOO_LONG', 'MODEL_UNAVAILABLE',
+]);
+
+/** 这条提示要不要带技术细节：仅私聊 + 错误码属运维类 */
+function shouldExposeErrorDetail(scope: string): boolean {
+  return scope !== 'group';
+}
+
+/**
  * 出站路由器：持有会话级状态，按事件类型分发到处理器
  */
 class OutboundRouter {
@@ -306,7 +326,31 @@ class OutboundRouter {
           this.logger.debug(`im-qqbot: 错误提示冷却中，跳过 code=${failure.code}`);
         } else {
           this.errorNoticeAt.set(key, Date.now());
-          await this.send(record, `⚠️ 本轮异常结束\n\`${failure.code}\`: ${failure.message}`, 'sendTurnEndError');
+          // 取回复目标的 scope（replyTarget 始终有 scope；record.scope 在部分构造下缺失）
+          const scope = record.replyTarget?.scope ?? record.scope ?? 'group';
+
+          // 先尝试换备用通道：能换就不必让用户干等下一次。
+          // 防御性调用：manager 可能是测试替身或未装备用通道的旧构造，缺方法时按"不换"处理。
+          const switched = typeof this.manager.maybeFailover === 'function'
+            ? this.manager.maybeFailover(scope, record.peerId, failure.code)
+            : undefined;
+
+          let text: string;
+          if (switched) {
+            // 换路成功：告诉她（和群里）下一轮会换个通道，不用重复发错误码
+            text = scope !== 'group' && shouldExposeErrorDetail(scope)
+              ? `⚠️ 本轮失败（\`${failure.code}\`），已切到备用通道 ${switched.to.provider}/${switched.to.model}`
+              : '这条通道挤爆了，我换条路子再来';
+          } else if (shouldExposeErrorDetail(scope)) {
+            // 私聊：给 owner 看完整技术细节，方便排查
+            text = `⚠️ 本轮异常结束\n\`${failure.code}\`: ${failure.message}`;
+          } else if (OPS_ERROR_CODES.has(failure.code)) {
+            // 群里：只说人话，不带错误码/通道名，避免被当成聊天素材复述
+            text = '这轮没接上，等下再试';
+          } else {
+            text = '这轮出了点问题，等下再试';
+          }
+          await this.send(record, text, 'sendTurnEndError');
         }
       }
       if (files.length > 0 && this.deliverer !== undefined) {
