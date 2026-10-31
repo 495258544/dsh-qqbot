@@ -50,20 +50,31 @@ function logWakeDbg(sp: string, key: string, msg: any, decision: any, extra: str
 export function personaWakeGate(
   persona: PersonaService,
   logger: Logger,
+  opts: { fromBotAtMeAllowed?: boolean } = {},
 ): Middleware {
+  const fromBotAtMeAllowed = opts.fromBotAtMeAllowed !== false;
   return async (ctx: MiddlewareContext, next: () => Promise<void>): Promise<void> => {
     const msg = ctx.message;
 
-    // ── 硬门禁：不处理其他机器人发来的消息（防 A↔B 无限互聊）──
-    // 场景：群里可能接了多个 robot。两个 bot 都会在"活跃期"里接对方的话，
-    // 于是 A 回 B、B 回 A，无限循环，刷屏且烧钱。
-    // SDK 的 author.bot 会标出来（senderIsBot），但 messageFilter 没有这个开关，
-    // 所以必须自己挡，而且要在**任何记账/唤醒之前**挡掉。
+    // ── 其他机器人的消息：**读但不回**（不是直接丢弃）──
+    //
+    // 为什么不能一刀切过滤：群里的其他 bot 可能发很有用的东西
+    // （新闻推送、天气、股价、群管通知、翻译…）。全丢掉等于把这些信息也屏蔽了。
+    //
+    // 但也不能回：两个 bot 都会在"活跃期"里接对方的话 → A 回 B、B 回 A 无限循环。
+    //
+    // 折中：**消息仍然进历史缓冲**（historyBuffer 在 gate 之前且 recordOnSkip:true，
+    // 所以她下次被叫醒时能看到这些内容），但本轮不唤醒、不回复。
+    // 只有一种例外放行：这条 bot 消息**@了她**（说明是专门找她的，比如另一个
+    // bot 帮她查了东西回给她），这才值得回应一句。
     const fromBot = (msg as unknown as { senderIsBot?: boolean }).senderIsBot === true;
     if (fromBot) {
-      logger.debug('persona: 忽略其他机器人发来的消息');
-      ctx.stop('from-bot');
-      return;
+      const atMe = ctx.state.mention?.wasMentioned === true;
+      logger.debug(`persona: 其他bot的消息（@我=${atMe}）→ ${atMe ? '放行' : '只记历史不回'}`);
+      if (!(atMe && fromBotAtMeAllowed)) {
+        ctx.stop('from-bot-read-only');
+        return;
+      }
     }
 
     const scope = msg.kind === 'group' ? 'group' : 'c2c';

@@ -93,7 +93,9 @@ export function setupMiddlewares(
   //     /stop /new 回归）、附件不下载（成本翻倍）一并归零。
   //     依赖：mentionGate(5) 的 ctx.state.mention、contentSanitizer(6) 的清洗文本。
   if (manager.persona) {
-    bot.use(personaWakeGate(manager.persona, logger));
+    bot.use(personaWakeGate(manager.persona, logger, {
+      fromBotAtMeAllowed: config.persona.fromBotAtMeAllowed,
+    }));
   }
 
   // 8. 斜杠命令（在 concurrencyGuard 之前，命令匹配后不排队直接响应）
