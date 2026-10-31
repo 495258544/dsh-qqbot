@@ -233,7 +233,7 @@ export async function bootstrapGateway(
 
   // ── 表情包挑选工具（qq_pick_sticker，从 /sdcard/表情包 索引按情绪检索） ──
   registerStickerTool(ctx, config, logger);
-  registerArchiveTool(ctx, logger);
+  registerArchiveTool(ctx, config, logger);
 
   // ── persona 工具（qq_write_diary / qq_read_diary / qq_memory_append）──
   if (persona) {

@@ -20,9 +20,19 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { platformDefaultRoot } from '../media/sticker-tool.ts';
 
-/** 表情库根 */
-const LIB_ROOT = '/sdcard/表情包';
+/**
+ * 表情库根。
+ * 上游写死 /sdcard/表情包（安卓），桌面端不存在该路径。
+ * 这里改为：--root 参数 > QQBOT_STICKER_ROOT 环境变量 > 平台默认（桌面端 ~/stickers）。
+ */
+function libRoot(): string {
+  const i = process.argv.indexOf('--root');
+  const fromArgv = i >= 0 ? (process.argv[i + 1] ?? '') : '';
+  const fromEnv = process.env.QQBOT_STICKER_ROOT ?? '';
+  return (fromArgv || fromEnv || platformDefaultRoot()).replace(/[\\/]+$/, '');
+}
 /** 索引文件 */
 const INDEX_FILE = '_index.json';
 
@@ -98,7 +108,7 @@ function md5(file: string): string {
 
 /** 读索引 */
 function loadIndex(): StickerEntry[] {
-  const p = path.join(LIB_ROOT, INDEX_FILE);
+  const p = path.join(libRoot(), INDEX_FILE);
   if (!fs.existsSync(p)) return [];
   try {
     const raw = JSON.parse(fs.readFileSync(p, 'utf8')) as { stickers?: StickerEntry[] };
@@ -114,7 +124,7 @@ function loadIndex(): StickerEntry[] {
  */
 export function verifyStickerLibrary(checkDuplicates = true): VerifyReport {
   const stickers = loadIndex();
-  const diskFiles = scanImages(LIB_ROOT);
+  const diskFiles = scanImages(libRoot());
   const indexedSet = new Set(stickers.map((s) => s.path));
 
   // 1. 失效索引
@@ -176,7 +186,7 @@ export function verifyStickerLibrary(checkDuplicates = true): VerifyReport {
 
 /** 清理索引里指向不存在文件的条目（**只改索引，不动文件**） */
 export function fixStaleIndex(): { removed: number; remaining: number } {
-  const p = path.join(LIB_ROOT, INDEX_FILE);
+  const p = path.join(libRoot(), INDEX_FILE);
   if (!fs.existsSync(p)) return { removed: 0, remaining: 0 };
   const raw = JSON.parse(fs.readFileSync(p, 'utf8')) as {
     version?: number;

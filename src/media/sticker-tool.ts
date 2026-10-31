@@ -2,7 +2,8 @@
  * 表情包工具 — 让小羽按「使用时机」从本地表情库挑图
  * ─────────────────────────────────────────────────────────────
  * 设计原则：按"我什么时候想发这张图"分类，不是按画风/来源分类。
- *   - 表情库在设备 /sdcard/表情包/，配 _index.json 索引（v2，按使用时机）
+ *   - 表情库根跨平台解析：安卓是 /sdcard/表情包，桌面端是 ~/stickers
+ *     （见 platformDefaultRoot / resolveLibraryRoot），配 _index.json 索引（v2，按使用时机）
  *   - 本工具只检索候选并返回路径，真正发图仍走 qqbot_send_file（单一发送实现）
  *   - 无特别情绪时优先鲸鱼娘（DSH鲸鱼娘_ 前缀，priority 10）
  *
@@ -12,12 +13,15 @@
  *   C 气氛经营  C1搞笑 C2卖萌 C3日常 C4节日
  *   D 御用默认  D1鲸鱼娘
  *
- * 索引 /sdcard/表情包/_index.json 结构：
+ * 索引 <库根>/_index.json 结构：
  *   { "version":2, "stickers":[
  *       { "path":"...", "use":["A1"], "emo":["开心"], "desc":"...",
  *         "text":"图上的字", "scene":"二次元", "priority":0 } ] }
  */
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { homedir } from 'node:os';
+import { basename, extname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { Context } from '@deepseek-ai/cordis';
 import type { ContentBlock } from '@deepseek-ai/dsh-llm';
@@ -61,13 +65,25 @@ interface PickStickerArgs {
   count?: number;
 }
 
-/** 表情库根目录兜底 */
-const DEFAULT_ROOT = '/sdcard/表情包';
+/**
+ * 平台默认表情库根。
+ * 上游按安卓设备写死 /sdcard/表情包，桌面端（Windows/macOS/Linux）该路径不存在，
+ * 归档工具会直接写失败。这里改为运行时探测：真有 /sdcard 才用安卓路径，
+ * 否则落到用户主目录下的 stickers/（与自建库同一位置）。
+ */
+export function platformDefaultRoot(): string {
+  try {
+    if (existsSync('/sdcard')) return '/sdcard/表情包';
+  } catch {
+    /* 探测失败按桌面处理 */
+  }
+  return join(homedir(), 'stickers');
+}
 
 /**
- * 内置默认表情包（随仓库分发，新设备开箱即用）。
+ * 内置默认表情包（随仓库分发，开箱即用）。
  * 仓库里放 assets/stickers/DSH鲸鱼娘/（图片 + index.json），
- * 设备上若 /sdcard/表情包 没有内容，就回退到这里。
+ * 检索时与本地库合并成一个池子（见 registerStickerTool）。
  */
 const BUNDLED_STICKER_DIRS = ['assets/stickers/DSH鲸鱼娘'];
 
@@ -225,7 +241,7 @@ export function registerStickerTool(
   const roots = (config.sendFile?.extraRoots ?? [])
     .map((r) => String(r).replace(/[\\/]+$/, ''))
     .filter(Boolean);
-  roots.push(DEFAULT_ROOT);
+  roots.push(platformDefaultRoot());
 
   tools.register({
     name: STICKER_TOOL_NAME,
@@ -363,12 +379,27 @@ export function registerStickerTool(
 /** 归档工具名 */
 export const ARCHIVE_TOOL_NAME = 'qq_archive_sticker';
 
-/** 表情库根（供两个工具共用） */
-const LIB_ROOT = '/sdcard/表情包';
+/**
+ * 解析归档目标库根：优先用已存在的 extraRoots（桌面端即用户自建库），
+ * 其次平台默认；都不存在则创建平台默认目录后返回。
+ */
+export function resolveLibraryRoot(config?: ImQQBotConfig): string {
+  for (const raw of config?.sendFile?.extraRoots ?? []) {
+    const r = String(raw).replace(/[\\/]+$/, '');
+    if (r && existsSync(r)) return r;
+  }
+  const def = platformDefaultRoot();
+  try {
+    mkdirSync(def, { recursive: true });
+  } catch {
+    /* 建不出来就让后续写入报错，保留原始错误信息 */
+  }
+  return def;
+}
 
 /** 把一条记录写进索引（读-改-写，按 path 去重） */
-function upsertIndex(entry: StickerEntry, logger: Logger): boolean {
-  const p = `${LIB_ROOT}/${INDEX_FILE}`;
+function upsertIndex(entry: StickerEntry, root: string, logger: Logger): boolean {
+  const p = `${root}/${INDEX_FILE}`;
   try {
     let idx: StickerIndex;
     if (existsSync(p)) {
@@ -390,11 +421,41 @@ function upsertIndex(entry: StickerEntry, logger: Logger): boolean {
   }
 }
 
+/** 库内收集目录名（归档进来的图放这里，与手工分类目录分开） */
+const COLLECT_DIR = '_群聊收集';
+
+/**
+ * 把外部图片收进库目录。
+ * 桌面端必需：聊天附件落在 ~/.dsh-qqbot/media，会被 TTL 清理；
+ * 只把原路径写进索引会留下死链。已在本库内的图原样返回，不重复复制。
+ */
+function adoptIntoLibrary(srcPath: string, root: string, logger: Logger): string {
+  const posix = (p: string): string => p.replace(/\\/g, '/');
+  const rootPrefix = posix(root).replace(/\/+$/, '') + '/';
+  if (posix(srcPath).toLowerCase().startsWith(rootPrefix.toLowerCase())) return posix(srcPath);
+
+  const collectDir = join(root, COLLECT_DIR);
+  mkdirSync(collectDir, { recursive: true });
+
+  const buf = readFileSync(srcPath);
+  const md5 = createHash('md5').update(buf).digest('hex');
+  const ext = extname(srcPath) || '.jpg';
+  const stem = basename(srcPath, extname(srcPath))
+    .replace(/[^\w\u4e00-\u9fa5-]/g, '_')
+    .slice(0, 40) || 'sticker';
+  const dest = join(collectDir, `${md5.slice(0, 12)}_${stem}${ext}`);
+  if (!existsSync(dest)) {
+    copyFileSync(srcPath, dest);
+    logger.info(`im-qqbot: 表情已收进库 ${posix(dest)}`);
+  }
+  return posix(dest);
+}
+
 /**
  * 注册 qq_archive_sticker —— 让小羽在聊天中看到合适的图就当场打标入库，
  * 避免事后二次大规模扫描（节省资源）。
  */
-export function registerArchiveTool(ctx: Context, logger: Logger): void {
+export function registerArchiveTool(ctx: Context, config: ImQQBotConfig, logger: Logger): void {
   const tools = ctx.get('tools') as ToolsRegistryLike | undefined;
   if (!tools?.register) {
     logger.warn('im-qqbot: tools 服务不可用，qq_archive_sticker 工具未注册');
@@ -453,18 +514,21 @@ export function registerArchiveTool(ctx: Context, logger: Logger): void {
       if (!existsSync(a.path)) {
         throw new Error(`qq_archive_sticker: 文件不存在 ${a.path}`);
       }
+      const root = resolveLibraryRoot(config);
+      // 收进库（复制），不要只记外部路径 —— 附件目录会被 TTL 清理
+      const localPath = adoptIntoLibrary(a.path, root, logger);
       const entry: StickerEntry = {
-        path: a.path,
+        path: localPath,
         use: a.timing ?? [],
         emo: a.emotion ?? [],
         desc: a.desc,
         text: a.text ?? '',
-        scene: '_群聊收集',
+        scene: COLLECT_DIR,
         priority: 0,
       };
-      const ok = upsertIndex(entry, logger);
-      const idx = loadIndex(LIB_ROOT);
-      logger.info(`im-qqbot: 表情入库 ${a.path} use=${(a.timing ?? []).join(',')}`);
+      const ok = upsertIndex(entry, root, logger);
+      const idx = loadIndex(root);
+      logger.info(`im-qqbot: 表情入库 ${localPath} use=${(a.timing ?? []).join(',')}`);
       return { ok, total: idx?.stickers.length ?? 0 };
     },
   });
