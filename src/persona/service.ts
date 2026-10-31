@@ -289,9 +289,15 @@ export class PersonaService {
       statePath: path.join(this.deps.dataDir, 'state', 'own-life.json'),
       intervalMs: this.deps.config.ownLifeIntervalMs,
       maxPerDay: this.deps.config.ownLifeMaxPerDay,
-      // 修复：原来不传 quiet，走默认 [3,8]——正好把凌晨 3-7 点（她的冲浪时段）禁掉。
-      // 这里放进冲浪时段，让她的自由时间与冲浪时段对齐。
-      quiet: [this.deps.config.surfToHour, this.deps.config.surfFromHour],
+      // quiet = "这个时段别打扰她"，语义是**禁止**（own-life.ts: inQuiet → skipped:'quiet'）。
+      //
+      // 踩过的坑（2026-11-01 实测）：之前写成 [surfToHour, surfFromHour] = [7,3]，
+      // 而 isHourInRange 对 from>to 的解释是 "hour>=from || hour<to" → 覆盖 7点到次日3点，
+      // 也就是说**大半天都被禁掉了**，她唯一能自由活动的时间只剩 3-7 点的冲浪时段。
+      // 结果：own-life.json 里 lastFiredAt 有值但 firedToday=0 —— 触发了却被静默跳过。
+      //
+      // 正确语义应该按"睡觉时段"来：深夜到清晨别叫，白天晚上都算她的时间。
+      quiet: [23, 8],
       log: (m) => this.deps.logger.info(`persona: own-life ${m}`),
     });
     this.ownLife.start();
