@@ -16,6 +16,7 @@
  * 无论这条消息之后会不会唤醒她，都先记进索引。
  */
 import type { Middleware, MiddlewareContext } from '@tencent-connect/qqbot-nodejs';
+import { appendFileSync } from 'node:fs';
 import { rememberForAttribution } from '../features/attribution-index.ts';
 
 /**
@@ -60,6 +61,26 @@ export function attributionRecorder(options: AttributionRecorderOptions): Middle
     //  - 存图片或 base64 会吃光内存/磁盘（用户明确担心过这点）
     //  - 纯图片消息（content 为空）跳过即可，它本来也无从被"引用文字"命中
     const imageMd5 = extractImageMd5(msg);
+
+    // 诊断：图片归属最容易在这里丢线索。
+    // 记录**每条**群消息的关键字段（含是否有附件），才能分辨
+    // "消息没到 recorder" 还是 "到了但 attachments 为空"。
+    try {
+      const rawAtts = (msg as { attachments?: unknown[] })?.attachments;
+      const line = JSON.stringify({
+        t: new Date().toISOString(),
+        senderId: msg.senderId,
+        senderName: msg.senderName,
+        content: text.slice(0, 60),
+        attachmentsCount: Array.isArray(rawAtts) ? rawAtts.length : -1,
+        attachments: Array.isArray(rawAtts) ? rawAtts.slice(0, 2) : undefined,
+        extractedMd5: imageMd5,
+      });
+      appendFileSync('/root/.dsh-qqbot/debug-attribution.jsonl', `${line}\n`);
+    } catch (err) {
+      // 诊断失败要能看见，不能静默吞掉
+      console.error('[attribution] 诊断写入失败:', err instanceof Error ? err.message : String(err));
+    }
     // 纯图片无文字：用占位内容记一条，让它能被"引用这张图"命中
     const body = text || (imageMd5.length > 0 ? '[图片]' : '');
 

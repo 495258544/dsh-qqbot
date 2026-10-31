@@ -152,3 +152,30 @@ describe('buildQuotePart · 认出"她自己说过的话"（botOpenid）', () =>
     expect(out).not.toContain('你自己之前说过的话');
   });
 });
+
+describe('buildQuotePart · 不做过度推断（真实事故 2026-11-01 02:27）', () => {
+  const BOT = 'B1FE2927B46C9AF15C464E62216395FF';
+  const HIST = [
+    { senderId: BOT, senderName: '小羽', content: '四条都标着"某人"，连我刚才自己说的那两句。', timestamp: 0, messageId: 'b1' },
+  ];
+
+  it('同一转发里只有她自己说的那条能查到 → 其他查不到的仍是「某人」，不套成"你自己"', () => {
+    const out = buildQuotePart({
+      text: '=== 消息 1 ===\n[消息内容] 1\n\n=== 消息 2 ===\n[消息内容] 四条都标着"某人"，连我刚才自己说的那两句。\n\n=== 消息 3 ===\n[消息内容] 完全没出现过的话',
+    }, HIST, BOT);
+    expect(out).toContain('你自己之前说的');   // 能查到的那条
+    expect(out).toContain('某人');                     // 查不到的保持如实
+    // 关键：不能把查不到的也归成她自己
+    const selfLabels = (out.match(/你自己之前说的/g) ?? []).length;
+    expect(selfLabels).toBe(1);
+  });
+
+  it('图片 MD5 没命中时，不拿别人的归属顶上', () => {
+    const out = buildQuotePart({
+      text: '=== 消息 1 ===\n[附件1] 类型:图片 文件名:E0AF774221D4BF42638E274B60F0C62E.jpg',
+    }, HIST, BOT);
+    // MD5 不在索引里 → 不认识这张图是谁发的
+    expect(out).toContain('发了一张图片');
+    expect(out).not.toContain('你自己发了一张图片');
+  });
+});
