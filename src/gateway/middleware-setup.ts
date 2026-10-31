@@ -4,6 +4,7 @@
  * 根据插件配置组装 SDK 内置中间件链（洋葱模型）。
  * 中间件负责过滤与上下文富化；最终消息统一由 bot.on('message') 处理转发。
  */
+import { appendFileSync } from 'node:fs';
 import type { QQBot } from '@tencent-connect/qqbot-nodejs';
 import {
   errorHandler,
@@ -37,6 +38,29 @@ export function setupMiddlewares(
 ): void {
   // 1. 错误兜底（最外层洋葱皮）
   bot.use(errorHandler());
+
+  // 1.5 诊断探针：确认消息是否真的进了中间件链。
+  // 图片归属排查用（2026-11-01）：如果这里没有记录，说明消息在网关层就没进来；
+  // 如果有记录但 attributionRecorder 没记，说明中间被谁拦了。
+  bot.use(async (ctx: any, next: any) => {
+    try {
+      const m = ctx.message ?? {};
+      const atts = m.attachments;
+      const line = JSON.stringify({
+        t: new Date().toISOString(),
+        stage: 'probe-enter',
+        kind: m.kind,
+        msgType: m.msgType,
+        messageType: m.messageType,
+        senderId: m.senderId,
+        content: String(m.content ?? '').slice(0, 60),
+        attachmentsCount: Array.isArray(atts) ? atts.length : -1,
+        attachmentFilenames: Array.isArray(atts) ? atts.map((a: any) => a?.filename) : undefined,
+      });
+      appendFileSync('/root/.dsh-qqbot/debug-probe.jsonl', line + '\n');
+    } catch { /* 诊断失败不影响主流程 */ }
+    return next();
+  });
 
   // 2. 消息过滤：bot 回声 + 消息去重
   bot.use(messageFilter({ skipSelfEcho: false }));
