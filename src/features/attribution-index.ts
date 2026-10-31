@@ -28,6 +28,16 @@ export interface AttributionEntry {
   senderName?: string;
   content: string;
   timestamp: number;
+  /**
+   * 这条消息带的图片指纹（MD5）。
+   *
+   * 实测发现（2026-11-01）：QQ 下发的图片文件名本身就是**图片内容的 MD5**，
+   * 与本地归档算出来的 md5 完全一致（逐字节核对过：
+   *   4b859167d7bf796ef62ee84377c1224e  == 归档文件的实际 MD5）。
+   * 所以"引用一张图是谁发的"可以直接用文件名对指纹，**不需要下载图片**，
+   * 也不需要跑视觉模型 —— 事后 URL 会过期（实测返回 download url has expired）。
+   */
+  imageMd5?: string[];
 }
 
 /** 每个群保留多少条用于反查（用户要求放大到 100 条） */
@@ -98,7 +108,7 @@ function groupKey(appId: string, groupId: string): string {
 export function rememberForAttribution(
   appId: string,
   groupId: string,
-  entry: { senderId: string; senderName?: string; content: string },
+  entry: { senderId: string; senderName?: string; content: string; imageMd5?: string[] },
 ): void {
   const body = String(entry.content ?? '').trim();
   if (!body || !entry.senderId) return;
@@ -126,6 +136,7 @@ export function rememberForAttribution(
     ...(entry.senderName ? { senderName: entry.senderName } : {}),
     content: body.slice(0, 200),
     timestamp: Date.now(),
+    ...(entry.imageMd5 && entry.imageMd5.length > 0 ? { imageMd5: entry.imageMd5 } : {}),
   });
   if (list.length > MAX_PER_GROUP) list.splice(0, list.length - MAX_PER_GROUP);
   persist();
@@ -181,6 +192,32 @@ export function lookupAttribution(
       // 前缀几乎一致（允许末尾差一两个字）→ 认定同一句
       if (same >= Math.max(10, minLen - 3)) return h;
     }
+  }
+  return undefined;
+}
+
+/**
+ * 按图片指纹反查这条图是谁发的。
+ *
+ * 引用的图片在 msgElements 里带文件名（= 内容 MD5）与 URL，
+ * 但 URL 会过期（实测 "download url has expired"），下载并不可靠。
+ * 用 MD5 对索引即可，零网络开销。
+ */
+export function lookupByImageMd5(
+  appId: string,
+  groupId: string,
+  md5s: string[],
+): AttributionEntry | undefined {
+  ensureLoaded();
+  if (md5s.length === 0) return undefined;
+  const list = index.get(groupKey(appId, groupId));
+  if (!list?.length) return undefined;
+
+  const targets = new Set(md5s.map((m) => m.toLowerCase()));
+  for (let i = list.length - 1; i >= 0; i--) {
+    const h = list[i];
+    if (!h?.imageMd5?.length) continue;
+    if (h.imageMd5.some((m) => targets.has(m.toLowerCase()))) return h;
   }
   return undefined;
 }

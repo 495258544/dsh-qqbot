@@ -18,6 +18,30 @@
 import type { Middleware, MiddlewareContext } from '@tencent-connect/qqbot-nodejs';
 import { rememberForAttribution } from '../features/attribution-index.ts';
 
+/**
+ * 从消息里提取图片指纹。
+ *
+ * QQ 给的图片文件名就是内容 MD5（实测与归档文件的实际 md5 逐字节一致），
+ * 这是"引用一张图是谁发的"唯一可靠的线索：URL 会过期，视觉模型还要下载。
+ */
+function extractImageMd5(msg: unknown): string[] {
+  const out: string[] = [];
+  const push = (v: unknown): void => {
+    if (typeof v !== 'string') return;
+    // 32 位十六进制即 MD5
+    const m = v.match(/^([A-Fa-f0-9]{32})(?:\.[a-z0-9]+)?$/i);
+    if (m && m[1]) out.push(m[1].toLowerCase());
+  };
+  const atts = (msg as { attachments?: Array<{ filename?: string; url?: string }> })?.attachments;
+  if (Array.isArray(atts)) {
+    for (const a of atts) {
+      push(a?.filename);
+      // URL 里也可能带 fileid，但不可靠，只用文件名
+    }
+  }
+  return out;
+}
+
 export interface AttributionRecorderOptions {
   appId: string;
 }
@@ -35,11 +59,16 @@ export function attributionRecorder(options: AttributionRecorderOptions): Middle
     //  - 反查靠内容比对，图片没有可比对的文本（存 URL 也匹配不上引文）
     //  - 存图片或 base64 会吃光内存/磁盘（用户明确担心过这点）
     //  - 纯图片消息（content 为空）跳过即可，它本来也无从被"引用文字"命中
-    if (groupId && text && msg.senderId) {
+    const imageMd5 = extractImageMd5(msg);
+    // 纯图片无文字：用占位内容记一条，让它能被"引用这张图"命中
+    const body = text || (imageMd5.length > 0 ? '[图片]' : '');
+
+    if (groupId && body && msg.senderId) {
       rememberForAttribution(options.appId, groupId, {
         senderId: msg.senderId,
         senderName: msg.senderName,
-        content: text,
+        content: body,
+        ...(imageMd5.length > 0 ? { imageMd5 } : {}),
       });
     }
     return next();

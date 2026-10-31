@@ -11,6 +11,7 @@
 import { existsSync, rmSync } from 'node:fs';
 import { describe, expect, it, beforeEach, afterEach, vi } from 'vitest';
 import {
+  lookupByImageMd5,
   rememberForAttribution,
   lookupAttribution,
   clearAttribution,
@@ -121,5 +122,37 @@ describe('归属索引 · 落盘持久化（重启后仍能反查）', () => {
     fresh.reloadForTest();          // 允许重新读盘
     const hit = fresh.lookupAttribution(APP, GID, '看不到。转发里每条都只标着某人');
     expect(hit?.senderId).toBe(BOT.senderId);
+  });
+});
+
+describe('归属索引 · 图片 MD5 反查（不需要下载图片）', () => {
+  const MD5 = 'e0af774221d4bf42638e274b60f0c62e';
+
+  it('记下图片 MD5 后能反查到发送者（QQ 文件名即内容 MD5）', () => {
+    rememberForAttribution(APP, GID, { ...JMX, content: '[图片]', imageMd5: [MD5] });
+    const hit = lookupByImageMd5(APP, GID, [MD5]);
+    expect(hit?.senderName).toBe('jmx的大蠢鱼');
+  });
+
+  it('大小写不敏感（QQ 给的是大写）', () => {
+    rememberForAttribution(APP, GID, { ...JMX, content: '[图片]', imageMd5: [MD5] });
+    expect(lookupByImageMd5(APP, GID, [MD5.toUpperCase()])?.senderName).toBe('jmx的大蠢鱼');
+  });
+
+  it('多张图的任意一张命中即可', () => {
+    rememberForAttribution(APP, GID, {
+      ...JMX, content: '[图片]', imageMd5: ['aaa', 'bbb', 'ccc'],
+    });
+    expect(lookupByImageMd5(APP, GID, ['zzz', 'BBB'])?.senderName).toBe('jmx的大蠢鱼');
+  });
+
+  it('没记过的图 → undefined（不瞎猜）', () => {
+    rememberForAttribution(APP, GID, { ...JMX, content: '[图片]', imageMd5: ['aaa'] });
+    expect(lookupByImageMd5(APP, GID, ['never-seen'])).toBeUndefined();
+  });
+
+  it('空 MD5 列表 → undefined', () => {
+    rememberForAttribution(APP, GID, { ...JMX, content: '[图片]', imageMd5: [MD5] });
+    expect(lookupByImageMd5(APP, GID, [])).toBeUndefined();
   });
 });

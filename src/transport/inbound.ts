@@ -21,7 +21,7 @@ import {
   type MediaKind,
 } from './attachment.ts';
 import { clearGroupHistory } from '../features/history-store.ts';
-import { lookupAttribution } from '../features/attribution-index.ts';
+import { lookupAttribution, lookupByImageMd5 } from '../features/attribution-index.ts';
 import { stashPendingAttachments, takePendingAttachments, pendingKey } from '../features/pending-attachments.ts';
 
 import type { MiddlewareContext } from '@tencent-connect/qqbot-nodejs';
@@ -146,6 +146,12 @@ export async function handleInbound(
           return hit ? { id: hit.senderId, name: hit.senderName } : {};
         }
       : undefined,
+    scope === 'group'
+      ? (md5s) => {
+          const hit = lookupByImageMd5(config.appId, gid, md5s);
+          return hit ? { id: hit.senderId, name: hit.senderName } : {};
+        }
+      : undefined,
   );
 
   // 把"先发的图"补进 agentBody，否则 agent 不知道这几张图的存在
@@ -252,6 +258,8 @@ function assembleAgentBody(
   botOpenid?: string,
   /** 按内容反查引文发送者（独立归属索引，不受群历史清空影响） */
   lookupSender?: (quotedText: string) => { id?: string; name?: string },
+  /** 按图片 MD5 反查（QQ 的图片文件名就是内容 MD5，无需下载图片） */
+  lookupImage?: (md5s: string[]) => { id?: string; name?: string },
 ): string | null {
   const isGroup = scope === 'group';
   const wasMentioned = state.mention?.wasMentioned ?? false;
@@ -265,6 +273,7 @@ function assembleAgentBody(
     state.history,
     botOpenid || detectBotSelfId(state.history),
     lookupSender,
+    lookupImage,
   );
   const userMessage = buildUserMessage(userContent, quotePart, msg.senderId, msg.senderName, isGroup, wasMentioned);
 
@@ -355,6 +364,7 @@ export function buildQuotePart(
   history?: HistoryEntry[],
   botSelfId?: string,
   lookupSender?: (quotedText: string) => { id?: string; name?: string },
+  lookupImage?: (md5s: string[]) => { id?: string; name?: string },
 ): string {
   if (!quote?.text && !quote?.entry?.content) return '';
 
@@ -450,7 +460,16 @@ export function buildQuotePart(
         // 类型字段直接就是中文（"类型:图片"），不是英文 image/video
         const kind = content.match(/类型:([^\s]+)/)?.[1] ?? '';
         const zh = /图/.test(kind) ? '图片' : /视频/.test(kind) ? '视频' : /文件/.test(kind) ? '文件' : '附件';
-        const who = labelOf(content, quote.entry?.senderId, quote.entry?.senderName);
+
+        // 图片归属：文件名就是内容 MD5 → 直接对索引，不需要下载（URL 会过期）
+        const md5s = [...content.matchAll(/文件名:([A-Fa-f0-9]{32})/g)].map((m) => m[1]!.toLowerCase());
+        const byImage = md5s.length > 0 ? lookupImage?.(md5s) : undefined;
+        let who = byImage?.name
+          ?? (byImage?.id ? shortSenderId(byImage.id) : undefined)
+          ?? labelOf(content, quote.entry?.senderId, quote.entry?.senderName);
+        if (byImage?.id && isSelf(byImage.id)) who = '你自己';
+        else if (who === '某人' && fallbackOwner) who = fallbackOwner === '小羽' ? '你自己' : fallbackOwner;
+
         lines.push(`${head}\n[消息内容] （${who}发了一张${zh}）[${zh}]`);
         return;
       }
