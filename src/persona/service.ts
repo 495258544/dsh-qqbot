@@ -20,6 +20,8 @@ import { SelfNoteService } from './self-note.ts';
 import { runSurfRound, inSurfWindow, type SurfResult } from './surf.ts';
 import { clockInTz, weekdayInTz, DEFAULT_TZ } from './clock.ts';
 import { Humanizer } from './humanize.ts';
+import { extractFact, extractTrait } from './fact-extract.ts';
+import { pickDiaryMaterial, composeDiaryText, readTurnsOfDay, shouldWriteDiary } from './diary-auto.ts';
 import { createOwnLife, type OwnLifeHandle, type OwnLifeDeliverResult } from './own-life.ts';
 import { createScreenWatch, type ScreenWatchHandle, type ScreenWatchOptions, type ScreenNudge, type ScreenDeliverResult } from './screen-watch.ts';
 import type { PersonaConfig } from '../config.ts';
@@ -416,5 +418,62 @@ export class PersonaService {
     const user = (entry.user ?? '').trim();
     const reply = entry.reply.trim();
     if (user || reply) this.memory.logTurn({ where, who: entry.who ?? fallbackWho, text: user, reply });
+
+    // ── M23：事实硬触发 ──
+    // 实测失效：3 个人 89 次交互，实质记忆 0 条。
+    // 根因是"指望模型自觉调 qq_memory_append"≈不写（群聊里 0 次）。
+    // 改成每轮由代码抽一次，不依赖她想起用工具。
+    this.autoRemember(entry.who ?? fallbackWho, user);
+    this.autoDiary();
+  }
+
+  /**
+   * 从用户原话里抽事实/话题/性格，自动写进人物账本。
+   *
+   * 原则：宁可少抽，不要错抽 —— 错记比不记更糟（她会把编的东西当真）。
+   * 规则见 fact-extract.ts：只抽"对方说的关于他自己的事"，隐私一律不记。
+   */
+  /**
+   * 日记硬触发：当天聊过就在当天写一条，不问她要不要写。
+   *
+   * 实测：diary/ 曾长期为 0 个文件 —— "指望模型自觉写"就是不写。
+   * 只在"当天还没写过"时触发，避免每条消息都写。
+   */
+  private autoDiary(): void {
+    try {
+      const today = new Date();
+      const pad = (n: number) => String(n).padStart(2, '0');
+      const day = `${today.getFullYear()}-${pad(today.getMonth() + 1)}-${pad(today.getDate())}`;
+
+      // 当天已经写过就不重复
+      const already = this.diary.recent(30).some((e) => e.day === day);
+      if (already) return;
+
+      const turnsFile = path.join(this.deps.dataDir, 'memory', 'turns.jsonl');
+      const turns = readTurnsOfDay(turnsFile, day);
+      if (!shouldWriteDiary(turns.length, already)) return;
+
+      const text = composeDiaryText(pickDiaryMaterial(turns));
+      if (!text) return;
+      this.diary.add({ text, mood: turns.length >= 20 ? '说累了' : '平常' });
+    } catch {
+      /* 日记写失败不影响主流程 */
+    }
+  }
+
+  private autoRemember(who: string, userText: string): void {
+    if (!who || !userText) return;
+    try {
+      const f = extractFact(userText);
+      const trait = extractTrait(userText);
+      if (!f && !trait) return;
+      this.memory.remember(who, {
+        ...(f?.fact ? { fact: f.fact } : {}),
+        ...(f?.topic ? { topic: f.topic } : {}),
+        ...(trait ? { trait } : {}),
+      });
+    } catch {
+      /* 抽取失败不影响主流程 */
+    }
   }
 }
