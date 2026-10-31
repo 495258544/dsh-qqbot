@@ -79,6 +79,8 @@ export interface PersonaConfig {
   groupProbability: number;
   /** 兴趣命中时的基础唤醒概率（实际 = chattiness × 兴趣权重 × 本值） */
   interestBaseProbability: number;
+  /** 同一个人在活跃窗口里连续多少条无关消息后关掉他的窗口（默认 5） */
+  idleDiveThreshold: number;
   /** 其他 bot @她时是否回应（默认 true；false=完全不搭理其他 bot） */
   fromBotAtMeAllowed: boolean;
   /** 拟人化发送开关（分条 + 停顿） */
@@ -294,6 +296,7 @@ export const ConfigSchema: Schema<ImQQBotConfig> = Schema.object({
     ownerOpenids: Schema.array(Schema.string()).default([]).description('主人 openid（发言必醒；own-life 投递目标）'),
     groupProbability: Schema.number().default(0).description('群闲聊随机插话概率（0=纯潜水）'),
     interestBaseProbability: Schema.number().default(0.5).description('兴趣命中时的基础唤醒概率（实际=chattiness×权重×本值）'),
+    idleDiveThreshold: Schema.number().default(5).description('同一个人在活跃窗口里连续多少条与她无关的消息后回潜水（默认5；只计提到过她的人）'),
     fromBotAtMeAllowed: Schema.boolean().default(true).description('其他机器人@她时是否回应（默认true；其他bot的普通消息一律只进历史不回复，防互聊死循环）'),
     humanizeEnabled: Schema.boolean().default(true).description('拟人化发送（分条+停顿）'),
     msPerChar: Schema.number().default(110).description('每字打字毫秒（真人实测约110）'),
@@ -325,6 +328,7 @@ export const ConfigSchema: Schema<ImQQBotConfig> = Schema.object({
     ownerOpenids: [],
     groupProbability: 0,
     interestBaseProbability: 0.5,
+    idleDiveThreshold: 5,
     fromBotAtMeAllowed: true,
     humanizeEnabled: true,
     msPerChar: 110,

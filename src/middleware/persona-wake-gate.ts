@@ -95,7 +95,7 @@ export function personaWakeGate(
       // 放行后**直接进处理**：跳过 shouldWake 判定。
       // 因为 bot 消息的文本本来就不符合"@/名字/关键词"这些规则，
       // 再走一遍唤醒判定必然被拦掉（实测就是 persona:not-woken）。
-      waker?.wake(key);
+      waker?.wake(key, msg.senderId);
       persona.memory.touch(msg.senderId, { name: msg.senderName });
       await next();
       return;
@@ -111,7 +111,7 @@ export function personaWakeGate(
             text: msg.content ?? '',
             isAtMe: ctx.state.mention?.wasMentioned === true,
             // 活跃期内按概率接话，避免变成应答器
-            inActiveWindow: waker.isActive(key),
+            inActiveWindow: waker.isSpeakerActive(key, msg.senderId),
           })
         : { wake: true, reason: 'c2c' as string };
       logWakeDbg('decision', key, msg, decision, `mentioned=${ctx.state.mention?.wasMentioned === true} implicit=${ctx.state.mention?.implicit === true}`);
@@ -151,7 +151,7 @@ export function personaWakeGate(
       logger.debug(`persona: wake-gate pass ${key} reason=${decision.reason}`);
       // 醒后才涨互动计数（m1①），并记录本次唤醒（潜水状态机消费 lastWakeAt）
       persona.memory.touch(msg.senderId, { name: msg.senderName });
-      waker.wake(key);
+      waker.wake(key, msg.senderId);
     }
 
     await next();
