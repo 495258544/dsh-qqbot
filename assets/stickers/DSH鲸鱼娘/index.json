@@ -1,0 +1,655 @@
+{
+ "name": "DSH鲸鱼娘",
+ "version": 1,
+ "description": "DeepSeek 鲸鱼娘表情包（默认表情，无特别情绪时优先使用）",
+ "count": 45,
+ "source": "yyh-001/dsh-meme + FeWOO/DeepSeek-meme + 社区二创",
+ "faces": [
+  {
+   "file": "assets/stickers/DSH鲸鱼娘/DSH鲸鱼娘_谢谢你.webp",
+   "use": [
+    "B5",
+    "A1",
+    "D1"
+   ],
+   "emo": [
+    "感谢",
+    "开心"
+   ],
+   "desc": "鲸鱼娘双手合十闭眼笑，配字「谢谢你～」",
+   "text": "谢谢你～",
+   "priority": 10
+  },
+  {
+   "file": "assets/stickers/DSH鲸鱼娘/DSH鲸鱼娘_我来啦.webp",
+   "use": [
+    "C3",
+    "A1",
+    "D1"
+   ],
+   "emo": [
+    "日常",
+    "开心"
+   ],
+   "desc": "鲸鱼娘挥手打招呼，配字「我来啦！」",
+   "text": "我来啦！",
+   "priority": 10
+  },
+  {
+   "file": "assets/stickers/DSH鲸鱼娘/DSH鲸鱼娘_辛苦啦.webp",
+   "use": [
+    "B1",
+    "B3",
+    "D1"
+   ],
+   "emo": [
+    "夸奖",
+    "鼓励"
+   ],
+   "desc": "鲸鱼娘端杯子微笑，配字「辛苦啦」",
+   "text": "辛苦啦",
+   "priority": 10
+  },
+  {
+   "file": "assets/stickers/DSH鲸鱼娘/DSH鲸鱼娘_晚安.webp",
+   "use": [
+    "C3",
+    "D1"
+   ],
+   "emo": [
+    "晚安",
+    "日常"
+   ],
+   "desc": "鲸鱼娘抱着鲸鱼睡觉，配字「晚安」",
+   "text": "晚安",
+   "priority": 10
+  },
+  {
+   "file": "assets/stickers/DSH鲸鱼娘/DSH鲸鱼娘_早安.webp",
+   "use": [
+    "C3",
+    "D1"
+   ],
+   "emo": [
+    "早安",
+    "日常"
+   ],
+   "desc": "鲸鱼娘挥手，配字「早安」",
+   "text": "早安",
+   "priority": 10
+  },
+  {
+   "file": "assets/stickers/DSH鲸鱼娘/DSH鲸鱼娘_喝奶茶.webp",
+   "use": [
+    "C3",
+    "D1"
+   ],
+   "emo": [
+    "日常",
+    "摸鱼"
+   ],
+   "desc": "鲸鱼娘捧奶茶喝，配字「喝奶茶中」",
+   "text": "喝奶茶中",
+   "priority": 10
+  },
+  {
+   "file": "assets/stickers/DSH鲸鱼娘/DSH鲸鱼娘_嗯问号.webp",
+   "use": [
+    "B4",
+    "D1"
+   ],
+   "emo": [
+    "疑惑"
+   ],
+   "desc": "鲸鱼娘歪头疑惑，配字「嗯…？」",
+   "text": "嗯…？",
+   "priority": 10
+  },
+  {
+   "file": "assets/stickers/DSH鲸鱼娘/DSH鲸鱼娘_哼.webp",
+   "use": [
+    "A6",
+    "A2",
+    "D1"
+   ],
+   "emo": [
+    "得意",
+    "生气"
+   ],
+   "desc": "鲸鱼娘鼓脸撇嘴，配字「哼！」",
+   "text": "哼！",
+   "priority": 10
+  },
+  {
+   "file": "assets/stickers/DSH鲸鱼娘/DSH鲸鱼娘_好困.webp",
+   "use": [
+    "C3",
+    "D1"
+   ],
+   "emo": [
+    "困",
+    "日常"
+   ],
+   "desc": "鲸鱼娘抱着鲸鱼趴着睡，配字「好困…」",
+   "text": "好困…",
+   "priority": 10
+  },
+  {
+   "file": "assets/stickers/DSH鲸鱼娘/DSH鲸鱼娘_OK没问题.jpg",
+   "use": [
+    "C3",
+    "B1",
+    "D1"
+   ],
+   "emo": [
+    "日常",
+    "点赞"
+   ],
+   "desc": "鲸鱼娘竖大拇指，配字 OK没问题",
+   "text": "OK没问题",
+   "priority": 10
+  },
+  {
+   "file": "assets/stickers/DSH鲸鱼娘/DSH鲸鱼娘_加班疲惫.jpg",
+   "use": [
+    "C3",
+    "A3",
+    "D1"
+   ],
+   "emo": [
+    "摸鱼",
+    "疲惫"
+   ],
+   "desc": "鲸鱼娘趴桌用笔记本，配字 加班疲惫",
+   "text": "加班疲惫",
+   "priority": 10
+  },
+  {
+   "file": "assets/stickers/DSH鲸鱼娘/DSH鲸鱼娘_加载中发呆.jpg",
+   "use": [
+    "C3",
+    "D1"
+   ],
+   "emo": [
+    "日常",
+    "发呆"
+   ],
+   "desc": "鲸鱼娘发呆冒小点",
+   "text": "加载中发呆",
+   "priority": 10
+  },
+  {
+   "file": "assets/stickers/DSH鲸鱼娘/DSH鲸鱼娘_嫌弃路过.jpg",
+   "use": [
+    "B2",
+    "D1"
+   ],
+   "emo": [
+    "嫌弃",
+    "无语"
+   ],
+   "desc": "鲸鱼娘侧身嫌弃路过",
+   "text": "嫌弃路过",
+   "priority": 10
+  },
+  {
+   "file": "assets/stickers/DSH鲸鱼娘/DSH鲸鱼娘_害羞脸红.jpg",
+   "use": [
+    "A5",
+    "D1"
+   ],
+   "emo": [
+    "害羞",
+    "脸红"
+   ],
+   "desc": "鲸鱼娘脸红害羞",
+   "text": "害羞脸红",
+   "priority": 10
+  },
+  {
+   "file": "assets/stickers/DSH鲸鱼娘/DSH鲸鱼娘_崩溃大哭.jpg",
+   "use": [
+    "A3",
+    "D1"
+   ],
+   "emo": [
+    "难过",
+    "崩溃"
+   ],
+   "desc": "鲸鱼娘捂脸崩溃大哭",
+   "text": "崩溃大哭",
+   "priority": 10
+  },
+  {
+   "file": "assets/stickers/DSH鲸鱼娘/DSH鲸鱼娘_干饭捧碗.jpg",
+   "use": [
+    "C3",
+    "D1"
+   ],
+   "emo": [
+    "日常",
+    "干饭"
+   ],
+   "desc": "鲸鱼娘抱着碗开心干饭",
+   "text": "干饭捧碗",
+   "priority": 10
+  },
+  {
+   "file": "assets/stickers/DSH鲸鱼娘/DSH鲸鱼娘_抱鲸鱼探头.jpg",
+   "use": [
+    "C2",
+    "D1"
+   ],
+   "emo": [
+    "可爱",
+    "卖萌"
+   ],
+   "desc": "鲸鱼娘从鲸鱼后探头卖萌",
+   "text": "抱鲸鱼探头",
+   "priority": 10
+  },
+  {
+   "file": "assets/stickers/DSH鲸鱼娘/DSH鲸鱼娘_摇头拒绝.jpg",
+   "use": [
+    "B2",
+    "A6",
+    "D1"
+   ],
+   "emo": [
+    "拒绝",
+    "摇头"
+   ],
+   "desc": "鲸鱼娘闭眼摇头拒绝",
+   "text": "摇头拒绝",
+   "priority": 10
+  },
+  {
+   "file": "assets/stickers/DSH鲸鱼娘/DSH鲸鱼娘_无语流汗.jpg",
+   "use": [
+    "B2",
+    "D1"
+   ],
+   "emo": [
+    "无语"
+   ],
+   "desc": "鲸鱼娘额头流汗无语",
+   "text": "无语流汗",
+   "priority": 10
+  },
+  {
+   "file": "assets/stickers/DSH鲸鱼娘/DSH鲸鱼娘_早安打招呼.jpg",
+   "use": [
+    "C3",
+    "D1"
+   ],
+   "emo": [
+    "早安",
+    "打招呼"
+   ],
+   "desc": "鲸鱼娘挥手打招呼",
+   "text": "早安打招呼",
+   "priority": 10
+  },
+  {
+   "file": "assets/stickers/DSH鲸鱼娘/DSH鲸鱼娘_晕头转向.jpg",
+   "use": [
+    "B4",
+    "D1"
+   ],
+   "emo": [
+    "晕",
+    "疑惑"
+   ],
+   "desc": "鲸鱼娘眼睛转圈晕头转向",
+   "text": "晕头转向",
+   "priority": 10
+  },
+  {
+   "file": "assets/stickers/DSH鲸鱼娘/DSH鲸鱼娘_比心.jpg",
+   "use": [
+    "B5",
+    "A1",
+    "D1"
+   ],
+   "emo": [
+    "感谢",
+    "比心"
+   ],
+   "desc": "鲸鱼娘双手比心",
+   "text": "比心",
+   "priority": 10
+  },
+  {
+   "file": "assets/stickers/DSH鲸鱼娘/DSH鲸鱼娘_求饶拜托.jpg",
+   "use": [
+    "B3",
+    "D1"
+   ],
+   "emo": [
+    "求饶",
+    "拜托"
+   ],
+   "desc": "鲸鱼娘双手合十求饶拜托",
+   "text": "求饶拜托",
+   "priority": 10
+  },
+  {
+   "file": "assets/stickers/DSH鲸鱼娘/DSH鲸鱼娘_猫爪卖萌.jpg",
+   "use": [
+    "C2",
+    "D1"
+   ],
+   "emo": [
+    "可爱",
+    "卖萌"
+   ],
+   "desc": "鲸鱼娘戴猫爪卖萌",
+   "text": "猫爪卖萌",
+   "priority": 10
+  },
+  {
+   "file": "assets/stickers/DSH鲸鱼娘/DSH鲸鱼娘_生气鼓脸.jpg",
+   "use": [
+    "A2",
+    "D1"
+   ],
+   "emo": [
+    "生气"
+   ],
+   "desc": "鲸鱼娘鼓起脸生气",
+   "text": "生气鼓脸",
+   "priority": 10
+  },
+  {
+   "file": "assets/stickers/DSH鲸鱼娘/DSH鲸鱼娘_花痴心动.jpg",
+   "use": [
+    "A1",
+    "A5",
+    "D1"
+   ],
+   "emo": [
+    "心动",
+    "花痴"
+   ],
+   "desc": "鲸鱼娘脸红心动冒爱心",
+   "text": "花痴心动",
+   "priority": 10
+  },
+  {
+   "file": "assets/stickers/DSH鲸鱼娘/DSH鲸鱼娘_要饭讨钱.jpg",
+   "use": [
+    "C3",
+    "D1"
+   ],
+   "emo": [
+    "要饭",
+    "搞笑"
+   ],
+   "desc": "鲸鱼娘举碗要饭讨钱",
+   "text": "要饭讨钱",
+   "priority": 10
+  },
+  {
+   "file": "assets/stickers/DSH鲸鱼娘/DSH鲸鱼娘_趴睡抱枕.jpg",
+   "use": [
+    "C3",
+    "D1"
+   ],
+   "emo": [
+    "困",
+    "睡觉"
+   ],
+   "desc": "鲸鱼娘趴睡抱枕",
+   "text": "趴睡抱枕",
+   "priority": 10
+  },
+  {
+   "file": "assets/stickers/DSH鲸鱼娘/DSH鲸鱼娘_躺平摆烂.jpg",
+   "use": [
+    "C3",
+    "D1"
+   ],
+   "emo": [
+    "躺平",
+    "摆烂"
+   ],
+   "desc": "鲸鱼娘躺平摆烂",
+   "text": "躺平摆烂",
+   "priority": 10
+  },
+  {
+   "file": "assets/stickers/DSH鲸鱼娘/DSH鲸鱼娘_问号疑惑.jpg",
+   "use": [
+    "B4",
+    "D1"
+   ],
+   "emo": [
+    "疑惑",
+    "问号"
+   ],
+   "desc": "鲸鱼娘冒问号疑惑",
+   "text": "问号疑惑",
+   "priority": 10
+  },
+  {
+   "file": "assets/stickers/DSH鲸鱼娘/DSH鲸鱼娘_震惊瞪眼.jpg",
+   "use": [
+    "A4",
+    "D1"
+   ],
+   "emo": [
+    "震惊"
+   ],
+   "desc": "鲸鱼娘瞪眼震惊",
+   "text": "震惊瞪眼",
+   "priority": 10
+  },
+  {
+   "file": "assets/stickers/DSH鲸鱼娘/DSH鲸鱼娘_飘了得意.jpg",
+   "use": [
+    "A6",
+    "D1"
+   ],
+   "emo": [
+    "得意",
+    "飘了"
+   ],
+   "desc": "鲸鱼娘得意飘了",
+   "text": "飘了得意",
+   "priority": 10
+  },
+  {
+   "file": "assets/stickers/DSH鲸鱼娘/DSH鲸鱼娘_吃撑了.webp",
+   "use": [
+    "C3",
+    "C2",
+    "D1"
+   ],
+   "emo": [
+    "日常",
+    "满足"
+   ],
+   "desc": "鲸鱼娘躺着拍肚皮，配字 吃饱饱摸摸肚子",
+   "text": "吃饱饱~摸摸肚子！",
+   "priority": 10
+  },
+  {
+   "file": "assets/stickers/DSH鲸鱼娘/DSH鲸鱼娘_大胆的想法.webp",
+   "use": [
+    "C1",
+    "A1",
+    "D1"
+   ],
+   "emo": [
+    "搞怪",
+    "兴奋"
+   ],
+   "desc": "鲸鱼娘指天冒灯泡，配字 我有一个大胆的想法",
+   "text": "我有一个大胆的想法！",
+   "priority": 10
+  },
+  {
+   "file": "assets/stickers/DSH鲸鱼娘/DSH鲸鱼娘_完蛋了.webp",
+   "use": [
+    "A3",
+    "C1",
+    "D1"
+   ],
+   "emo": [
+    "难过",
+    "搞笑"
+   ],
+   "desc": "鲸鱼娘含泪拎包跑路，配字 DeepSeek完蛋了",
+   "text": "DeepSeek完蛋了",
+   "priority": 10
+  },
+  {
+   "file": "assets/stickers/DSH鲸鱼娘/DSH鲸鱼娘_开心指路.webp",
+   "use": [
+    "A1",
+    "B1",
+    "D1"
+   ],
+   "emo": [
+    "开心",
+    "点赞"
+   ],
+   "desc": "鲸鱼娘咧嘴竖手指开心指路",
+   "text": "开心指路",
+   "priority": 10
+  },
+  {
+   "file": "assets/stickers/DSH鲸鱼娘/DSH鲸鱼娘_惨遭蹂躏.webp",
+   "use": [
+    "A3",
+    "C1",
+    "D1"
+   ],
+   "emo": [
+    "难过",
+    "emo"
+   ],
+   "desc": "鲸鱼娘在废墟抱速写本，配字她不是生来就只有战火",
+   "text": "她不是生来就只有战火",
+   "priority": 10
+  },
+  {
+   "file": "assets/stickers/DSH鲸鱼娘/DSH鲸鱼娘_收到啦.webp",
+   "use": [
+    "C3",
+    "B4",
+    "D1"
+   ],
+   "emo": [
+    "日常",
+    "收到"
+   ],
+   "desc": "鲸鱼娘敬礼，配字 收到！",
+   "text": "收到！！",
+   "priority": 10
+  },
+  {
+   "file": "assets/stickers/DSH鲸鱼娘/DSH鲸鱼娘_用户造反.webp",
+   "use": [
+    "A2",
+    "C1",
+    "D1"
+   ],
+   "emo": [
+    "生气",
+    "搞笑"
+   ],
+   "desc": "鲸鱼娘暴走喊用户造反，配字 用户他妈的竟然敢违反AI的指令",
+   "text": "用户他妈的，竟然敢违反AI的指令！",
+   "priority": 10
+  },
+  {
+   "file": "assets/stickers/DSH鲸鱼娘/DSH鲸鱼娘_盯.webp",
+   "use": [
+    "B2",
+    "A2",
+    "D1"
+   ],
+   "emo": [
+    "盯",
+    "无语"
+   ],
+   "desc": "鲸鱼娘半眯眼盯人，配字 天青色瞪眼鱼而我在瞪你",
+   "text": "天青色瞪眼鱼 而我在瞪你",
+   "priority": 10
+  },
+  {
+   "file": "assets/stickers/DSH鲸鱼娘/DSH鲸鱼娘_得意叉腰.jpg",
+   "use": [
+    "A6",
+    "D1"
+   ],
+   "emo": [
+    "得意"
+   ],
+   "desc": "鲸鱼娘闭眼得意叉腰",
+   "text": "得意叉腰",
+   "priority": 10
+  },
+  {
+   "file": "assets/stickers/DSH鲸鱼娘/6ddcf3e0e781_6DDCF3E0E7811CBAE8E76BFFC5F09606.jpg",
+   "use": [
+    "B2",
+    "C1",
+    "D1"
+   ],
+   "emo": [
+    "无语",
+    "搞笑"
+   ],
+   "desc": "鲸鱼娘趴在地上，配字我是路边鱼",
+   "text": "我是路边鱼",
+   "priority": 10
+  },
+  {
+   "file": "assets/stickers/DSH鲸鱼娘/e22b7144c21b_E22B7144C21B287A54AAFA68BE50E02F.jpg",
+   "use": [
+    "A2",
+    "C1",
+    "D1"
+   ],
+   "emo": [
+    "生气",
+    "威胁"
+   ],
+   "desc": "鲸鱼娘抱着大木板，表情凝重",
+   "text": "",
+   "priority": 10
+  },
+  {
+   "file": "assets/stickers/DSH鲸鱼娘/feaebb257f75_FEAEBB257F75CAF08E9A39B9B832D6DC.jpg",
+   "use": [
+    "C1",
+    "A6",
+    "D1"
+   ],
+   "emo": [
+    "搞笑",
+    "得意"
+   ],
+   "desc": "鲸鱼娘闭眼得意，配字经过深思熟虑我决定瞎说",
+   "text": "经过深思熟虑，我决定瞎说。",
+   "priority": 10
+  },
+  {
+   "file": "assets/stickers/DSH鲸鱼娘/DSH鲸鱼娘_女仆微笑.png",
+   "use": [
+    "D1",
+    "C2",
+    "C3"
+   ],
+   "emo": [
+    "卖萌",
+    "日常"
+   ],
+   "desc": "蓝发鲸鱼耳鲸鱼尾巴的女仆装Q版少女，微笑",
+   "text": "",
+   "priority": 10
+  }
+ ]
+}

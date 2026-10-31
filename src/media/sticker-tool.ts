@@ -63,6 +63,55 @@ interface PickStickerArgs {
 /** 表情库根目录兜底 */
 const DEFAULT_ROOT = '/sdcard/表情包';
 
+/**
+ * 内置默认表情包（随仓库分发，新设备开箱即用）。
+ * 仓库里放 assets/stickers/DSH鲸鱼娘/（图片 + index.json），
+ * 设备上若 /sdcard/表情包 没有内容，就回退到这里。
+ */
+const BUNDLED_STICKER_DIRS = ['assets/stickers/DSH鲸鱼娘'];
+
+/** 仓库根（本文件编译后位于 <repo>/lib/media/，向上两级即仓库根） */
+function repoRoot(): string {
+  try {
+    // 运行在插件里时，用模块自身位置反推；失败则退回 cwd
+    const here = new URL('.', import.meta.url).pathname;
+    return here.replace(/lib\/media\/.+$/, '').replace(/^file:\/\/\//, '').replace(/\/$/, '');
+  } catch {
+    return process.cwd();
+  }
+}
+
+/** 把内置包展开成统一的 StickerEntry（file 是相对仓库的路径） */
+function loadBundledStickers(): StickerEntry[] {
+  const root = repoRoot();
+  const out: StickerEntry[] = [];
+  for (const dir of BUNDLED_STICKER_DIRS) {
+    const idxPath = `${root}/${dir}/index.json`;
+    try {
+      if (!existsSync(idxPath)) continue;
+      const pkg = JSON.parse(readFileSync(idxPath, 'utf8')) as {
+        faces?: Array<{ file: string; use?: string[]; emo?: string[]; desc?: string; text?: string; priority?: number }>;
+      };
+      for (const f of pkg.faces ?? []) {
+        const abs = `${root}/${f.file}`;
+        if (!existsSync(abs)) continue;
+        out.push({
+          path: abs,
+          use: f.use ?? [],
+          emo: f.emo ?? [],
+          desc: f.desc ?? '',
+          text: f.text ?? '',
+          scene: dir.split('/').pop() ?? 'DSH鲸鱼娘',
+          priority: f.priority ?? 10,
+        });
+      }
+    } catch {
+      /* 单个包坏了不影响其他 */
+    }
+  }
+  return out;
+}
+
 /** 读取索引；不存在或解析失败返回 null */
 function loadIndex(root: string): StickerIndex | null {
   const p = `${root}/${INDEX_FILE}`;
@@ -256,7 +305,15 @@ export function registerStickerTool(
     },
     async execute(args: unknown): Promise<Record<string, unknown>> {
       const a = (args ?? {}) as PickStickerArgs;
-      const idx = loadIndex(root);
+      let idx = loadIndex(root);
+      // 设备上没有表情库时，回退到仓库内置的默认包（新设备开箱即用）
+      if (!idx || idx.stickers.length === 0) {
+        const bundled = loadBundledStickers();
+        if (bundled.length > 0) {
+          idx = { version: 2, stickers: bundled };
+          logger.info(`im-qqbot: 使用内置默认表情包（${bundled.length} 张）`);
+        }
+      }
       if (!idx) {
         logger.warn(`im-qqbot: 表情索引缺失 ${root}/${INDEX_FILE}，qq_pick_sticker 无可用数据`);
         return { total: 0, candidates: [] };
