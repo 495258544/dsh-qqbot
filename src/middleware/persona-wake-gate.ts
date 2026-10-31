@@ -56,27 +56,6 @@ export function personaWakeGate(
   return async (ctx: MiddlewareContext, next: () => Promise<void>): Promise<void> => {
     const msg = ctx.message;
 
-    // ── 其他机器人的消息：**读但不回**（不是直接丢弃）──
-    //
-    // 为什么不能一刀切过滤：群里的其他 bot 可能发很有用的东西
-    // （新闻推送、天气、股价、群管通知、翻译…）。全丢掉等于把这些信息也屏蔽了。
-    //
-    // 但也不能回：两个 bot 都会在"活跃期"里接对方的话 → A 回 B、B 回 A 无限循环。
-    //
-    // 折中：**消息仍然进历史缓冲**（historyBuffer 在 gate 之前且 recordOnSkip:true，
-    // 所以她下次被叫醒时能看到这些内容），但本轮不唤醒、不回复。
-    // 只有一种例外放行：这条 bot 消息**@了她**（说明是专门找她的，比如另一个
-    // bot 帮她查了东西回给她），这才值得回应一句。
-    const fromBot = (msg as unknown as { senderIsBot?: boolean }).senderIsBot === true;
-    if (fromBot) {
-      const atMe = ctx.state.mention?.wasMentioned === true;
-      logger.debug(`persona: 其他bot的消息（@我=${atMe}）→ ${atMe ? '放行' : '只记历史不回'}`);
-      if (!(atMe && fromBotAtMeAllowed)) {
-        ctx.stop('from-bot-read-only');
-        return;
-      }
-    }
-
     const scope = msg.kind === 'group' ? 'group' : 'c2c';
     const peerId = scope === 'group' ? (msg.groupOpenid ?? msg.senderId) : msg.senderId;
     const key = `${scope}:${peerId}`;
@@ -96,6 +75,32 @@ export function personaWakeGate(
     }
 
     const waker = persona.waker;
+
+    // ── 其他机器人的消息：读但不回（防 A↔B 死循环，但不屏蔽有用信息）──
+    // 放行条件：① @了她 ② 命中她的兴趣（如新闻 bot 推了她关注的新番）
+    // 否则只进历史缓冲（historyBuffer 在 gate 之前 + recordOnSkip:true），不回复。
+    if ((msg as unknown as { senderIsBot?: boolean }).senderIsBot === true) {
+      const atMe = ctx.state.mention?.wasMentioned === true;
+      const content = String(msg.content ?? '');
+      const hit = waker?.matchInterest(content);
+      const interestHit = hit?.hit ? hit.topics.join(',') : undefined;
+      if (atMe && fromBotAtMeAllowed) {
+        logger.debug('persona: 其他bot@我 → 放行');
+      } else if (interestHit) {
+        logger.debug(`persona: 其他bot的消息命中兴趣「${interestHit}」→ 放行`);
+      } else {
+        ctx.stop('from-bot-read-only');
+        return;
+      }
+      // 放行后**直接进处理**：跳过 shouldWake 判定。
+      // 因为 bot 消息的文本本来就不符合"@/名字/关键词"这些规则，
+      // 再走一遍唤醒判定必然被拦掉（实测就是 persona:not-woken）。
+      waker?.wake(key);
+      persona.memory.touch(msg.senderId, { name: msg.senderName });
+      await next();
+      return;
+    }
+
     if (waker) {
       // c2c 恒醒（与原版"私聊每条都理"一致，也保住 mentionGate 对 c2c 的语义）
       const decision = scope === 'group'
