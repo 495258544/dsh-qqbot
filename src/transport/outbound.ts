@@ -9,6 +9,7 @@ import type { ImQQBotConfig } from '../config.ts';
 import type { Logger } from '../types.ts';
 import { chunkMarkdownText } from './chunker.ts';
 import { appendBotHistory } from '../features/history-store.ts';
+import { rememberForAttribution } from '../features/attribution-index.ts';
 import { OutboundBuffer, type QQBotSender } from './outbound-buffer.ts';
 import { formatToolResult, type ToolsRegistryLike, type ToolResultData } from './tool-presenter.ts';
 import type { DeliverablesDelivererLike } from './deliverables.ts';
@@ -421,12 +422,14 @@ class OutboundRouter {
   private rememberOwnWords(record: SessionRecord, chunk: string): void {
     if (record.scope !== 'group') return;
     try {
-      appendBotHistory(
-        this.config.appId,
-        record.peerId,
-        chunk,
-        this.config.persona?.botOpenid || BOT_SELF_ID_FALLBACK,
-      );
+      const selfId = this.config.persona?.botOpenid || BOT_SELF_ID_FALLBACK;
+      appendBotHistory(this.config.appId, record.peerId, chunk, selfId);
+      // 同时进归属索引：这样"用户引用小羽说过的话"能反查到是她自己说的
+      rememberForAttribution(this.config.appId, record.peerId, {
+        senderId: selfId,
+        senderName: '小羽',
+        content: chunk,
+      });
     } catch (err) {
       this.logger.debug(`im-qqbot: 记录自身发言失败: ${err instanceof Error ? err.message : String(err)}`);
     }

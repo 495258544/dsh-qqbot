@@ -21,6 +21,7 @@ import {
   type MediaKind,
 } from './attachment.ts';
 import { clearGroupHistory } from '../features/history-store.ts';
+import { rememberForAttribution, lookupAttribution } from '../features/attribution-index.ts';
 import { stashPendingAttachments, takePendingAttachments, pendingKey } from '../features/pending-attachments.ts';
 
 import type { MiddlewareContext } from '@tencent-connect/qqbot-nodejs';
@@ -136,7 +137,16 @@ export async function handleInbound(
   }
 
   // ── 组装 agentBody（下载结果经 mwState.downloadedFiles 提供） ──
-  let agentBody = assembleAgentBody(msg, mwState, scope, logger, undefined, config.persona?.botOpenid);
+  const gid = msg.groupOpenid ?? msg.senderId;
+  let agentBody = assembleAgentBody(
+    msg, mwState, scope, logger, undefined, config.persona?.botOpenid,
+    scope === 'group'
+      ? (text) => {
+          const hit = lookupAttribution(config.appId, gid, text);
+          return hit ? { id: hit.senderId, name: hit.senderName } : {};
+        }
+      : undefined,
+  );
 
   // 把"先发的图"补进 agentBody，否则 agent 不知道这几张图的存在
   if (carriedFiles.length > 0) {
@@ -202,6 +212,16 @@ export async function handleInbound(
     source: { kind: 'user' as const },
   });
 
+  // 归属索引：记下这条消息，供"别人引用它"时反查发送者
+  // （QQ 合并转发不给发送者，只能靠这一份自建索引）
+  if (scope === 'group' && (msg.content ?? '').trim()) {
+    rememberForAttribution(config.appId, msg.groupOpenid ?? msg.senderId, {
+      senderId: msg.senderId,
+      senderName: msg.senderName,
+      content: msg.content ?? '',
+    });
+  }
+
   // persona 记账：暂存本轮用户消息，outbound turn/end 时与回复配对写入流水
   if (persona) {
     const humanText = (msg.content ?? '').trim();
@@ -240,6 +260,8 @@ function assembleAgentBody(
   logger: Logger,
   anchor?: string,
   botOpenid?: string,
+  /** 按内容反查引文发送者（独立归属索引，不受群历史清空影响） */
+  lookupSender?: (quotedText: string) => { id?: string; name?: string },
 ): string | null {
   const isGroup = scope === 'group';
   const wasMentioned = state.mention?.wasMentioned ?? false;
@@ -252,6 +274,7 @@ function assembleAgentBody(
     state.quote,
     state.history,
     botOpenid || detectBotSelfId(state.history),
+    lookupSender,
   );
   const userMessage = buildUserMessage(userContent, quotePart, msg.senderId, msg.senderName, isGroup, wasMentioned);
 
@@ -337,7 +360,12 @@ function detectBotSelfId(history?: HistoryEntry[]): string | undefined {
  * 需要逐条标注。已知小羽自己发的运维提示（⚠️ 本轮异常结束）不应参与对话，
  * 这里一并过滤，避免它被当成聊天素材复述。
  */
-export function buildQuotePart(quote?: ResolvedQuote, history?: HistoryEntry[], botSelfId?: string): string {
+export function buildQuotePart(
+  quote?: ResolvedQuote,
+  history?: HistoryEntry[],
+  botSelfId?: string,
+  lookupSender?: (quotedText: string) => { id?: string; name?: string },
+): string {
   if (!quote?.text && !quote?.entry?.content) return '';
 
   const raw = quote.text || quote.entry?.content || 'Original content unavailable';
@@ -364,6 +392,9 @@ export function buildQuotePart(quote?: ResolvedQuote, history?: HistoryEntry[], 
    * 整块套用一个人正是这次事故的同类错误。
    */
   const lookup = (text: string): { id?: string; name?: string } => {
+    // 优先用独立归属索引（不受群历史清空影响，能覆盖"引用上一轮说过的话"）
+    const fromIndex = lookupSender?.(text);
+    if (fromIndex && (fromIndex.id || fromIndex.name)) return fromIndex;
     const probe = norm(text);
     if (probe.length < 4 || !history?.length) return {};
     for (const h of [...history].reverse()) {
@@ -414,7 +445,11 @@ export function buildQuotePart(quote?: ResolvedQuote, history?: HistoryEntry[], 
       return '[Quoted message begins]\n（下面引用的全是系统代你发出的运行状态提示，不是在跟任何人聊天）\n'
         + body + '\n[Quoted message ends]\n[Current message]\n';
     }
-    return `[Quoted message begins]\n（下面是合并转发，逐条标了是谁说的；不是你正在对话的那个人就按那个人理解）\n`
+    // 顶部说明：如果只有她自己说的内容，就别用"不是你正在对话的那个人"这种措辞
+    const selfOnly = !lines.some((l) => !l.includes('你自己之前说的') && !l.includes('已略去'));
+    return `[Quoted message begins]\n（下面是合并转发，逐条标了是谁说的${
+      selfOnly ? '' : '；不是你正在对话的那个人就按那个人理解'
+    }）\n`
       + body + '\n[Quoted message ends]\n[Current message]\n';
   }
 
