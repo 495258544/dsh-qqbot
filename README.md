@@ -173,7 +173,17 @@ npx @deepseek-ai/dsh web --patch /path/to/dsh-qqbot/cordis.dev.yml
 | `persona.ownLifeIntervalMs` | number | `2.5h` | 唤醒间隔 |
 | `persona.ownLifeMaxPerDay` | number | `6` | 每天最多几次 |
 | `persona.maxProactivePerDay` | number | `2` | 主动消息每 peer 每天上限 |
+| `persona.screenWatchEnabled` | boolean | `false` | 看手机屏幕主动搭话（M7/R7）：只读控件树，**绝不截图/点击**；默认关 |
+| `persona.screenWatchAllowedApps` | string[] | `[]` | 允许观察的 App 白名单（支持 `com.example.*` 通配；空=不限制。支付/聊天/系统界面的硬黑名单**始终生效、不可放宽**） |
+| `persona.screenWatchIntervalMs` | number | `30m` | 观察间隔 |
+| `persona.screenWatchActiveHours` | number[] | `[9,23]` | 观察时段（小时，避开半夜） |
 | `persona.proactiveMinGapMs` | number | `2h` | 主动消息最小间隔 |
+
+### 看手机屏幕搭话（screen watch，默认关闭）
+
+`persona.screenWatchEnabled=true` 时她每 30 分钟瞄一眼你在用什么 App，看到与自己兴趣相关的内容会主动找人聊一句。
+全程**只读**（`/app/device` → `dumpsys window` → `/app/ui/dump`），不截图、不点击、不启动 App；
+息屏/锁屏/通知栏展开一律跳过；支付、聊天、密码页面与含敏感词的屏幕内容**硬编码排除**，不可通过配置放宽。
 
 新增 agent 工具：`qq_write_diary`（写自己的日记）、`qq_read_diary`（翻日记）、
 `qq_memory_append`（往某个人的账上记 trait/fact/topic/pending）。

@@ -17,6 +17,7 @@ import { Waker } from './wake.ts';
 import { SelfProfileService } from './self.ts';
 import { VoiceService } from './voice.ts';
 import { SelfNoteService } from './self-note.ts';
+import { runSurfRound, inSurfWindow, type SurfResult } from './surf.ts';
 import { Humanizer } from './humanize.ts';
 import { createOwnLife, type OwnLifeHandle, type OwnLifeDeliverResult } from './own-life.ts';
 import { createScreenWatch, type ScreenWatchHandle, type ScreenWatchOptions, type ScreenNudge, type ScreenDeliverResult } from './screen-watch.ts';
@@ -163,6 +164,8 @@ export class PersonaService {
   public readonly humanizer: Humanizer;
   public readonly budget: ProactiveBudget;
   public ownLife: OwnLifeHandle | undefined;
+  /** 冲浪定时器（M6：低峰时段上网搜集她感兴趣的内容） */
+  private surfTimer: ReturnType<typeof setInterval> | undefined;
   /** 看屏幕观察（M7/R7，默认关；只在 screenWatchEnabled 时存在） */
   public screenWatch: ScreenWatchHandle | undefined;
   /** 轮内记账暂存（sessionId → 用户/回复文本），turn/end 配对写流水后清除。
@@ -306,6 +309,66 @@ export class PersonaService {
     });
     this.screenWatch.start();
     return this.screenWatch;
+  }
+
+  /**
+   * 启动自主冲浪（M6）。
+   * 只在 surfEnabled 且处于冲浪时段（默认凌晨 3-7 点）时跑；
+   * 每 30 分钟检查一次，同一时段内最多跑一轮（用 lastSurfAt 防重复）。
+   * 结果写进 self.json 的 findings，**不占主上下文**。
+   */
+  startSurf(): void {
+    const cfg = this.deps.config;
+    if (!cfg.surfEnabled) return;
+    const log = this.deps.logger;
+
+    const tick = (): void => {
+      if (!inSurfWindow(new Date(), cfg.surfFromHour, cfg.surfToHour)) return;
+      // 同一冲浪时段内只跑一轮（2 小时内已冲过就跳过）
+      const last = this.self.snapshot().lastSurfAt ?? 0;
+      if (Date.now() - last < 2 * 3600_000) return;
+      try {
+        log.info('persona: 冲浪开始');
+        const results = runSurfRound(this.self, {
+          maxTopics: cfg.surfMaxTopics,
+          deep: cfg.surfDeep,
+          log: (m) => log.info(`persona: ${m}`),
+        });
+        const total = results.reduce((a, r) => a + r.findings.length, 0);
+        log.info(`persona: 冲浪完成，${results.length} 个话题 / ${total} 条见闻`);
+        // 收集到的内容对下次对话有用 → 静默告知 agent（如果 owner 会话存活）
+        if (total > 0) this.notifySurfResults(results);
+      } catch (err) {
+        log.warn(`persona: 冲浪失败 ${err instanceof Error ? err.message : String(err)}`);
+      }
+    };
+
+    this.surfTimer = setInterval(tick, 30 * 60 * 1000);   // 每 30 分钟检查
+    if (typeof this.surfTimer.unref === 'function') this.surfTimer.unref();
+    log.info(`persona: 冲浪已武装 · 时段 ${cfg.surfFromHour}:00-${cfg.surfToHour}:00 · 每轮最多 ${cfg.surfMaxTopics} 话题`);
+  }
+
+  /** 把冲浪结果静默投递给存活的 owner 会话（不占主上下文，不主动发消息） */
+  private surfDeliver?: (text: string) => void;
+
+  /** 由 bootstrap 注入静默投递函数 */
+  setSurfDeliver(fn: (text: string) => void): void {
+    this.surfDeliver = fn;
+  }
+
+  private notifySurfResults(results: SurfResult[]): void {
+    if (!this.surfDeliver) return;
+    const lines: string[] = ['[内部·你刚自己上网看的东西，不用复述本提示]'];
+    for (const r of results) {
+      if (r.findings.length === 0) continue;
+      lines.push(`关于「${r.topic}」：`);
+      for (const f of r.findings) lines.push(`- ${f.title}：${f.summary}`);
+    }
+    try {
+      this.surfDeliver(lines.join('\n'));
+    } catch {
+      /* 投递失败不影响 */
+    }
   }
 
   stop(): void {

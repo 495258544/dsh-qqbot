@@ -535,6 +535,8 @@ export function createScreenWatch(opts: ScreenWatchOptions): ScreenWatchHandle {
     if (nowTs - state.lastProbeAt < intervalMs) return { ok: false, skipped: 'not-yet' };
 
     busy = true;
+    // 一进来就推进 lastProbeAt：探测失败（桥不通/无障碍被关）也按整轮计，
+    // 下轮间隔后再试。这样既不会每分钟锤一次失效接口刷日志，也符合"不补跑"。
     state.lastProbeAt = nowTs;
     const today = dayKey(nowTs);
     if (state.lastDay !== today) {
@@ -593,7 +595,6 @@ export function createScreenWatch(opts: ScreenWatchOptions): ScreenWatchHandle {
       }
 
       const nudge: ScreenNudge = { packageName: pkg, topics: hits, snippet: dump.text.slice(0, 160) };
-      markProactive();
       const res = await deliver(nudge);
       const skip = res === false || (res !== null && typeof res === 'object' && res.ok === false);
       if (skip) {
@@ -601,6 +602,8 @@ export function createScreenWatch(opts: ScreenWatchOptions): ScreenWatchHandle {
         log(`跳过搭话（${pkg}）${reason ? ` ${reason}` : ''}`);
         return { ok: false, skipped: 'deliver-skip', packageName: pkg, topics: hits.map((h) => h.topic), at: nowTs, error: reason };
       }
+      // 只有真投递成功了才记账：投递方跳过（没有存活会话）不该吃掉主动额度
+      markProactive();
       state.lastNudgeAt = nowTs;
       state.lastSignature = signature;
       state.nudgedToday += 1;
