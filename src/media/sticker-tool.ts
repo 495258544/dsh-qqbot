@@ -18,6 +18,7 @@
  *         "text":"图上的字", "scene":"二次元", "priority":0 } ] }
  */
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import type { Context } from '@deepseek-ai/cordis';
 import type { ContentBlock } from '@deepseek-ai/dsh-llm';
 import type { ImQQBotConfig } from '../config.ts';
@@ -73,9 +74,9 @@ const BUNDLED_STICKER_DIRS = ['assets/stickers/DSH鲸鱼娘'];
 /** 仓库根（本文件编译后位于 <repo>/lib/media/，向上两级即仓库根） */
 function repoRoot(): string {
   try {
-    // 运行在插件里时，用模块自身位置反推；失败则退回 cwd
-    const here = new URL('.', import.meta.url).pathname;
-    return here.replace(/lib\/media\/.+$/, '').replace(/^file:\/\/\//, '').replace(/\/$/, '');
+    // 用 fileURLToPath 而非手搓 pathname：Windows 上 pathname 形如
+    // /C:/foo/lib/media/（前导斜杠 + 反斜杠缺失），existsSync 会全部失败。
+    return fileURLToPath(new URL('../../', import.meta.url)).replace(/[\\/]+$/, '');
   } catch {
     return process.cwd();
   }
