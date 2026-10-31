@@ -8,7 +8,8 @@
  * 真实事故（2026-10-31 用户截图）：群主引用「刚不是你那边卡了…」
  * （这条其实是小羽自己说的），她认不出来，因为归属只剩「某人」。
  */
-import { describe, expect, it, beforeEach } from 'vitest';
+import { existsSync, rmSync } from 'node:fs';
+import { describe, expect, it, beforeEach, afterEach, vi } from 'vitest';
 import {
   rememberForAttribution,
   lookupAttribution,
@@ -22,7 +23,18 @@ const GID = '20011D3CAC54F6CA5C780CEFD2E5AF01';
 const JMX = { senderId: 'CFD96F1AEAFD07BDA2A9FADEE339D723', senderName: 'jmx的大蠢鱼' };
 const BOT = { senderId: 'B1FE2927B46C9AF15C464E62216395FF', senderName: '小羽' };
 
-beforeEach(() => resetAttributionForTest());
+// 测试用独立文件，绝不碰真实的 ~/.dsh-qqbot/persona/attribution-index.json
+// 用 vi.stubEnv 在模块求值前钉住，否则 import 已经解析完路径
+const TMP = '/tmp/attr-test-index.json';
+vi.stubEnv('QQBOT_ATTRIBUTION_PATH', TMP);
+
+beforeEach(() => {
+  try { rmSync(TMP, { force: true }); } catch { /* ignore */ }
+  resetAttributionForTest();
+});
+afterEach(() => {
+  try { rmSync(TMP, { force: true }); } catch { /* ignore */ }
+});
 
 describe('lookupAttribution · 内容反查', () => {
   it('完整内容能反查到发送者（真实事故里的那句）', () => {
@@ -92,5 +104,22 @@ describe('归属索引 · 与群历史解耦', () => {
     expect(lookupAttribution(APP, GID, '第49条消息内容')).toBeTruthy();
     // 最旧的已被淘汰
     expect(lookupAttribution(APP, GID, '第0条消息内容')).toBeUndefined();
+  });
+});
+
+describe('归属索引 · 落盘持久化（重启后仍能反查）', () => {
+  it('写入后落盘，重新载入仍能反查到', async () => {
+    rememberForAttribution(APP, GID, { ...BOT, content: '看不到。转发里每条都只标着某人' });
+    // 模拟重启：清内存 → 重新 import 会重新读盘
+    const file = process.env.QQBOT_ATTRIBUTION_PATH!;
+    expect(existsSync(file)).toBe(true);
+
+    // 手动清内存（等价于进程重启）
+    resetAttributionForTest();
+    await vi.resetModules();
+    const fresh = await import('./attribution-index.ts');
+    fresh.reloadForTest();          // 允许重新读盘
+    const hit = fresh.lookupAttribution(APP, GID, '看不到。转发里每条都只标着某人');
+    expect(hit?.senderId).toBe(BOT.senderId);
   });
 });

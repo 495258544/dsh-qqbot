@@ -93,6 +93,14 @@ export interface PersonaConfig {
    * 形如 [{ provider: 'our-free-model', model: 'xxx' }, ...]，按顺序尝试。
    */
   fallbackRoutes: Array<{ provider: string; model: string }>;
+  /**
+   * 换备用通道时是否给 owner 发消息。
+   *
+   * 为什么需要：换路是"系统自己做的决定"，用户往往不知道。
+   * 实测场景：主通道限流，agent 悄悄换了备用，owner 还以为是主通道在跑；
+   * 出问题时无从判断到底走的哪条。所以换路时主动告知 owner。
+   */
+  notifyOwnerOnFailover: boolean;
   /** 其他 bot @她时是否回应（默认 true；false=完全不搭理其他 bot） */
   fromBotAtMeAllowed: boolean;
   /** 拟人化发送开关（分条 + 停顿） */
@@ -314,6 +322,7 @@ export const ConfigSchema: Schema<ImQQBotConfig> = Schema.object({
       provider: Schema.string().required(),
       model: Schema.string().required(),
     })).default([]).description('备用模型通道：主通道限流/不可用时自动切过去（按顺序尝试；空=不启用）'),
+    notifyOwnerOnFailover: Schema.boolean().default(true).description('换备用通道时给 owner 发消息告知（默认开）'),
     fromBotAtMeAllowed: Schema.boolean().default(true).description('其他机器人@她时是否回应（默认true；其他bot的普通消息一律只进历史不回复，防互聊死循环）'),
     humanizeEnabled: Schema.boolean().default(true).description('拟人化发送（分条+停顿）'),
     msPerChar: Schema.number().default(110).description('每字打字毫秒（真人实测约110）'),
@@ -348,6 +357,7 @@ export const ConfigSchema: Schema<ImQQBotConfig> = Schema.object({
     interestBaseProbability: 0.5,
     idleDiveThreshold: 5,
     fallbackRoutes: [],
+    notifyOwnerOnFailover: true,
     fromBotAtMeAllowed: true,
     humanizeEnabled: true,
     msPerChar: 110,

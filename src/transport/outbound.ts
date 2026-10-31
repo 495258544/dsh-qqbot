@@ -13,6 +13,7 @@ import { rememberForAttribution } from '../features/attribution-index.ts';
 import { OutboundBuffer, type QQBotSender } from './outbound-buffer.ts';
 import { formatToolResult, type ToolsRegistryLike, type ToolResultData } from './tool-presenter.ts';
 import type { DeliverablesDelivererLike } from './deliverables.ts';
+import type { ModelRoute } from '../model/types.ts';
 import {
   parseEvent,
   extractTurnError,
@@ -346,6 +347,11 @@ class OutboundRouter {
             ? this.manager.maybeFailover(scope, record.peerId, failure.code)
             : undefined;
 
+          // 换路了 → 主动告知 owner（换路是系统自己的决定，不说是黑盒）
+          if (switched && this.config.persona?.notifyOwnerOnFailover !== false) {
+            void this.notifyOwnerFailover(switched, failure.code);
+          }
+
           let text: string;
           if (switched) {
             // 换路成功：告诉她（和群里）下一轮会换个通道，不用重复发错误码
@@ -432,6 +438,41 @@ class OutboundRouter {
       });
     } catch (err) {
       this.logger.debug(`im-qqbot: 记录自身发言失败: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  /**
+   * 换备用通道时告知 owner。
+   *
+   * 为什么要说：换路是系统自己的决定，owner 往往以为还跑在主通道上；
+   * 出问题时不知道走的哪条会排查不动。这里发一条私聊，带上走了哪条、为什么、以及"去看一眼"。
+   * 找不到 owner 就只记日志（不阻塞）。
+   */
+  private async notifyOwnerFailover(
+    switched: { from?: ModelRoute; to: ModelRoute },
+    code: string,
+  ): Promise<void> {
+    const owners = this.config.persona?.ownerOpenids ?? [];
+    const ownerId = owners[0];
+    if (!ownerId) {
+      this.logger.warn(`im-qqbot: 已换备用通道但没配 ownerOpenids，无法通知 (code=${code})`);
+      return;
+    }
+    const from = switched.from ? `${switched.from.provider}/${switched.from.model}` : '主通道';
+    const to = `${switched.to.provider}/${switched.to.model}`;
+    const text = [
+      '⚠️ 小羽换备用通道了',
+      `原因：${code}`,
+      `${from} → ${to}`,
+      '主通道可能限流或不可用，建议去看一眼。',
+    ].join('\n');
+    try {
+      // 用 bot 直接发（不属于任何会话，避免污染对话历史）
+      await this.bot.sendMarkdown({ scope: 'c2c', targetId: ownerId }, text);
+    } catch (err) {
+      this.logger.warn(
+        `im-qqbot: 通知 owner 换路失败: ${err instanceof Error ? err.message : String(err)}`,
+      );
     }
   }
 

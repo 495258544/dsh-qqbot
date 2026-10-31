@@ -14,8 +14,14 @@
  * 导致反查永远命中不了。所以这里单独存一份**只用于反查**的小索引：
  *   - 与 historyBuffer 完全分离，不被清理
  *   - 不进模型上下文（只喂给 buildQuotePart 做归属判定）
- *   - 环形保存最近 N 条，内存占用固定
+ *   - 环形保存最近 N 条
+ *   - **落盘持久化**：重启后仍能反查「重启前说过的话」
+ *     （实测踩过：纯内存版重启清空，用户重启后再引用就认不出来）
  */
+
+import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { homedir } from 'node:os';
 
 export interface AttributionEntry {
   senderId: string;
@@ -31,6 +37,46 @@ const MAX_PER_GROUP = 40;
 const MAX_GROUPS = 200;
 
 const index = new Map<string, AttributionEntry[]>();
+
+/** 落盘位置：默认 ~/.dsh-qqbot/persona/attribution-index.json */
+function storePath(): string {
+  return process.env.QQBOT_ATTRIBUTION_PATH
+    ?? join(homedir(), '.dsh-qqbot', 'persona', 'attribution-index.json');
+}
+
+let loaded = false;
+
+/** 首次使用时从磁盘载入（惰性，避免模块加载时做 IO） */
+function ensureLoaded(): void {
+  if (loaded) return;
+  loaded = true;
+  const file = storePath();
+  if (!existsSync(file)) return;
+  try {
+    const raw = JSON.parse(readFileSync(file, 'utf8')) as Record<string, AttributionEntry[]>;
+    for (const [k, v] of Object.entries(raw)) {
+      if (Array.isArray(v)) index.set(k, v.slice(-MAX_PER_GROUP));
+    }
+  } catch {
+    /* 文件损坏就当空的，不影响主流程 */
+  }
+}
+
+/** 落盘（原子替换：先写临时文件再 rename，避免写一半被读到） */
+function persist(): void {
+  const file = storePath();
+  try {
+    const dir = dirname(file);
+    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+    const obj: Record<string, AttributionEntry[]> = {};
+    for (const [k, v] of index) obj[k] = v.slice(-MAX_PER_GROUP);
+    const tmp = `${file}.tmp`;
+    writeFileSync(tmp, JSON.stringify(obj), 'utf8');
+    renameSync(tmp, file);
+  } catch {
+    /* 落盘失败不影响内存查询 */
+  }
+}
 
 function groupKey(appId: string, groupId: string): string {
   return `${appId}:${groupId}`;
@@ -50,6 +96,7 @@ export function rememberForAttribution(
   const body = String(entry.content ?? '').trim();
   if (!body || !entry.senderId) return;
 
+  ensureLoaded();
   const key = groupKey(appId, groupId);
   let list = index.get(key);
   if (!list) {
@@ -74,6 +121,7 @@ export function rememberForAttribution(
     timestamp: Date.now(),
   });
   if (list.length > MAX_PER_GROUP) list.splice(0, list.length - MAX_PER_GROUP);
+  persist();
 }
 
 /** 归一化：去合并转发头、去标签、压空白，用于内容比对 */
@@ -102,6 +150,7 @@ export function lookupAttribution(
   groupId: string,
   quotedText: string,
 ): AttributionEntry | undefined {
+  ensureLoaded();
   const list = index.get(groupKey(appId, groupId));
   if (!list?.length) return undefined;
 
@@ -131,7 +180,9 @@ export function lookupAttribution(
 
 /** 清掉某群的索引（群解散/重置时用；正常回复**不要**调用） */
 export function clearAttribution(appId: string, groupId: string): void {
+  ensureLoaded();
   index.delete(groupKey(appId, groupId));
+  persist();
 }
 
 /** 仅供测试/诊断：当前索引规模 */
@@ -139,7 +190,13 @@ export function attributionSize(appId: string, groupId: string): number {
   return index.get(groupKey(appId, groupId))?.length ?? 0;
 }
 
+/** 仅供测试：强制下次访问重新从磁盘载入（模拟重启） */
+export function reloadForTest(): void {
+  loaded = false;
+}
+
 /** 仅供测试：清空全部（避免测试间互相污染） */
 export function resetAttributionForTest(): void {
   index.clear();
+  loaded = true;   // 测试里不再从磁盘载入，避免互相污染
 }
