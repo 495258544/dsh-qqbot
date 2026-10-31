@@ -415,6 +415,20 @@ export function buildQuotePart(
     for (const m of raw.matchAll(/^===\s*消息\s*\d+\s*===\s*$/gm)) headers.push(m[0].trim());
     const parts = raw.split(/^===\s*消息\s*\d+\s*===\s*$/m).slice(1);
 
+    // 先扫一遍：这条合并转发里能确定的发送者（用于给过短的条目做弱推断）
+    let fallbackOwner: string | undefined;
+    for (const part of parts) {
+      const c = part.trim().replace(/^\[消息内容\]\s*/, '').replace(/\[消息类型\][^\n]*/g, '').trim();
+      if (!c) continue;
+      const hit = lookup(c);
+      if (hit.name || hit.id) {
+        const nm = hit.name ?? (hit.id ? shortSenderId(hit.id) : '');
+        // 不再排除"她自己"：合并转发里如果只有她说的话，
+        // 过短的条目同样大概率是她的（排除掉反而只能落"某人"）
+        if (nm) { fallbackOwner = nm; break; }
+      }
+    }
+
     const lines: string[] = [];
     let kept = 0;
     parts.forEach((part, i) => {
@@ -427,7 +441,33 @@ export function buildQuotePart(
         return;
       }
       kept += 1;
-      lines.push(`${head}\n[消息内容] （${labelOf(content, quote.entry?.senderId, quote.entry?.senderName)}）${content}`);
+      // 纯附件条目（"[附件1] 类型:图片 文件名:xxx URL:..."）：
+      // 满屏技术细节既占上下文，又会让模型照着念"文件名""URL 没带上"。
+      // 换成一句人能看懂的说明，具体图片由 attachmentProcessor 另走视觉识别。
+      // 块可能以 [消息类型] 开头（"引用消息"标签），附件标记在其后
+      const hasAttachment = /\[附件\d+\]/.test(content);
+      if (hasAttachment && !content.includes('[消息内容]')) {
+        // 类型字段直接就是中文（"类型:图片"），不是英文 image/video
+        const kind = content.match(/类型:([^\s]+)/)?.[1] ?? '';
+        const zh = /图/.test(kind) ? '图片' : /视频/.test(kind) ? '视频' : /文件/.test(kind) ? '文件' : '附件';
+        const who = labelOf(content, quote.entry?.senderId, quote.entry?.senderName);
+        lines.push(`${head}\n[消息内容] （${who}发了一张${zh}）[${zh}]`);
+        return;
+      }
+
+      let label = labelOf(content, quote.entry?.senderId, quote.entry?.senderName);
+      // 过短的内容（如单个"1"）达不到反查门槛，只会落到"某人"。
+      // 同一合并转发里其他条目若能确定发送者，就归给此人。
+      //
+      // 措辞原则：**这是给模型看的提示，不是给用户的报告**。
+      // 不要写"推测""未知"这类官僚腔，否则她会照着复述成
+      // 「前后两条都标着'某人'，认不出是谁」——那是在念系统提示，不是活人说话。
+      if (label === '某人' && fallbackOwner) {
+        label = fallbackOwner === '小羽'
+          ? '大概率是你自己'
+          : fallbackOwner;
+      }
+      lines.push(`${head}\n[消息内容] （${label}）${content}`);
     });
 
     const body = lines.join('\n\n');
@@ -451,10 +491,10 @@ export function buildQuotePart(
   const label = labelOf(raw, quote.entry?.senderId, quote.entry?.senderName);
   const found = lookup(raw);
   const attribution = found.id && isSelf(found.id)
-    ? '[Quoted message begins]\n（这段引文是你自己之前说过的话，不是别人在跟你说话）\n'
+    ? '[Quoted message begins]\n（这是你自己之前说过的话）\n'
     : label === '某人'
-      ? '[Quoted message begins]\n（引文发送者不明，不要假定是正在跟你说话的人）\n'
-      : `[Quoted message begins]\n（这段引文来自「${label}」，不是你正在对话的那个人）\n`;
+      ? '[Quoted message begins]\n（看不出这句是谁说的）\n'
+      : `[Quoted message begins]\n（这是「${label}」说的）\n`;
 
   return `${attribution}${raw}\n[Quoted message ends]\n[Current message]\n`;
 }

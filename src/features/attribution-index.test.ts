@@ -95,13 +95,13 @@ describe('归属索引 · 与群历史解耦', () => {
     expect(lookupAttribution(APP, 'g1', '群一句话')?.senderId).toBe(JMX.senderId);
   });
 
-  it('环形上限：超过 40 条后淘汰最旧的，保留最近的', () => {
-    for (let i = 0; i < 50; i++) {
+  it('环形上限：超过 100 条后淘汰最旧的，保留最近的', () => {
+    for (let i = 0; i < 120; i++) {
       rememberForAttribution(APP, GID, { ...JMX, content: `第${i}条消息内容` });
     }
-    expect(attributionSize(APP, GID)).toBe(40);
+    expect(attributionSize(APP, GID)).toBe(100);
     // 最近的一定在
-    expect(lookupAttribution(APP, GID, '第49条消息内容')).toBeTruthy();
+    expect(lookupAttribution(APP, GID, '第119条消息内容')).toBeTruthy();
     // 最旧的已被淘汰
     expect(lookupAttribution(APP, GID, '第0条消息内容')).toBeUndefined();
   });

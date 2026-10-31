@@ -58,6 +58,14 @@ export interface WakeMessage {
    * 活跃期内不是每条都要接——否则会变成应答器（"去吧""走吧"刷屏）。
    */
   inActiveWindow?: boolean;
+  /**
+   * 这条消息引用的原文（已去噪的正文）。
+   *
+   * 为什么要单独传：有人引用她说过的话，说明她的发言本身成了话题中心，
+   * 这比她"碰巧命中兴趣词"更强。只看 msg.text（如"这是谁说的？"）
+   * 会看不到引文在讲什么，这类消息就被当成无关闲聊跳过。
+   */
+  quoteText?: string;
 }
 
 /** 外部注入的「她的兴趣与话痨度」，用于兴趣驱动唤醒（由 SelfProfileService 提供） */
@@ -306,6 +314,9 @@ export class Waker {
     const c = this.getConfig(msg.key);
     const text = String(msg.text ?? '');
     const uid = String(msg.userId ?? '');
+    const quoteText = String(msg.quoteText ?? '').trim();
+    /** 判定用的合并文本：正文 + 引文（引文在讲什么同样算"这条消息在说的事"） */
+    const probe = quoteText ? `${text}\n${quoteText}` : text;
 
     // 潜水优先：owner 说话同样遵循潜水规则（方案A，不 @ 不醒）。
     // owner 身份不再强制叫醒——否则 owner 在群里发任何消息都会打断潜水，
@@ -339,12 +350,22 @@ export class Waker {
       const ownsWindow = spk !== undefined && Date.now() < spk.until;
 
       // ── 跟她有关的信号：命中就清零**这个人的**无关计数 ──
-      const it = this.matchInterest(text);
+      // 兴趣匹配用 probe（含引文）：别人引用她说过的话，引文本身可能就是她的兴趣话题
+      const it = this.matchInterest(probe);
       const q = detectQuestion(text);
       const addr = detectAddressee(text, this.addresseeContext(c, uid, ownsWindow));
 
       let wake = false;
       let reason = '';
+
+      // ⓪ 有人引用了"她说过的话"—— 她的发言成了话题中心，这是最强信号
+      //    （引文里出现她的名字/称呼，且是别人在引用，说明话题绕着她转）
+      const quotedMe = quoteText
+        && this.currentNames().some((n) => n && quoteText.includes(n));
+      if (quotedMe && Math.random() < Math.min(1, chat * 0.8 + 0.2)) {
+        if (spk) spk.idleStreak = 0;
+        return { wake: true, reason: 'active-window:my-words-quoted' };
+      }
 
       // ① 明确在问她（点名她 / 第二人称"你" / 她刚说完的省略句）
       //    问句 + 指向她 → 必接（这是"吃了吗""在干嘛"这类没问号的省略句）
@@ -403,8 +424,14 @@ export class Waker {
       if (hit) return { wake: true, reason: 'keyword:' + hit };
     }
 
+    // 有人引用她说过的话 → 明确被提到，直接醒（潜水期也理）
+    if (quoteText && this.currentNames().some((n) => n && quoteText.includes(n))) {
+      return { wake: true, reason: 'my-words-quoted' };
+    }
+
     // 兴趣驱动唤醒：命中她自己的兴趣 → 按 chattiness × 权重 × 基础概率 决定是否接话
-    const it = this.matchInterest(text);
+    // 用 probe（含引文）：引文在讲她感兴趣的事，同样算数
+    const it = this.matchInterest(probe);
     if (it.hit && it.probability > 0 && Math.random() < it.probability) {
       return { wake: true, reason: 'interest:' + it.topics.join(',') };
     }

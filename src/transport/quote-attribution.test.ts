@@ -15,14 +15,14 @@ import { describe, expect, it } from 'vitest';
 import { buildQuotePart } from './inbound.ts';
 
 describe('buildQuotePart · 发送者归属', () => {
-  it('有 senderName 时明确写出是谁说的，并说明"不是你正在对话的人"', () => {
+  it('有 senderName 时明确写出是谁说的', () => {
     const out = buildQuotePart({
       text: '卡了就别催了 我这边也动不了',
       entry: { senderId: 'CFD96F1AEAFD07BDA2A9', senderName: 'jmx的大蠢鱼', content: '' },
     });
     expect(out).toContain('[Quoted message begins]');
     expect(out).toContain('jmx的大蠢鱼');
-    expect(out).toContain('不是你正在对话的那个人');
+    expect(out).toContain('这是「');
     expect(out).toContain('卡了就别催了');
     expect(out).toContain('[Current message]');
   });
@@ -32,14 +32,13 @@ describe('buildQuotePart · 发送者归属', () => {
       text: '随便一句',
       entry: { senderId: 'CFD96F1AEAFD07BDA2A9FADEE339D723' },
     });
-    expect(out).not.toContain('引文发送者未知');
-    expect(out).toMatch(/来自「/);
+    expect(out).not.toContain('引文发送者不明');
+    expect(out).toContain('这是「');
   });
 
-  it('完全查不到发送者时如实说"不明"，并明确"不要假定是正在跟你说话的人"', () => {
+  it('完全查不到发送者时说"看不出这句是谁说的"（不冒充用户）', () => {
     const out = buildQuotePart({ text: '某句话' }, []);
-    expect(out).toContain('引文发送者不明');
-    expect(out).toContain('不要假定是正在跟你说话的人');
+    expect(out).toContain('看不出这句是谁说的');
   });
 });
 
@@ -103,7 +102,6 @@ describe('buildQuotePart · 历史反查（QQ 合并转发不给发送者）', (
   it('store 查不到时，用内容在历史里反查到是谁说的', () => {
     const out = buildQuotePart({ text: '卡了就别催了 我这边也动不了' }, HIST);
     expect(out).toContain('jmx的大蠢鱼');
-    expect(out).toContain('不是你正在对话的那个人');
   });
 
   it('合并转发逐条反查：不同人的话各自归位（不整块套一个人）', () => {
@@ -120,9 +118,9 @@ describe('buildQuotePart · 历史反查（QQ 合并转发不给发送者）', (
     expect(out).toContain('你自己之前说过的话');
   });
 
-  it('历史里也没有 → 如实说"不明"，绝不瞎猜成对话对象', () => {
+  it('历史里也没有 → "看不出这句是谁说的"，绝不瞎猜成对话对象', () => {
     const out = buildQuotePart({ text: '一句历史里没有的话' }, HIST);
-    expect(out).toContain('引文发送者不明');
+    expect(out).toContain('看不出这句是谁说的');
     expect(out).not.toContain('jmx的大蠢鱼');
     expect(out).not.toContain('小羽');
   });
@@ -139,13 +137,12 @@ describe('buildQuotePart · 认出"她自己说过的话"（botOpenid）', () =>
     const out = buildQuotePart({ text: '走吧，别让饭凉了。' }, HIST, BOT);
     // 关键：不能让她把自己说过的话当成"别人在跟我说话"
     expect(out).toContain('你自己之前说过的话');
-    expect(out).not.toContain('不是你正在对话的那个人');
+    expect(out).not.toContain('这是「');
   });
 
   it('引用别人的话 → 仍然标出那个人，且不说成她自己的', () => {
     const out = buildQuotePart({ text: '这活我接' }, HIST, BOT);
     expect(out).toContain('jmx的大蠢鱼');
-    expect(out).toContain('不是你正在对话的那个人');
     expect(out).not.toContain('你自己之前说过的话');
   });
 

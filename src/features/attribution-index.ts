@@ -30,11 +30,18 @@ export interface AttributionEntry {
   timestamp: number;
 }
 
-/** 每个群保留多少条用于反查（够覆盖"引用几句话之前"的常见操作） */
-const MAX_PER_GROUP = 40;
+/** 每个群保留多少条用于反查（用户要求放大到 100 条） */
+const MAX_PER_GROUP = 100;
 
 /** 内存里最多保留多少个群（防内存无界增长） */
 const MAX_GROUPS = 200;
+
+/*
+ * 存储量核算（放大到 100 条/群之后）：
+ *   每群 100 × 200 字 ≈ 20 KB
+ *   全局 200 群      ≈ 4 MB（理论上限）
+ *   实测单群 100 条约 20 KB 落盘，完全可接受
+ */
 
 const index = new Map<string, AttributionEntry[]>();
 

@@ -253,6 +253,60 @@ describe('Waker · 多人在同一会话里提她（按人计数）', () => {
   });
 });
 
+describe('Waker · 引用内容参与判定（M22）', () => {
+  it('潜水期：有人引用她说过的话 → 必醒（她的发言成了话题中心）', () => {
+    const w = new Waker({ names: ['小羽'], probability: 0, chimeInProbability: 0 });
+    const k = 'group:g';
+    // 正文只是"这是谁说的"，本身毫无信息；引文里出现了她的名字
+    const d = w.shouldWake({
+      key: k, userId: 'u1', text: '这是谁说的话？',
+      quoteText: '小羽：我这边只有两行，另一行是我自己的话',
+    });
+    expect(d.wake).toBe(true);
+    expect(d.reason).toBe('my-words-quoted');
+  });
+
+  it('潜水期：正文无关、引文命中她的兴趣 → 也能醒', () => {
+    const w = new Waker({ names: ['小羽'], probability: 0, chimeInProbability: 0 });
+    w.setInterestProvider(() => ({
+      interests: [{ topic: '新番', weight: 1 }],
+      chattiness: 1,
+      baseProbability: 0.5,
+    }));
+    w.setConfig('group:g', { probability: 0 });
+    // 正文是"这个你看过没"，引文里才出现"新番"
+    let woke = false;
+    for (let i = 0; i < 12; i++) {
+      const d = w.shouldWake({
+        key: 'group:g', userId: 'u1', text: '你知道这个吗',
+        quoteText: '最近那个新番挺好看的',
+      });
+      if (d.wake && d.reason.includes('interest')) { woke = true; break; }
+    }
+    expect(woke, '引文命中兴趣应有机会唤醒').toBe(true);
+  });
+
+  it('活跃期：有人引用她的话 → 清零无关计数并接话', () => {
+    const w = new Waker({ names: ['小羽'], probability: 0, chimeInProbability: 0 });
+    const k = 'group:g';
+    w.wake(k, 'A');
+    // 先累积 3 条无关
+    for (let i = 0; i < 3; i++) {
+      w.shouldWake({ key: k, userId: 'A', text: `无关${i}`, inActiveWindow: w.isSpeakerActive(k, 'A') });
+    }
+    const before = w.getConfig(k).speakers?.A?.idleStreak;
+    expect(before).toBe(3);
+    // 引用她的话 → 直接接，并把计数清零
+    const d = w.shouldWake({
+      key: k, userId: 'A', text: '这句谁说的',
+      quoteText: '小羽说过：走吧别让饭凉了',
+      inActiveWindow: w.isSpeakerActive(k, 'A'),
+    });
+    expect(d.wake).toBe(true);
+    expect(w.getConfig(k).speakers?.A?.idleStreak).toBe(0);
+  });
+});
+
 describe('Humanizer · 像人打字', () => {
   it('burstMax 默认 2，超出并入最后一条', () => {
     const h = new Humanizer();

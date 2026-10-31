@@ -103,12 +103,25 @@ export function personaWakeGate(
 
     if (waker) {
       // c2c 恒醒（与原版"私聊每条都理"一致，也保住 mentionGate 对 c2c 的语义）
+      // 引用内容也要参与判定：有人引用小羽说过的话，说明她的发言成了话题中心，
+      // 这比"正文里碰巧出现兴趣词"更强 —— 不该因为正文没提到就整条跳过。
+      // （quoteRef 已前移到门禁之前，所以这里 state.quote 是解析好的）
+      const rawQuote = String(ctx.state.quote?.text ?? '');
+      const quoteText = rawQuote
+        // 去掉合并转发头/系统略去/署名，只留正文语义
+        .replace(/^===\s*消息\s*\d+\s*===\s*$/gm, '')
+        .replace(/\[消息内容\]\s*（[^）]*）/g, '')
+        .replace(/\[消息类型\][^\n]*/g, '')
+        .trim();
+
       const decision = scope === 'group'
         ? waker.shouldWake({
             key,
             userId: msg.senderId,
             name: msg.senderName,
             text: msg.content ?? '',
+            // 引文正文单独透传：唤醒判定里"命中兴趣/被引用"都该考虑它
+            quoteText,
             isAtMe: ctx.state.mention?.wasMentioned === true,
             // 活跃期内按概率接话，避免变成应答器
             inActiveWindow: waker.isSpeakerActive(key, msg.senderId),
