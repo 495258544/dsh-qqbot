@@ -239,15 +239,17 @@ describe('own-life · 静默唤醒约束', () => {
     expect(count).toBe(2);
   });
 
-  it('安静时段不叫', async () => {
+  it('安静时段不叫（按北京时间判定，容器无 tzdata）', async () => {
     const life = createOwnLife({
       deliver: async () => {},
-      quiet: [3, 8],
+      quiet: [3, 8],           // 北京 3:00-8:00 安静
+      tz: 'Asia/Shanghai',
       statePath: path.join(dir, 'st3.json'),
       log: () => {},
     });
-    const at4am = new Date(2026, 9, 30, 4, 0, 0).getTime();
-    const r = await life.tick(at4am);
+    // 北京时间 4:00 = UTC 20:00（前一天）
+    const at4amBeijing = Date.UTC(2026, 9, 29, 20, 0, 0);
+    const r = await life.tick(at4amBeijing);
     expect(r.skipped).toBe('quiet');
   });
 

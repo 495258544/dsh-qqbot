@@ -16,6 +16,7 @@
  */
 import { execFileSync } from 'node:child_process';
 import type { SelfProfileService } from './self.ts';
+import { DEFAULT_TZ, hourInTz, isHourInRange } from './clock.ts';
 
 /** ego-browser 入口（vendored Linux 版，package.json 无 bin 字段） */
 const EGO_BIN =
@@ -157,10 +158,9 @@ export function surfTopic(topic: string, opts: { deep?: boolean; maxFindings?: n
   }
 }
 
-/** 现在是否在冲浪时段（默认凌晨 3:00–7:00） */
-export function inSurfWindow(now = new Date(), from = 3, to = 7): boolean {
-  const h = now.getHours();
-  return from <= to ? h >= from && h < to : h >= from || h < to;
+/** 现在是否在冲浪时段（默认凌晨 3:00–7:00，**按北京时间**，容器无 tzdata） */
+export function inSurfWindow(now = new Date(), from = 3, to = 7, tz = DEFAULT_TZ): boolean {
+  return isHourInRange(hourInTz(now, tz), from, to);
 }
 
 /**

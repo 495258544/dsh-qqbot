@@ -13,6 +13,7 @@
  * - 投递失败不计次数（下次还会再试）
  */
 import fs from 'node:fs';
+import { DEFAULT_TZ, hourInTz, isHourInRange } from './clock.ts';
 import path from 'node:path';
 
 const HOUR = 3600 * 1000;
@@ -53,6 +54,8 @@ function dayKey(ts: number): string {
 export type OwnLifeDeliverResult = boolean | void | { ok?: boolean; reason?: string };
 
 export interface OwnLifeOptions {
+  /** IANA 时区（容器无 tzdata，必须显式指定，默认 Asia/Shanghai） */
+  tz?: string;
   /** 静默提示投递：注入 agent 上下文，不发消息。见 OwnLifeDeliverResult 三态语义 */
   deliver: (text: string) => Promise<OwnLifeDeliverResult>;
   statePath?: string;
@@ -96,6 +99,7 @@ export function createOwnLife(opts: OwnLifeOptions): OwnLifeHandle {
     statePath,
     intervalMs = 2.5 * HOUR,
     quiet = [3, 8],
+    tz = DEFAULT_TZ,
     midnightAt = '23:30',
     maxPerDay = 6,
     enabled = true,
@@ -128,9 +132,11 @@ export function createOwnLife(opts: OwnLifeOptions): OwnLifeHandle {
   }
 
   function inQuiet(now: number): boolean {
-    const h = new Date(now).getHours();
+    // 修复：容器无 tzdata，getHours() 返回 UTC → 会用错时段。
+    // 改用显式 IANA 时区换算（Intl 自带 ICU，已实测正确）。
+    const h = hourInTz(new Date(now), tz);
     const [from, to] = quiet;
-    return from <= to ? (h >= from && h < to) : (h >= from || h < to);
+    return isHourInRange(h, from, to);
   }
 
   function pastMidnightSlot(now: number): boolean {

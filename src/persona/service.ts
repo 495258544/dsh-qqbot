@@ -18,6 +18,7 @@ import { SelfProfileService } from './self.ts';
 import { VoiceService } from './voice.ts';
 import { SelfNoteService } from './self-note.ts';
 import { runSurfRound, inSurfWindow, type SurfResult } from './surf.ts';
+import { clockInTz, weekdayInTz, DEFAULT_TZ } from './clock.ts';
 import { Humanizer } from './humanize.ts';
 import { createOwnLife, type OwnLifeHandle, type OwnLifeDeliverResult } from './own-life.ts';
 import { createScreenWatch, type ScreenWatchHandle, type ScreenWatchOptions, type ScreenNudge, type ScreenDeliverResult } from './screen-watch.ts';
@@ -255,8 +256,10 @@ export class PersonaService {
   /** P6：时间感上下文——"几点了 / 周几 / 距上次聊了多久"，给人格现实锚点。
    *  距上次由调用方传入 lastActivityAt（ms）；缺省则不拼该句。 */
   static timeSection(now: Date = new Date(), lastActivityAt?: number): { name: string; order: number; text: string } | undefined {
-    const week = ['日', '一', '二', '三', '四', '五', '六'][now.getDay()];
-    const hhmm = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
+    // 修复：容器无 tzdata，getHours() 是 UTC → 时间感会差 8 小时
+    const hhmm = clockInTz(now, DEFAULT_TZ);
+    const weekdayIdx = weekdayInTz(now, DEFAULT_TZ);
+    const week = ['日', '一', '二', '三', '四', '五', '六'][weekdayIdx];
     let mindist = '';
     if (lastActivityAt) {
       const mins = Math.max(0, Math.round((now.getTime() - lastActivityAt) / 60000));
