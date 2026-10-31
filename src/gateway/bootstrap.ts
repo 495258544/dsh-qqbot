@@ -33,6 +33,7 @@ import { DeliverablesDeliverer } from '../transport/deliverables.ts';
 import { PersonaService } from '../persona/service.ts';
 import { registerPersonaTools } from '../persona/tools.ts';
 import { SteamService, registerSteamTools } from '../steam/index.ts';
+import { createDotaService, registerDotaTools, type DotaService } from '../dota/index.ts';
 import { createBridgeProbe, renderScreenNudge } from '../persona/screen-watch.ts';
 import { createUpstreamWatch, makeBridgeNotifier, type UpstreamWatchHandle } from '../ops/index.ts';
 import { existsSync } from 'node:fs';
@@ -109,6 +110,17 @@ export async function bootstrapGateway(
     } catch (err) {
       // 绑定表目录不可写之类的问题不该让整个 bot 起不来
       logger.warn(`steam: 初始化失败，功能已跳过: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  // ── Dota2 战绩（OpenDota，免 key）──
+  // 和 Steam 段完全解耦：不依赖 Steam API Key，只用 account_id（SteamID64 换算而来）。
+  let dota: DotaService | undefined;
+  if (config.dota.enabled) {
+    try {
+      dota = createDotaService(config.dota, logger);
+    } catch (err) {
+      logger.warn(`dota: 初始化失败，功能已跳过: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
 
@@ -256,9 +268,16 @@ export async function bootstrapGateway(
     registerPersonaTools(ctx, persona, (agent) => manager.findByAgent(agent as Parameters<SessionManager['findByAgent']>[0]), logger);
   }
 
-  // ── Steam 工具（qq_steam_bind / qq_steam_forget / qq_steam_lookup）──
+  // ── Steam 工具（qq_steam_bind / qq_steam_forget / qq_steam_lookup / qq_steam_friends）──
   if (steam) {
     registerSteamTools(ctx, steam, manager, logger);
+    // 异步探一次网络与 Key：失败只写日志，不影响启动
+    void steam.selfCheck().catch(() => {});
+  }
+
+  // ── Dota2 工具（qq_dota_recent）──
+  if (dota) {
+    registerDotaTools(ctx, dota, logger);
   }
 
   // ── own-life 静默唤醒：只投递给**存活**的 owner c2c 会话（peek 不重建），

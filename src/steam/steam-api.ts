@@ -24,6 +24,7 @@ export type SteamErrorKind =
   | 'no-key'      // 没配 API key
   | 'unauthorized' // key 无效 / 被吊销（HTTP 403）
   | 'rate-limit'  // 触发限流（HTTP 429）
+  | 'friendlist-private' // 对方把「好友列表」设为私密（GetFriendList 返回 401）
   | 'network'     // 超时 / 连接失败
   | 'http';       // 其它非 2xx
 
@@ -43,6 +44,12 @@ export class SteamApiError extends Error {
 export interface PlayerSummary {
   steamId: string;
   personaName: string;
+  /**
+   * 资料完整地址，形如 https://steamcommunity.com/id/GabeLoganNewell/
+   * 走 ID 自定义名的会带 /id/，没设自定义名的自动是 /profiles/<id64>/。
+   * 这是唯一能拿到「对方自定义 ID」的字段——ResolveVanityURL 只能正查，不能反查。
+   */
+  profileUrl?: string;
   /** 0 离线 / 1 在线 / 2 忙碌 / 3 离开 / 4 打盹 / 5 想交易 / 6 想组队 */
   personaState: number;
   personaStateText: string;
@@ -55,6 +62,13 @@ export interface PlayerSummary {
   /** 上次下线时间（unix 秒） */
   lastLogoffAt?: number;
   avatar?: string;
+}
+
+/** 好友列表的一条 record */
+export interface FriendRecord {
+  steamId: string;
+  /** 成为好友的时间（unix 秒，部分账号为 0） */
+  friendSince: number;
 }
 
 /** 最近游戏的一条记录 */
@@ -187,6 +201,40 @@ export class SteamApi {
       }));
   }
 
+  /**
+   * 拉好友列表。**只有对方把「好友列表」设成公开时才拿得到**。
+   *
+   * 实测行为（2026-10）：
+   *   - 好友列表公开 → 200 + friends 数组
+   *   - 好友列表私密 → 401 + 空 body `{}`（不是 403，别混淆成 key 无效）
+   *   - steamid 不是个人号（群组号等）→ 400 + HTML 错误页
+   *
+   * 注意：只返回 steamid，昵称/头像要再调 getSummaries。
+   */
+  async getFriendList(steamId: string): Promise<FriendRecord[]> {
+    let data: { friendslist?: { friends?: Array<{ steamid?: string; friend_since?: number }> } };
+    try {
+      data = await this.get('/ISteamUser/GetFriendList/v1/', { steamid: steamId, relationship: 'friend' });
+    } catch (err) {
+      if (err instanceof SteamApiError && err.status === 401) {
+        // 401 在别的端点意味着鉴权失败，但 GetFriendList 用它表示「好友列表不可见」
+        throw new SteamApiError(
+          'friendlist-private',
+          '对方把「好友列表」设成了私密，Steam 不允许第三方读取',
+          401,
+        );
+      }
+      if (err instanceof SteamApiError && err.status === 400) {
+        throw new SteamApiError('http', `${steamId} 不是有效的个人 Steam 账号（可能是群组号或已注销）`, 400);
+      }
+      throw err;
+    }
+
+    return (data.friendslist?.friends ?? [])
+      .filter((f) => typeof f.steamid === 'string' && f.steamid !== '')
+      .map((f) => ({ steamId: f.steamid as string, friendSince: Number(f.friend_since ?? 0) }));
+  }
+
   /** 自定义 ID → SteamID64；找不到抛 not-found 语义的 http 错误 */
   async resolveVanity(vanity: string): Promise<string> {
     const data = await this.get<{
@@ -204,6 +252,7 @@ export class SteamApi {
 interface RawPlayer {
   steamid?: string;
   personaname?: string;
+  profileurl?: string;
   personastate?: number;
   communityvisibilitystate?: number;
   gameid?: string;
@@ -233,6 +282,7 @@ function toSummary(p: RawPlayer): PlayerSummary {
   };
   if (p.gameid !== undefined) summary.gameId = String(p.gameid);
   if (p.gameextrainfo !== undefined && p.gameextrainfo !== '') summary.gameName = p.gameextrainfo;
+  if (typeof p.profileurl === 'string' && p.profileurl !== '') summary.profileUrl = p.profileurl;
   if (typeof p.lastlogoff === 'number') summary.lastLogoffAt = p.lastlogoff;
   const avatar = p.avatarfull ?? p.avatar;
   if (avatar !== undefined && avatar !== '') summary.avatar = avatar;

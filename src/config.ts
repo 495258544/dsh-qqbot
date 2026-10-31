@@ -2,6 +2,7 @@
  * dsh-im-qqbot 插件配置 Schema
  */
 import Schema from '@deepseek-ai/schemastery';
+import { DEFAULT_DOTA_CONFIG, type DotaConfig } from './dota/index.ts';
 
 export interface AccessControlConfig {
   /** C2C 访问模式 */
@@ -136,6 +137,12 @@ export interface SteamConfig {
   dataDir: string;
   /** 预置绑定：QQ openid → SteamID64（管理员维护；每次启动同步，配置是权威） */
   friends: Record<string, string>;
+  /**
+   * 主人自己的 SteamID64（可选）。
+   * 有它才能拉「好友列表」——Steam 的 GetFriendList 必须指定一个人的 steamid 作起点，
+   * 而且要求这个人把「好友列表」隐私设成公开，否则一律 401。
+   */
+  ownerSteamId: string;
   /** 在线状态/当前游戏缓存秒数（默认 60；批量接口一次可覆盖 100 人，可高频） */
   summaryTtlSec: number;
   /** 最近游戏缓存秒数（默认 900；一人一次调用，别压太短） */
@@ -231,6 +238,8 @@ export interface ImQQBotConfig {
   persona: PersonaConfig;
   /** Steam 集成（查群友状态/最近游戏，只读公开资料） */
   steam: SteamConfig;
+  /** Dota2 战绩（数据源 OpenDota，免 key；与 steam 段解耦，各自独立开关） */
+  dota: DotaConfig;
   /** 运维巡检（独立模块，与 persona 无关）：上游同步检查 */
   ops: OpsConfig;
 }
@@ -383,6 +392,7 @@ export const ConfigSchema: Schema<ImQQBotConfig> = Schema.object({
     apiKey: Schema.string().default('').description('Steam Web API Key（https://steamcommunity.com/dev/apikey 免费申请；空=只能绑定不能查询）'),
     dataDir: Schema.string().default('').description('绑定表目录（默认 ~/.dsh-qqbot/steam）'),
     friends: Schema.dict(Schema.string()).default({}).description('预置绑定：QQ openid → SteamID64（每次启动同步，配置是权威；群友也可自助绑定）'),
+    ownerSteamId: Schema.string().default('').description('主人自己的 SteamID64（拉好友列表的起点；需把 Steam 隐私里的「好友列表」设为公开）'),
     summaryTtlSec: Schema.natural().default(60).description('在线状态/当前游戏缓存秒数（默认 60）'),
     recentTtlSec: Schema.natural().default(900).description('最近游戏缓存秒数（默认 900；一人一次调用，别设太小）'),
     negativeTtlSec: Schema.natural().default(600).description('查不到的账号的负缓存秒数（默认 600，避免对错误 ID 反复打 API）'),
@@ -395,6 +405,7 @@ export const ConfigSchema: Schema<ImQQBotConfig> = Schema.object({
     apiKey: '',
     dataDir: '',
     friends: {},
+    ownerSteamId: '',
     summaryTtlSec: 60,
     recentTtlSec: 900,
     negativeTtlSec: 600,
@@ -403,6 +414,15 @@ export const ConfigSchema: Schema<ImQQBotConfig> = Schema.object({
     proactiveEnabled: true,
     proactiveMaxChars: 600,
   }).description('Steam 集成配置（查群友状态/最近游戏；只读公开资料，需自备 API Key）'),
+  dota: Schema.object({
+    enabled: Schema.boolean().default(DEFAULT_DOTA_CONFIG.enabled).description('Dota2 战绩总开关（关=不注册 qq_dota_recent）'),
+    cacheTtlSec: Schema.natural().default(DEFAULT_DOTA_CONFIG.cacheTtlSec).description('同一账号战绩缓存秒数（默认 180）'),
+    timeoutMs: Schema.natural().default(DEFAULT_DOTA_CONFIG.timeoutMs).description('单次 OpenDota 请求超时(ms)'),
+    defaultLimit: Schema.natural().default(DEFAULT_DOTA_CONFIG.defaultLimit).description('默认查几局'),
+    maxLimit: Schema.natural().default(DEFAULT_DOTA_CONFIG.maxLimit).description('单次查询局数上限'),
+    rateLimitPerMin: Schema.natural().default(DEFAULT_DOTA_CONFIG.rateLimitPerMin).description('本地限流：每分钟最多几次 OpenDota 请求（匿名额度 60/分钟，默认留 10 次余量）'),
+    includeWinLoss: Schema.boolean().default(DEFAULT_DOTA_CONFIG.includeWinLoss).description('是否附带生涯总胜负（每人多一次请求）'),
+  }).description('Dota2 战绩配置（数据源 OpenDota，免 key；对方需在游戏内开启「公开比赛数据」）'),
   ops: Schema.object({
     upstreamWatchEnabled: Schema.boolean().default(false).description('上游同步巡检（只读：只报告，不自动合并）'),
     upstreamWatchRepo: Schema.string().default('').description('被巡检仓库绝对路径（空=自动探测 dsh-qqbot 自身）'),
