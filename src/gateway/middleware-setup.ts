@@ -23,6 +23,7 @@ import type { ImQQBotConfig } from '../config.ts';
 import type { SessionManager } from '../session/index.ts';
 import type { Logger } from '../types.ts';
 import { buildCommandList } from '../commands/index.ts';
+import { attributionRecorder } from '../middleware/attribution-recorder.ts';
 import { attachmentProcessor } from '../middleware/attachment.ts';
 import { questionAnswer } from '../middleware/question-answer.ts';
 import { getHistoryStore, historyGroupKey } from '../features/history-store.ts';
@@ -69,6 +70,11 @@ export function setupMiddlewares(
       return historyGroupKey(config.appId, gid);
     },
   }));
+
+  // 4.5. 归属索引记录 — 同样放在门控之前
+  //      踩过的坑：放进 handleInbound 里会导致"没 @她"的消息被门禁拦掉、
+  //      永远不进索引 → 引用别人说的话一律显示「某人」（只认得自己的话）。
+  bot.use(attributionRecorder({ appId: config.appId }));
 
   // 5. 群聊 @bot 门控
   //    persona 启用且 Waker 接管时透传（只记录 state 不拦截）——唤醒决策由

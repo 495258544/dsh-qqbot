@@ -21,7 +21,7 @@ import {
   type MediaKind,
 } from './attachment.ts';
 import { clearGroupHistory } from '../features/history-store.ts';
-import { rememberForAttribution, lookupAttribution } from '../features/attribution-index.ts';
+import { lookupAttribution } from '../features/attribution-index.ts';
 import { stashPendingAttachments, takePendingAttachments, pendingKey } from '../features/pending-attachments.ts';
 
 import type { MiddlewareContext } from '@tencent-connect/qqbot-nodejs';
@@ -211,16 +211,6 @@ export async function handleInbound(
     content,
     source: { kind: 'user' as const },
   });
-
-  // 归属索引：记下这条消息，供"别人引用它"时反查发送者
-  // （QQ 合并转发不给发送者，只能靠这一份自建索引）
-  if (scope === 'group' && (msg.content ?? '').trim()) {
-    rememberForAttribution(config.appId, msg.groupOpenid ?? msg.senderId, {
-      senderId: msg.senderId,
-      senderName: msg.senderName,
-      content: msg.content ?? '',
-    });
-  }
 
   // persona 记账：暂存本轮用户消息，outbound turn/end 时与回复配对写入流水
   if (persona) {
