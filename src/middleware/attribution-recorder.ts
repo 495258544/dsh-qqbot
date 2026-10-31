@@ -26,21 +26,34 @@ import { rememberForAttribution } from '../features/attribution-index.ts';
  * 这是"引用一张图是谁发的"唯一可靠的线索：URL 会过期，视觉模型还要下载。
  */
 function extractImageMd5(msg: unknown): string[] {
-  const out: string[] = [];
-  const push = (v: unknown): void => {
+  const out = new Set<string>();
+  const fromName = (v: unknown): void => {
     if (typeof v !== 'string') return;
-    // 32 位十六进制即 MD5
     const m = v.match(/^([A-Fa-f0-9]{32})(?:\.[a-z0-9]+)?$/i);
-    if (m && m[1]) out.push(m[1].toLowerCase());
+    if (m && m[1]) out.add(m[1].toLowerCase());
   };
-  const atts = (msg as { attachments?: Array<{ filename?: string; url?: string }> })?.attachments;
-  if (Array.isArray(atts)) {
-    for (const a of atts) {
-      push(a?.filename);
-      // URL 里也可能带 fileid，但不可靠，只用文件名
+  const fromBlob = (text: unknown): void => {
+    if (typeof text !== 'string') return;
+    // QQ 在 msgElements 里把附件渲染成 "[附件1] 类型:图片 文件名:XXXX.jpg ..."
+    for (const m of text.matchAll(/文件名:([A-Fa-f0-9]{32})/g)) {
+      if (m[1]) out.add(m[1].toLowerCase());
     }
-  }
-  return out;
+  };
+
+  const m = msg as {
+    attachments?: Array<{ filename?: string; url?: string }>;
+    msgElements?: Array<{ content?: string }>;
+    raw?: { attachments?: Array<{ filename?: string }> };
+  };
+
+  // ① 常规 attachments（@ 消息一般有）
+  if (Array.isArray(m?.attachments)) for (const a of m.attachments) fromName(a?.filename);
+  // ② raw 里的原始事件
+  if (Array.isArray(m?.raw?.attachments)) for (const a of m.raw.attachments) fromName(a?.filename);
+  // ③ msgElements 的文本（实测 @ 消息 attachmentsCount=-1，但这里能挖到文件名）
+  if (Array.isArray(m?.msgElements)) for (const e of m.msgElements) fromBlob(e?.content);
+
+  return [...out];
 }
 
 export interface AttributionRecorderOptions {

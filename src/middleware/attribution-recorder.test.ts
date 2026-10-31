@@ -16,6 +16,7 @@ vi.stubEnv('QQBOT_ATTRIBUTION_PATH', TMP);
 
 import { attributionRecorder } from './attribution-recorder.ts';
 import {
+  lookupByImageMd5,
   lookupAttribution,
   attributionSize,
   resetAttributionForTest,
@@ -94,5 +95,34 @@ describe('attributionRecorder · 门禁之前的记录', () => {
     expect(attributionSize(APP, GID)).toBe(2);
     expect(lookupAttribution(APP, GID, '第一句话内容')?.senderName).toBe('jmx的大蠢鱼');
     expect(lookupAttribution(APP, GID, '第二句话内容')?.senderName).toBe('另一个人');
+  });
+});
+
+describe('attributionRecorder · 从 msgElements 提取图片 MD5（真实结构）', () => {
+  it('attachments 字段不存在时，仍能从 msgElements 文本里挖出文件名', async () => {
+    // 实测真实 @ 消息：attachmentsCount = -1（该字段不存在），
+    // 但 msgElements 里把附件渲染成 "[附件1] 类型:图片 文件名:XXXX.jpg"
+    const mw = attributionRecorder({ appId: APP });
+    await mw(makeCtx({
+      content: '这是谁发的',
+      attachments: undefined,
+      msgElements: [{
+        content: '=== 消息 1 ===\n[附件1] 类型:图片 文件名:4A857743CEE63C371C52C6FE0676723E.jpg\n\n'
+          + '=== 消息 4 ===\n[附件1] 类型:图片 文件名:1DD7A8B58208149DD84835F076D18A24.jpg',
+      }],
+    }) as never, vi.fn());
+
+    const hit = lookupByImageMd5(APP, GID, ['4a857743cee63c371c52c6fe0676723e']);
+    expect(hit?.senderName).toBe('jmx的大蠢鱼');
+  });
+
+  it('两张图各是一个独立指纹，都能命中', async () => {
+    const mw = attributionRecorder({ appId: APP });
+    await mw(makeCtx({
+      content: '',
+      attachments: undefined,
+      msgElements: [{ content: '[附件1] 类型:图片 文件名:AAAA1111BBBB2222CCCC3333DDDD4444.jpg' }],
+    }) as never, vi.fn());
+    expect(lookupByImageMd5(APP, GID, ['aaaa1111bbbb2222cccc3333dddd4444'])).toBeTruthy();
   });
 });
