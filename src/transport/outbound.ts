@@ -8,6 +8,7 @@ import type { SessionManager, SessionRecord } from '../session/index.ts';
 import type { ImQQBotConfig } from '../config.ts';
 import type { Logger } from '../types.ts';
 import { chunkMarkdownText } from './chunker.ts';
+import { appendBotHistory } from '../features/history-store.ts';
 import { OutboundBuffer, type QQBotSender } from './outbound-buffer.ts';
 import { formatToolResult, type ToolsRegistryLike, type ToolResultData } from './tool-presenter.ts';
 import type { DeliverablesDelivererLike } from './deliverables.ts';
@@ -55,6 +56,15 @@ interface ToolCallRecord {
 
 /** 不展示给用户的轮次错误码（底层传输/网络错误，对用户无意义，且常被重试兜住） */
 const SILENT_TURN_ERROR_CODES = new Set(['STREAM_CLOSED']);
+
+/**
+ * 机器人自己的 openid 兜底值。
+ *
+ * 优先用 config.persona.botOpenid；没配时用这个实测值
+ * （QQ 群里 @ 小羽时显示为 `<@B1FE2927B46C9AF15C464E62216395FF>`）。
+ * 用于让她说过的话在历史里可被认出，避免模型把她自己的话当成别人说的。
+ */
+const BOT_SELF_ID_FALLBACK = 'B1FE2927B46C9AF15C464E62216395FF';
 
 /**
  * 错误提示冷却（同行同错误 N 毫秒内只发一次）。
@@ -379,6 +389,7 @@ class OutboundRouter {
               await this.bot.sendMarkdown(record.replyTarget, chunk);
               // 逐气泡记账：失败不记（未送达的不算说过）
               persona.noteReplyChunk(record.sessionId, chunk);
+              this.rememberOwnWords(record, chunk);
             } catch (err) {
               this.logger.error(`im-qqbot: ${tag} (humanize) failed: ${err instanceof Error ? err.message : String(err)}`);
             }
@@ -393,9 +404,31 @@ class OutboundRouter {
       try {
         await this.bot.sendMarkdown(record.replyTarget, chunk);
         this.manager.persona?.noteReplyChunk(record.sessionId, chunk);
+        this.rememberOwnWords(record, chunk);
       } catch (err) {
         this.logger.error(`im-qqbot: ${tag} failed: ${err instanceof Error ? err.message : String(err)}`);
       }
+    }
+  }
+
+  /**
+   * 把她自己说过的话写进群历史缓冲。
+   *
+   * 为什么：用户经常引用小羽说过的话，但历史缓冲只记用户消息 → 反查不到 →
+   * 只能标「某人」→ 模型会把她自己的话当成别人说的（"刚不是你那边卡了"就是这么来的）。
+   * 只在群聊记录（私聊不需要历史缓冲），且只记真正送达的（失败的不算说过）。
+   */
+  private rememberOwnWords(record: SessionRecord, chunk: string): void {
+    if (record.scope !== 'group') return;
+    try {
+      appendBotHistory(
+        this.config.appId,
+        record.peerId,
+        chunk,
+        this.config.persona?.botOpenid || BOT_SELF_ID_FALLBACK,
+      );
+    } catch (err) {
+      this.logger.debug(`im-qqbot: 记录自身发言失败: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
 

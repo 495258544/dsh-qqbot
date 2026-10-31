@@ -136,7 +136,7 @@ export async function handleInbound(
   }
 
   // ── 组装 agentBody（下载结果经 mwState.downloadedFiles 提供） ──
-  let agentBody = assembleAgentBody(msg, mwState, scope, logger);
+  let agentBody = assembleAgentBody(msg, mwState, scope, logger, undefined, config.persona?.botOpenid);
 
   // 把"先发的图"补进 agentBody，否则 agent 不知道这几张图的存在
   if (carriedFiles.length > 0) {
@@ -239,6 +239,7 @@ function assembleAgentBody(
   scope: ChatScope,
   logger: Logger,
   anchor?: string,
+  botOpenid?: string,
 ): string | null {
   const isGroup = scope === 'group';
   const wasMentioned = state.mention?.wasMentioned ?? false;
@@ -247,7 +248,11 @@ function assembleAgentBody(
 
   if (isEmptyMessage(userContent, msg.attachments, isGroup, wasMentioned)) return null;
 
-  const quotePart = buildQuotePart(state.quote, state.history);
+  const quotePart = buildQuotePart(
+    state.quote,
+    state.history,
+    botOpenid || detectBotSelfId(state.history),
+  );
   const userMessage = buildUserMessage(userContent, quotePart, msg.senderId, msg.senderName, isGroup, wasMentioned);
 
   const dynamicCtx = buildDynamicCtx(msg, state);
@@ -300,6 +305,22 @@ function buildUserContent(msg: ProcessedMessage, state: MiddlewareState, logger:
   }
 
   return parts.join('\n');
+}
+
+/**
+ * 从当前消息里认出机器人自己的 openid。
+ *
+ * QQ 群的 @ 在文本里表现为 `<@OPENID>`；那条"@小羽"的消息就是
+ * `<@B1FE2927B46C9AF15C464E62216395FF>` —— 那就是她自己。
+ * 拿到它，才能判断一段引文是不是"她自己说过的话"。
+ */
+function detectBotSelfId(history?: HistoryEntry[]): string | undefined {
+  if (!history?.length) return undefined;
+  for (const h of history) {
+    const m = String(h.content ?? '').match(/<@([A-Fa-f0-9]{20,})>/);
+    if (m) return m[1];
+  }
+  return undefined;
 }
 
 /**

@@ -75,6 +75,12 @@ export interface PersonaConfig {
   keywords: string[];
   /** 主人 openid 列表（发言必醒；own-life 静默投递给第一个） */
   ownerOpenids: string[];
+  /**
+   * 机器人自己的 openid（QQ 群里 @ 自己时显示的那个 `<@XXXX>`）。
+   * 用于让"她自己说过的话"在历史里可被认出，避免模型把她说的话当成别人说的。
+   * 留空则从消息里的自 @ 标记自动识别。
+   */
+  botOpenid: string;
   /** 群闲聊随机插话概率（0 = 纯潜水） */
   groupProbability: number;
   /** 兴趣命中时的基础唤醒概率（实际 = chattiness × 兴趣权重 × 本值） */
@@ -300,6 +306,7 @@ export const ConfigSchema: Schema<ImQQBotConfig> = Schema.object({
     names: Schema.array(Schema.string()).default([]).description('她的名字/昵称（被叫到才醒）'),
     keywords: Schema.array(Schema.string()).default([]).description('关键词（命中即醒）'),
     ownerOpenids: Schema.array(Schema.string()).default([]).description('主人 openid（发言必醒；own-life 投递目标）'),
+    botOpenid: Schema.string().default('').description('机器人自己的 openid（群里 @ 自己时的那个；留空则自动识别）'),
     groupProbability: Schema.number().default(0).description('群闲聊随机插话概率（0=纯潜水）'),
     interestBaseProbability: Schema.number().default(0.5).description('兴趣命中时的基础唤醒概率（实际=chattiness×权重×本值）'),
     idleDiveThreshold: Schema.number().default(5).description('同一个人在活跃窗口里连续多少条与她无关的消息后回潜水（默认5；只计提到过她的人）'),
@@ -336,6 +343,7 @@ export const ConfigSchema: Schema<ImQQBotConfig> = Schema.object({
     names: [],
     keywords: [],
     ownerOpenids: [],
+    botOpenid: '',
     groupProbability: 0,
     interestBaseProbability: 0.5,
     idleDiveThreshold: 5,

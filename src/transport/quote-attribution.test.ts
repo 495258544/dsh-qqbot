@@ -127,3 +127,31 @@ describe('buildQuotePart · 历史反查（QQ 合并转发不给发送者）', (
     expect(out).not.toContain('小羽');
   });
 });
+
+describe('buildQuotePart · 认出"她自己说过的话"（botOpenid）', () => {
+  const BOT = 'B1FE2927B46C9AF15C464E62216395FF';
+  const HIST = [
+    { senderId: BOT, senderName: '小羽', content: '走吧，别让饭凉了。', timestamp: 0, messageId: 'b1' },
+    { senderId: 'CFD96F1AEAFD07BDA2A9', senderName: 'jmx的大蠢鱼', content: '这活我接', timestamp: 0, messageId: 'u1' },
+  ];
+
+  it('引用她自己的话 → 明确告诉她"这是你自己之前说过的"', () => {
+    const out = buildQuotePart({ text: '走吧，别让饭凉了。' }, HIST, BOT);
+    // 关键：不能让她把自己说过的话当成"别人在跟我说话"
+    expect(out).toContain('你自己之前说过的话');
+    expect(out).not.toContain('不是你正在对话的那个人');
+  });
+
+  it('引用别人的话 → 仍然标出那个人，且不说成她自己的', () => {
+    const out = buildQuotePart({ text: '这活我接' }, HIST, BOT);
+    expect(out).toContain('jmx的大蠢鱼');
+    expect(out).toContain('不是你正在对话的那个人');
+    expect(out).not.toContain('你自己之前说过的话');
+  });
+
+  it('不传 botOpenid（旧调用路径）→ 不会误把自己认成自己，也不崩', () => {
+    const out = buildQuotePart({ text: '走吧，别让饭凉了。' }, HIST);
+    expect(out).toContain('小羽');            // 至少标出了名字
+    expect(out).not.toContain('你自己之前说过的话');
+  });
+});
