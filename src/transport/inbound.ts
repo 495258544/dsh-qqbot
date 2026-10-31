@@ -136,9 +136,7 @@ export async function handleInbound(
   }
 
   // ── 组装 agentBody（下载结果经 mwState.downloadedFiles 提供） ──
-  // M13 抗漂移：硬约束锚点（只在 persona 启用且角色卡存在时注入）
-  const anchor = manager.persona?.role?.renderAnchor();
-  let agentBody = assembleAgentBody(msg, mwState, scope, logger, anchor);
+  let agentBody = assembleAgentBody(msg, mwState, scope, logger);
 
   // 把"先发的图"补进 agentBody，否则 agent 不知道这几张图的存在
   if (carriedFiles.length > 0) {
@@ -423,11 +421,14 @@ function buildAgentBody(
   history: HistoryEntry[] | undefined,
   isGroup: boolean,
   wasMentioned: boolean,
-  anchor?: string,
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  _anchor?: string,
 ): string {
-  const tail = anchor ? `\n${anchor}` : '';
+  // 注意：anchor 不再拼进 user message。
+  // 拼进去会污染上下文，且模型可能复述出"你是小羽…"这类系统指令（思考泄漏）。
+  // 改为在 system prompt 层以最后 order 注入（见 service.buildSections）。
   if (!isGroup || !wasMentioned || !history || history.length === 0) {
-    return base + tail;
+    return base;
   }
 
   const historyLines = history.map(h => {
@@ -442,8 +443,6 @@ function buildAgentBody(
     '[Chat history ends]',
     '[Current message]',
     base,
-    // M13 抗漂移锚点：放在**历史之后、贴近生成点**的位置（CCv3 post_history_instructions）
-    ...(anchor ? ['', anchor] : []),
   ].join('\n');
 }
 

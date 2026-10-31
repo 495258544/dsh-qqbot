@@ -250,6 +250,12 @@ export class PersonaService {
     // M16 L4 selfNote：她对自己的认识（只在有内容时注入）
     const selfSec = this.selfNote.renderSection();
     if (selfSec) out.push({ name: 'qqbot:persona-selfnote', order: 65, text: selfSec });
+
+    // M13 抗漂移锚点：硬约束放在**最后一个 order**（尽量贴近生成点）。
+    // 之前拼在 user message 里会污染上下文、还有被复述的风险；
+    // 放在 system prompt 末尾既保持"靠近生成"的效果，又不进对话内容。
+    const anchor = this.role?.renderAnchor();
+    if (anchor) out.push({ name: 'qqbot:persona-anchor', order: 998, text: anchor });
     return out;
   }
 
