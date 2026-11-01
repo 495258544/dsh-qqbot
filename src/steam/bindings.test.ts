@@ -67,3 +67,56 @@ describe('BindingStore · 真名与群名都能匹配', () => {
     expect(store.find('王运琦').map((h) => h.openid)).toEqual(['openid-b'])
   })
 })
+
+describe('BindingStore · 热重读（改完不用重启）', () => {
+  let dir: string
+  let file: string
+
+  beforeEach(() => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bind-hot-'))
+    file = path.join(dir, 'bindings.json')
+  })
+
+  afterEach(() => {
+    fs.rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('外部（脚本/对话工具）加了绑定，同一个实例马上能看到', () => {
+    const store = new BindingStore(dir, log)
+    store.set('openid-a', { steamId: '76561198205711847', alias: '小周、周星宇', boundAt: 1, source: 'self' })
+    expect(store.size()).toBe(1)
+
+    // 模拟另一个进程写文件
+    const raw = JSON.parse(fs.readFileSync(file, 'utf8'))
+    raw.bindings['openid-b'] = { steamId: '76561198189818115', alias: '芋头、王运琦', boundAt: 2, source: 'self' }
+    fs.writeFileSync(file, JSON.stringify(raw, null, 2), 'utf8')
+    const future = new Date(Date.now() + 1000)
+    fs.utimesSync(file, future, future)
+
+    expect(store.size()).toBe(2)
+    expect(store.find('王运琦').map((h) => h.openid)).toEqual(['openid-b'])
+  })
+
+  it('外部改了 alias，同一实例按新叫法能查到', () => {
+    const store = new BindingStore(dir, log)
+    store.set('openid-a', { steamId: '76561198205711847', alias: '小周', boundAt: 1, source: 'self' })
+    expect(store.find('周星宇')).toHaveLength(0)
+
+    const raw = JSON.parse(fs.readFileSync(file, 'utf8'))
+    raw.bindings['openid-a'].alias = '小周、周星宇'
+    fs.writeFileSync(file, JSON.stringify(raw, null, 2), 'utf8')
+    const future = new Date(Date.now() + 1000)
+    fs.utimesSync(file, future, future)
+
+    expect(store.find('周星宇').map((h) => h.openid)).toEqual(['openid-a'])
+  })
+
+  it('文件被删 → 回空表，不抱旧缓存', () => {
+    const store = new BindingStore(dir, log)
+    store.set('openid-a', { steamId: '76561198205711847', alias: '小周', boundAt: 1, source: 'self' })
+    expect(store.size()).toBe(1)
+
+    fs.rmSync(file)
+    expect(store.size()).toBe(0)
+  })
+})

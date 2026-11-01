@@ -44,6 +44,8 @@ export class BindingStore {
   private readonly file: string;
   private readonly logger: { info(msg: string): void; warn(msg: string): void };
   private cache: Record<string, SteamBinding> | undefined;
+  /** 上次读盘时的 mtime，用判断"外面改过没有" */
+  private mtimeAt: number | undefined;
 
   constructor(dir: string, logger: { info(msg: string): void; warn(msg: string): void }) {
     fs.mkdirSync(dir, { recursive: true });
@@ -51,9 +53,33 @@ export class BindingStore {
     this.logger = logger;
   }
 
-  /** 读全表（懒加载 + 内存缓存；文件损坏时降级为空表而不是抛错） */
+  private statMtime(): number | undefined {
+    try {
+      return fs.statSync(this.file).mtimeMs;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
+   * 读全表（懒加载 + 内存缓存；文件损坏时降级为空表而不是抛错）。
+   *
+   * 热重读：命令行脚本、或者对话里临时跑的改表脚本都是**另一个写入方**，
+   * 它们改完盘之后本进程必须立刻看到 —— 绑人、改称呼、加名字表都不该要求重启。
+   * 只在 mtime 变了才重新解析，正常路径上多一次 stat 的代价可以忽略。
+   */
   private read(): Record<string, SteamBinding> {
-    if (this.cache !== undefined) return this.cache;
+    const mtime = this.statMtime();
+    if (this.cache !== undefined) {
+      // 文件还在且没动过 → 直接用缓存
+      if (mtime !== undefined && mtime === this.mtimeAt) return this.cache;
+      // 文件被删了 → 回到空表，不要抱着旧缓存不放
+      if (mtime === undefined) {
+        this.cache = {};
+        this.mtimeAt = undefined;
+        return this.cache;
+      }
+    }
     try {
       const raw = fs.readFileSync(this.file, 'utf8');
       const parsed = JSON.parse(raw) as Partial<BindingFile>;
@@ -71,12 +97,14 @@ export class BindingStore {
         }
       }
       this.cache = clean;
+      this.mtimeAt = mtime;
     } catch (err) {
       const code = (err as NodeJS.ErrnoException).code;
       if (code !== 'ENOENT') {
         this.logger.warn(`steam: 绑定表读取失败，按空表处理: ${err instanceof Error ? err.message : String(err)}`);
       }
       this.cache = {};
+      this.mtimeAt = mtime;
     }
     return this.cache;
   }
@@ -88,6 +116,8 @@ export class BindingStore {
     fs.writeFileSync(tmp, JSON.stringify(payload, null, 2), 'utf8');
     fs.renameSync(tmp, this.file);
     this.cache = bindings;
+    // 自己写的也要把 mtime 记下，免得下次读又白解析一遍
+    this.mtimeAt = this.statMtime();
   }
 
   list(): Array<{ openid: string; binding: SteamBinding }> {

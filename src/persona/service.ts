@@ -28,6 +28,7 @@ import { matchesTopic } from './word-match.ts';
 import { pickDiaryMaterial, composeDiaryText, readTurnsOfDay, shouldWriteDiary } from './diary-auto.ts';
 import { createOwnLife, type OwnLifeHandle, type OwnLifeDeliverResult } from './own-life.ts';
 import { createScreenWatch, type ScreenWatchHandle, type ScreenWatchOptions, type ScreenNudge, type ScreenDeliverResult } from './screen-watch.ts';
+import { RuntimeConfig } from './runtime-config.ts';
 import type { PersonaConfig } from '../config.ts';
 import type { Logger } from '../types.ts';
 
@@ -210,6 +211,11 @@ export class PersonaService {
   public readonly selfNote: SelfNoteService;
   /** 情绪（M31：三个数字，接在四个行为闸门上，不进提示词当描述） */
   public readonly emotion: EmotionService;
+  /**
+   * 运行时配置（热生效）：名字 / 关键词 / 群友称呼。
+   * 放在数据目录而不是 profile —— 改 profile 要重启，这三样却是最常改的。
+   */
+  public readonly runtime: RuntimeConfig;
   public readonly humanizer: Humanizer;
   public readonly budget: ProactiveBudget;
   public ownLife: OwnLifeHandle | undefined;
@@ -270,6 +276,8 @@ export class PersonaService {
     this.voice = new VoiceService(dataDir, (m) => logger.info(m));
     this.selfNote = new SelfNoteService(dataDir, (m) => logger.info(m));
     this.emotion = new EmotionService(dataDir, (m) => logger.info(m));
+    // 运行时配置：改完文件即刻生效，不必重启宿主
+    this.runtime = new RuntimeConfig(path.join(dataDir, 'runtime.json'), (m) => logger.warn(m));
     this.loadLastTurnAt();
     if (config.roleCardPath) {
       this.role = new Role({ cardPath: config.roleCardPath, maxChars: config.roleMaxChars });
@@ -299,11 +307,15 @@ export class PersonaService {
           baseProbability: config.interestBaseProbability,
         };
       });
-      // 动态称呼：配置名 ∪ 她自己接受的称呼
+      // 动态称呼：配置名 ∪ 她自己接受的称呼 ∪ runtime.json 里补的
       waker.setNameProvider(() => {
         const extra = this.self.activeNames();
-        return extra.length > 0 ? [...new Set([...baselineNames, ...extra])] : baselineNames;
+        const runtime = this.runtime.names();
+        const merged = [...new Set([...baselineNames, ...extra, ...runtime])];
+        return merged.length > 0 ? merged : baselineNames;
       });
+      // 关键词也走动态：runtime.json 里能随时加，不用重启
+      waker.setKeywordsProvider(() => this.runtime.keywords());
       this.waker = waker;
     }
     this.humanizer = new Humanizer({
