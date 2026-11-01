@@ -137,10 +137,14 @@ describe('Waker · 该不该说话', () => {
     expect(w.shouldWake({ key: 'group:1', userId: 'boss', text: '小鱼在吗' }).reason).toContain('name:');
   });
 
-  it('提问特征醒，闲聊概率 0 不醒', () => {
-    const w = new Waker({ probability: 0 });
+  it('潜水期：明确问句且像在问她 → 醒；泛泛的问句不再无脑醒', () => {
+    const w = new Waker({ probability: 0, names: ['小羽'] });
     w.setConfig('group:2', { probability: 0 });
-    expect(w.shouldWake({ key: 'group:2', userId: 'u3', text: '这个怎么玩？' }).wake).toBe(true);
+    // 明确指向她（第二人称/点名）→ 醒
+    expect(w.shouldWake({ key: 'group:2', userId: 'u3', text: '小羽这个怎么玩？' }).wake).toBe(true);
+    expect(w.shouldWake({ key: 'group:2', userId: 'u3', text: '你觉得这个怎么玩？' }).wake).toBe(true);
+    // 纯问句、完全不指向她 → 潜水期不插手（"只在感兴趣时说话"）
+    expect(w.shouldWake({ key: 'group:2', userId: 'u3', text: '这个怎么玩？' }).wake).toBe(false);
   });
 
   it('dive/wake 状态切换（active 模式优先于 dive，与 ai-companion 原语义一致）', () => {
@@ -172,6 +176,134 @@ describe('Waker · 该不该说话', () => {
     expect(w.prune(30 * 24 * 3600_000)).toBe(1);               // 只删 old
     // fresh 仍在 → 再次 prune 因 fresh 已存在 getConfig 不再重建 old，返回 0
     expect(w.prune(30 * 24 * 3600_000)).toBe(0);
+  });
+});
+
+describe('Waker · 多人在同一会话里提她（按人计数）', () => {
+  // chimeInProbability: 0 → 关掉"偶尔插一句"的随机性，断言才可重复
+  const idle = () => new Waker({ names: ['小羽'], probability: 0, idleDiveThreshold: 5, chimeInProbability: 0 });
+
+  it('阈值是 5：同一个人的连续 5 条无关消息才关他的窗口', () => {
+    const w = idle();
+    const k = 'group:g';
+    w.wake(k, 'A');
+    for (let i = 1; i <= 4; i++) {
+      const d = w.shouldWake({ key: k, userId: 'A', text: `无关第${i}句`, inActiveWindow: w.isSpeakerActive(k, 'A') });
+      expect(d.wake, `第 ${i} 条应为不回答`).toBe(false);
+      expect(d.reason).toContain(`${i}/5`);
+      expect(w.isSpeakerActive(k, 'A')).toBe(true);   // 还没到阈值，窗口还在
+    }
+    const fifth = w.shouldWake({ key: k, userId: 'A', text: '无关第5句', inActiveWindow: w.isSpeakerActive(k, 'A') });
+    expect(fifth.wake).toBe(false);
+    expect(fifth.reason).toBe('active-window:auto-dive'); // 只有他一个人 → 整个会话回潜水
+    expect(w.isSpeakerActive(k, 'A')).toBe(false);
+  });
+
+  it('只计"提到她的人"的条数——别人插话不算到他头上', () => {
+    const w = idle();
+    const k = 'group:g';
+    w.wake(k, 'A');
+    // B 从没提过她，连说 10 句无关 → 不消耗 A 的计数
+    for (let i = 0; i < 10; i++) {
+      const d = w.shouldWake({ key: k, userId: 'B', text: `B的闲话${i}`, inActiveWindow: w.isSpeakerActive(k, 'B') });
+      expect(d.wake, `B 的第 ${i} 句不该被回答`).toBe(false);
+      // B 没有窗口 → 走潜水期的常规判定（@/名字/兴趣/概率），绝不是回答闲聊
+      expect(w.getConfig(k).speakers?.A?.idleStreak, `B 的话不该记到 A 头上`).toBe(0);
+    }
+    expect(w.isSpeakerActive(k, 'A')).toBe(true);   // A 的窗口毫发无损
+    const a = w.shouldWake({ key: k, userId: 'A', text: '在干嘛', inActiveWindow: w.isSpeakerActive(k, 'A') });
+    expect(a.wake).toBe(true);
+  });
+
+  it('A 的窗口关掉，B 的窗口还活着 → 会话继续活跃', () => {
+    const w = idle();
+    const k = 'group:g';
+    w.wake(k, 'A');
+    w.wake(k, 'B');
+    // A 连续 5 句无关 → 只关 A
+    for (let i = 1; i <= 5; i++) {
+      const d = w.shouldWake({ key: k, userId: 'A', text: `无关${i}`, inActiveWindow: w.isSpeakerActive(k, 'A') });
+      if (i === 5) expect(d.reason).toBe('active-window:speaker-closed');
+    }
+    expect(w.isSpeakerActive(k, 'A')).toBe(false);
+    expect(w.isSpeakerActive(k, 'B')).toBe(true);
+    expect(w.isActive(k)).toBe(true);
+    // B 说话照常接
+    const bb = w.shouldWake({ key: k, userId: 'B', text: '吃了吗', inActiveWindow: w.isSpeakerActive(k, 'B') });
+    expect(bb.wake).toBe(true);
+  });
+
+  it('窗口数超限时挤掉最早到期的（默认 4 个）', () => {
+    const w = new Waker({ names: ['小羽'], probability: 0, maxSpeakerWindows: 2, chimeInProbability: 0 });
+    const k = 'group:g';
+    w.wake(k, 'A'); w.wake(k, 'B'); w.wake(k, 'C');
+    const sp = w.getConfig(k).speakers ?? {};
+    expect(Object.keys(sp).sort()).toEqual(['B', 'C']);
+  });
+
+  it('明确在问别人 → 不抢话，也不消耗任何人的计数', () => {
+    const w = idle();
+    const k = 'group:g';
+    w.setConfig(k, { speakerIds: ['老张'] });
+    w.wake(k, 'A');
+    const d = w.shouldWake({ key: k, userId: 'A', text: '老张吃了吗', inActiveWindow: w.isSpeakerActive(k, 'A') });
+    expect(d.wake).toBe(false);
+    expect(d.reason).toBe('active-window:excluded');
+    expect(w.getConfig(k).speakers?.A?.idleStreak).toBe(0);
+  });
+});
+
+describe('Waker · 引用内容参与判定（M22）', () => {
+  it('潜水期：有人引用她说过的话 → 必醒（她的发言成了话题中心）', () => {
+    const w = new Waker({ names: ['小羽'], probability: 0, chimeInProbability: 0 });
+    const k = 'group:g';
+    // 正文只是"这是谁说的"，本身毫无信息；引文里出现了她的名字
+    const d = w.shouldWake({
+      key: k, userId: 'u1', text: '这是谁说的话？',
+      quoteText: '小羽：我这边只有两行，另一行是我自己的话',
+    });
+    expect(d.wake).toBe(true);
+    expect(d.reason).toBe('my-words-quoted');
+  });
+
+  it('潜水期：正文无关、引文命中她的兴趣 → 也能醒', () => {
+    const w = new Waker({ names: ['小羽'], probability: 0, chimeInProbability: 0 });
+    w.setInterestProvider(() => ({
+      interests: [{ topic: '新番', weight: 1 }],
+      chattiness: 1,
+      baseProbability: 0.5,
+    }));
+    w.setConfig('group:g', { probability: 0 });
+    // 正文是"这个你看过没"，引文里才出现"新番"
+    let woke = false;
+    for (let i = 0; i < 12; i++) {
+      const d = w.shouldWake({
+        key: 'group:g', userId: 'u1', text: '你知道这个吗',
+        quoteText: '最近那个新番挺好看的',
+      });
+      if (d.wake && d.reason.includes('interest')) { woke = true; break; }
+    }
+    expect(woke, '引文命中兴趣应有机会唤醒').toBe(true);
+  });
+
+  it('活跃期：有人引用她的话 → 清零无关计数并接话', () => {
+    const w = new Waker({ names: ['小羽'], probability: 0, chimeInProbability: 0 });
+    const k = 'group:g';
+    w.wake(k, 'A');
+    // 先累积 3 条无关
+    for (let i = 0; i < 3; i++) {
+      w.shouldWake({ key: k, userId: 'A', text: `无关${i}`, inActiveWindow: w.isSpeakerActive(k, 'A') });
+    }
+    const before = w.getConfig(k).speakers?.A?.idleStreak;
+    expect(before).toBe(3);
+    // 引用她的话 → 直接接，并把计数清零
+    const d = w.shouldWake({
+      key: k, userId: 'A', text: '这句谁说的',
+      quoteText: '小羽说过：走吧别让饭凉了',
+      inActiveWindow: w.isSpeakerActive(k, 'A'),
+    });
+    expect(d.wake).toBe(true);
+    expect(w.getConfig(k).speakers?.A?.idleStreak).toBe(0);
   });
 });
 

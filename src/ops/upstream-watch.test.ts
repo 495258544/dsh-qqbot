@@ -172,10 +172,17 @@ describe('createUpstreamWatch · 只读与降级', () => {
 
   it('窗口内只跑一次（重启不补跑）', async () => {
     const w = createUpstreamWatch({ repo: env.repo, stateDir, apiRepo: '', runHour: 5, windowMinutes: 45 });
+    // 注意：必须把 now 也钉住。只传 tick(win) 的话，runOnce 内部用 now() 取真实时间
+    // 写 lastRunDay —— 测试跨天后（比如次日再跑）dayKey 就对不上，会误报失败。
     const win = Date.UTC(2026, 9, 30, 21, 5, 0); // 北京 05:05
-    const r1 = await w.tick(win);
+    const clock = () => win;
+    const w2 = createUpstreamWatch({
+      repo: env.repo, stateDir, apiRepo: '', runHour: 5, windowMinutes: 45, now: clock,
+    });
+    void w;
+    const r1 = await w2.tick(win);
     expect(r1.ran).toBe(true);
-    const r2 = await w.tick(win + 10 * 60 * 1000); // 北京 05:15，同一天
+    const r2 = await w2.tick(win + 10 * 60 * 1000); // 北京 05:15，同一天
     expect(r2.ran).toBe(false);
     expect(r2.skipped).toBe('already-ran-today');
   });

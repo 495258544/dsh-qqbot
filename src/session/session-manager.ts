@@ -22,6 +22,7 @@ import { resolve } from 'node:path';
 import type { ChatScope, Logger, ReplyTarget } from '../types.ts';
 import type { ImQQBotConfig } from '../config.ts';
 import { ModelResolver } from '../model/model-resolver.ts';
+import { Failover } from '../model/failover.ts';
 import type { ModelRoute, ModelEntry } from '../model/types.ts';
 import { IdleEvictor } from './idle-evictor.ts';
 import type { QuestionChannel } from '../features/question-channel.ts';
@@ -96,6 +97,8 @@ export class SessionManager {
   private sessions = new Map<string, SessionRecord>();
   private readonly evictor: IdleEvictor;
   private readonly modelResolver: ModelResolver;
+  /** 备用通道轮换（主通道限流时自动换路；未配置备用通道时不启用） */
+  private readonly failover: Failover;
   private readonly ctx: Context;
   private readonly host: HostAdapter;
   private readonly agents: DshAgentRegistry;
@@ -127,6 +130,11 @@ export class SessionManager {
     this.host = createHostAdapter(ctx, logger);
     this.logger.info(`host adapter capabilities: ${this.host.capabilities.join(', ')}`);
     this.modelResolver = new ModelResolver(ctx, config, logger);
+    const primary = this.modelResolver.resolveDefault();
+    this.failover = new Failover(
+      primary,
+      (config.persona?.fallbackRoutes ?? []).filter((r) => r.provider && r.model),
+    );
 
     this.evictor = new IdleEvictor(
       this.sessions,
@@ -264,6 +272,51 @@ export class SessionManager {
     } catch (err) {
       this.logger.warn(`list presets failed: ${err instanceof Error ? err.message : String(err)}`);
       return [];
+    }
+  }
+
+  /** 备用通道是否启用（未配置就不做任何切换，行为与旧版一致） */
+  get failoverEnabled(): boolean {
+    return this.failover.enabled;
+  }
+
+  /**
+   * 主通道失败后是否要换路，返回换到的新路由。
+   *
+   * 只有在**确认是通道问题**（限流/过载/缺 key/无 adapter/5xx）时才换；
+   * 上下文超长、请求非法、用户中止这类换个通道也没用，不换。
+   */
+  maybeFailover(
+    scope: ChatScope,
+    peerId: string,
+    code: string,
+  ): { from?: ModelRoute; to: ModelRoute } | undefined {
+    if (!this.failover.enabled) return undefined;
+    const key = this.sessionKey(scope, peerId);
+    const moved = this.failover.advance(key, code);
+    if (!moved) return undefined;
+    // 持久化到 per-peer 偏好：后续新建会话也用备用通道
+    this.modelResolver.setOverride(key, moved.to);
+    this.logger.warn(
+      `im-qqbot: 通道换路 ${key} ${moved.from?.provider ?? '?'}/${moved.from?.model ?? '?'} → ${moved.to.provider}/${moved.to.model} (code=${code})`,
+    );
+    return moved;
+  }
+
+  /** 当前这个 peer 应该用哪条路由（含备用通道位置） */
+  getActiveRoute(scope: ChatScope, peerId: string): ModelRoute | undefined {
+    if (!this.failover.enabled) return this.modelResolver.getEffectiveRoute(this.sessionKey(scope, peerId));
+    return this.failover.current(this.sessionKey(scope, peerId));
+  }
+
+  /** 冷却到期后回到主通道（每轮开始时调用一次即可，幂等） */
+  maybeResetRoute(scope: ChatScope, peerId: string): void {
+    if (!this.failover.enabled) return;
+    const key = this.sessionKey(scope, peerId);
+    const prev = this.failover.maybeReset(key);
+    if (prev) {
+      this.modelResolver.clearOverride(key);
+      this.logger.info(`im-qqbot: 备用通道冷却到期，回到主通道 ${key}`);
     }
   }
 

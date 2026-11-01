@@ -76,10 +76,34 @@ export interface PersonaConfig {
   keywords: string[];
   /** 主人 openid 列表（发言必醒；own-life 静默投递给第一个） */
   ownerOpenids: string[];
+  /**
+   * 机器人自己的 openid（QQ 群里 @ 自己时显示的那个 `<@XXXX>`）。
+   * 用于让"她自己说过的话"在历史里可被认出，避免模型把她说的话当成别人说的。
+   * 留空则从消息里的自 @ 标记自动识别。
+   */
+  botOpenid: string;
   /** 群闲聊随机插话概率（0 = 纯潜水） */
   groupProbability: number;
   /** 兴趣命中时的基础唤醒概率（实际 = chattiness × 兴趣权重 × 本值） */
   interestBaseProbability: number;
+  /** 同一个人在活跃窗口里连续多少条无关消息后关掉他的窗口（默认 5） */
+  idleDiveThreshold: number;
+  /**
+   * 备用模型通道：主通道限流/不可用时自动切过去。
+   * 空数组 = 不启用（行为和现在一样）。
+   * 形如 [{ provider: 'our-free-model', model: 'xxx' }, ...]，按顺序尝试。
+   */
+  fallbackRoutes: Array<{ provider: string; model: string }>;
+  /**
+   * 换备用通道时是否给 owner 发消息。
+   *
+   * 为什么需要：换路是"系统自己做的决定"，用户往往不知道。
+   * 实测场景：主通道限流，agent 悄悄换了备用，owner 还以为是主通道在跑；
+   * 出问题时无从判断到底走的哪条。所以换路时主动告知 owner。
+   */
+  notifyOwnerOnFailover: boolean;
+  /** 其他 bot @她时是否回应（默认 true；false=完全不搭理其他 bot） */
+  fromBotAtMeAllowed: boolean;
   /** 拟人化发送开关（分条 + 停顿） */
   humanizeEnabled: boolean;
   /** 每字打字毫秒（ai-companion 作者实测真人值 110） */
@@ -353,8 +377,16 @@ export const ConfigSchema: Schema<ImQQBotConfig> = Schema.object({
     names: Schema.array(Schema.string()).default([]).description('她的名字/昵称（被叫到才醒）'),
     keywords: Schema.array(Schema.string()).default([]).description('关键词（命中即醒）'),
     ownerOpenids: Schema.array(Schema.string()).default([]).description('主人 openid 列表（命中即「必醒」+ own-life 静默内容投递目标）。和 access.c2cAllow 一样是 per-bot/per-context 的 openid——通常填「群里」你的 openid（和私聊的 openid 不是同一个值，正常）。多人可填多个。取 openid 的方法见仓库 SETUP.md。'),
+    botOpenid: Schema.string().default('').description('机器人自己的 openid（群里 @ 自己时的那个；留空则自动识别）'),
     groupProbability: Schema.number().default(0).description('群闲聊随机插话概率（0=纯潜水）'),
     interestBaseProbability: Schema.number().default(0.5).description('兴趣命中时的基础唤醒概率（实际=chattiness×权重×本值）'),
+    idleDiveThreshold: Schema.number().default(5).description('同一个人在活跃窗口里连续多少条与她无关的消息后回潜水（默认5；只计提到过她的人）'),
+    fallbackRoutes: Schema.array(Schema.object({
+      provider: Schema.string().required(),
+      model: Schema.string().required(),
+    })).default([]).description('备用模型通道：主通道限流/不可用时自动切过去（按顺序尝试；空=不启用）'),
+    notifyOwnerOnFailover: Schema.boolean().default(true).description('换备用通道时给 owner 发消息告知（默认开）'),
+    fromBotAtMeAllowed: Schema.boolean().default(true).description('其他机器人@她时是否回应（默认true；其他bot的普通消息一律只进历史不回复，防互聊死循环）'),
     humanizeEnabled: Schema.boolean().default(true).description('拟人化发送（分条+停顿）'),
     msPerChar: Schema.number().default(110).description('每字打字毫秒（真人实测约110）'),
     burstMax: Schema.number().default(2).description('一次最多分几条（官方被动回复限额，建议≤2）'),
@@ -392,8 +424,13 @@ export const ConfigSchema: Schema<ImQQBotConfig> = Schema.object({
     names: [],
     keywords: [],
     ownerOpenids: [],
+    botOpenid: '',
     groupProbability: 0,
     interestBaseProbability: 0.5,
+    idleDiveThreshold: 5,
+    fallbackRoutes: [],
+    notifyOwnerOnFailover: true,
+    fromBotAtMeAllowed: true,
     humanizeEnabled: true,
     msPerChar: 110,
     burstMax: 2,

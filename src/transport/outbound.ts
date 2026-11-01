@@ -8,9 +8,12 @@ import type { SessionManager, SessionRecord } from '../session/index.ts';
 import type { ImQQBotConfig } from '../config.ts';
 import type { Logger } from '../types.ts';
 import { chunkMarkdownText } from './chunker.ts';
+import { appendBotHistory } from '../features/history-store.ts';
+import { rememberForAttribution } from '../features/attribution-index.ts';
 import { OutboundBuffer, type QQBotSender } from './outbound-buffer.ts';
 import { formatToolResult, type ToolsRegistryLike, type ToolResultData } from './tool-presenter.ts';
 import type { DeliverablesDelivererLike } from './deliverables.ts';
+import type { ModelRoute } from '../model/types.ts';
 import {
   parseEvent,
   extractTurnError,
@@ -57,10 +60,48 @@ interface ToolCallRecord {
 const SILENT_TURN_ERROR_CODES = new Set(['STREAM_CLOSED']);
 
 /**
+ * 机器人自己的 openid 兜底值。
+ *
+ * 优先用 config.persona.botOpenid；没配时用这个实测值
+ * （QQ 群里 @ 小羽时显示为 `<@B1FE2927B46C9AF15C464E62216395FF>`）。
+ * 用于让她说过的话在历史里可被认出，避免模型把她自己的话当成别人说的。
+ */
+const BOT_SELF_ID_FALLBACK = 'B1FE2927B46C9AF15C464E62216395FF';
+
+/**
+ * 错误提示冷却（同行同错误 N 毫秒内只发一次）。
+ * 问题：RATE_LIMIT 这类持续性错误会让每一轮都往群里刷一条"本轮异常结束"，
+ * 用户连发消息时就是刷屏。这里按 (sessionId + code) 做冷却，只提示第一次。
+ */
+const ERROR_NOTICE_COOLDOWN_MS = 10 * 60 * 1000;   // 10 分钟
+
+/**
+ * 错误提示是否允许透露技术细节。
+ *
+ * 真实事故（2026-10-31）：群里出现
+ *   ⚠️ 本轮异常结束 / `RATE_LIMIT`: raccoon: 您的模型请求频率超限，请稍后重试
+ * 这条是**系统代小羽发的运维文案**，但它以"小羽发言"的形式进了群，随后被用户引用，
+ * 又被喂回给小羽 —— 她照着这段话编出"我这边也遇到了限流"，还把别人的话算到用户头上。
+ *
+ * 因此：群里只发一句人能听懂的「这轮没接上」，错误码/通道名只在私聊给 owner 看。
+ */
+const OPS_ERROR_CODES = new Set([
+  'RATE_LIMIT', 'MISSING_CREDENTIAL', 'NO_ADAPTER', 'SERVER', 'UNSUPPORTED_REASONING_EFFORT',
+  'TIMEOUT', 'NETWORK', 'OVERLOADED', 'CONTEXT_TOO_LONG', 'MODEL_UNAVAILABLE',
+]);
+
+/** 这条提示要不要带技术细节：仅私聊 + 错误码属运维类 */
+function shouldExposeErrorDetail(scope: string): boolean {
+  return scope !== 'group';
+}
+
+/**
  * 出站路由器：持有会话级状态，按事件类型分发到处理器
  */
 class OutboundRouter {
   private readonly buffers = new Map<string, OutboundBuffer>();
+  /** 错误提示冷却：key = `sessionId|code` → 上次提示时间 */
+  private readonly errorNoticeAt = new Map<string, number>();
   private readonly toolCalls = new Map<string, ToolCallRecord>();
   /** 每会话当前流式 attemptId：LLM 重试会发布新 attempt，用于 reset 与迟到帧过滤 */
   private readonly streamAttempts = new Map<string, string>();
@@ -290,7 +331,44 @@ class OutboundRouter {
     void (async () => {
       await Promise.all([flushTask, pending]);
       if (failure !== undefined && !SILENT_TURN_ERROR_CODES.has(failure.code)) {
-        await this.send(record, `⚠️ 本轮异常结束\n\`${failure.code}\`: ${failure.message}`, 'sendTurnEndError');
+        // 冷却：同一会话同一错误码，10 分钟内只提示一次（防 RATE_LIMIT 刷屏）
+        const key = `${sessionId}|${failure.code}`;
+        const last = this.errorNoticeAt.get(key) ?? 0;
+        if (Date.now() - last < ERROR_NOTICE_COOLDOWN_MS) {
+          this.logger.debug(`im-qqbot: 错误提示冷却中，跳过 code=${failure.code}`);
+        } else {
+          this.errorNoticeAt.set(key, Date.now());
+          // 取回复目标的 scope（replyTarget 始终有 scope；record.scope 在部分构造下缺失）
+          const scope = record.replyTarget?.scope ?? record.scope ?? 'group';
+
+          // 先尝试换备用通道：能换就不必让用户干等下一次。
+          // 防御性调用：manager 可能是测试替身或未装备用通道的旧构造，缺方法时按"不换"处理。
+          const switched = typeof this.manager.maybeFailover === 'function'
+            ? this.manager.maybeFailover(scope, record.peerId, failure.code)
+            : undefined;
+
+          // 换路了 → 主动告知 owner（换路是系统自己的决定，不说是黑盒）
+          if (switched && this.config.persona?.notifyOwnerOnFailover !== false) {
+            void this.notifyOwnerFailover(switched, failure.code);
+          }
+
+          let text: string;
+          if (switched) {
+            // 换路成功：告诉她（和群里）下一轮会换个通道，不用重复发错误码
+            text = scope !== 'group' && shouldExposeErrorDetail(scope)
+              ? `⚠️ 本轮失败（\`${failure.code}\`），已切到备用通道 ${switched.to.provider}/${switched.to.model}`
+              : '这条通道挤爆了，我换条路子再来';
+          } else if (shouldExposeErrorDetail(scope)) {
+            // 私聊：给 owner 看完整技术细节，方便排查
+            text = `⚠️ 本轮异常结束\n\`${failure.code}\`: ${failure.message}`;
+          } else if (OPS_ERROR_CODES.has(failure.code)) {
+            // 群里：只说人话，不带错误码/通道名，避免被当成聊天素材复述
+            text = '这轮没接上，等下再试';
+          } else {
+            text = '这轮出了点问题，等下再试';
+          }
+          await this.send(record, text, 'sendTurnEndError');
+        }
       }
       if (files.length > 0 && this.deliverer !== undefined) {
         await this.deliverer.deliver(record, files);
@@ -318,6 +396,7 @@ class OutboundRouter {
               await this.bot.sendMarkdown(record.replyTarget, chunk);
               // 逐气泡记账：失败不记（未送达的不算说过）
               persona.noteReplyChunk(record.sessionId, chunk);
+              this.rememberOwnWords(record, chunk);
             } catch (err) {
               this.logger.error(`im-qqbot: ${tag} (humanize) failed: ${err instanceof Error ? err.message : String(err)}`);
             }
@@ -332,9 +411,68 @@ class OutboundRouter {
       try {
         await this.bot.sendMarkdown(record.replyTarget, chunk);
         this.manager.persona?.noteReplyChunk(record.sessionId, chunk);
+        this.rememberOwnWords(record, chunk);
       } catch (err) {
         this.logger.error(`im-qqbot: ${tag} failed: ${err instanceof Error ? err.message : String(err)}`);
       }
+    }
+  }
+
+  /**
+   * 把她自己说过的话写进群历史缓冲。
+   *
+   * 为什么：用户经常引用小羽说过的话，但历史缓冲只记用户消息 → 反查不到 →
+   * 只能标「某人」→ 模型会把她自己的话当成别人说的（"刚不是你那边卡了"就是这么来的）。
+   * 只在群聊记录（私聊不需要历史缓冲），且只记真正送达的（失败的不算说过）。
+   */
+  private rememberOwnWords(record: SessionRecord, chunk: string): void {
+    if (record.scope !== 'group') return;
+    try {
+      const selfId = this.config.persona?.botOpenid || BOT_SELF_ID_FALLBACK;
+      appendBotHistory(this.config.appId, record.peerId, chunk, selfId);
+      // 同时进归属索引：这样"用户引用小羽说过的话"能反查到是她自己说的
+      rememberForAttribution(this.config.appId, record.peerId, {
+        senderId: selfId,
+        senderName: '小羽',
+        content: chunk,
+      });
+    } catch (err) {
+      this.logger.debug(`im-qqbot: 记录自身发言失败: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  /**
+   * 换备用通道时告知 owner。
+   *
+   * 为什么要说：换路是系统自己的决定，owner 往往以为还跑在主通道上；
+   * 出问题时不知道走的哪条会排查不动。这里发一条私聊，带上走了哪条、为什么、以及"去看一眼"。
+   * 找不到 owner 就只记日志（不阻塞）。
+   */
+  private async notifyOwnerFailover(
+    switched: { from?: ModelRoute; to: ModelRoute },
+    code: string,
+  ): Promise<void> {
+    const owners = this.config.persona?.ownerOpenids ?? [];
+    const ownerId = owners[0];
+    if (!ownerId) {
+      this.logger.warn(`im-qqbot: 已换备用通道但没配 ownerOpenids，无法通知 (code=${code})`);
+      return;
+    }
+    const from = switched.from ? `${switched.from.provider}/${switched.from.model}` : '主通道';
+    const to = `${switched.to.provider}/${switched.to.model}`;
+    const text = [
+      '⚠️ 小羽换备用通道了',
+      `原因：${code}`,
+      `${from} → ${to}`,
+      '主通道可能限流或不可用，建议去看一眼。',
+    ].join('\n');
+    try {
+      // 用 bot 直接发（不属于任何会话，避免污染对话历史）
+      await this.bot.sendMarkdown({ scope: 'c2c', targetId: ownerId }, text);
+    } catch (err) {
+      this.logger.warn(
+        `im-qqbot: 通知 owner 换路失败: ${err instanceof Error ? err.message : String(err)}`,
+      );
     }
   }
 

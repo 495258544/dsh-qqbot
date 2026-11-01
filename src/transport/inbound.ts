@@ -22,6 +22,7 @@ import {
 } from './attachment.ts';
 import { clearGroupHistory } from '../features/history-store.ts';
 import { recordGroupActivity } from '../features/group-activity.ts';
+import { lookupAttribution, lookupByImageMd5 } from '../features/attribution-index.ts';
 import { stashPendingAttachments, takePendingAttachments, pendingKey } from '../features/pending-attachments.ts';
 
 import type { MiddlewareContext } from '@tencent-connect/qqbot-nodejs';
@@ -44,7 +45,7 @@ interface ProcessedMessage {
 
 interface ResolvedQuote {
   text?: string;
-  entry?: { senderId?: string; content?: string };
+  entry?: { senderId?: string; senderName?: string; content?: string; isBot?: boolean };
   attachments?: QuotedAttachment[];
 }
 
@@ -137,9 +138,22 @@ export async function handleInbound(
   }
 
   // ── 组装 agentBody（下载结果经 mwState.downloadedFiles 提供） ──
-  // M13 抗漂移：硬约束锚点（只在 persona 启用且角色卡存在时注入）
-  const anchor = manager.persona?.role?.renderAnchor();
-  let agentBody = assembleAgentBody(msg, mwState, scope, logger, anchor);
+  const gid = msg.groupOpenid ?? msg.senderId;
+  let agentBody = assembleAgentBody(
+    msg, mwState, scope, logger, undefined, config.persona?.botOpenid,
+    scope === 'group'
+      ? (text) => {
+          const hit = lookupAttribution(config.appId, gid, text);
+          return hit ? { id: hit.senderId, name: hit.senderName } : {};
+        }
+      : undefined,
+    scope === 'group'
+      ? (md5s) => {
+          const hit = lookupByImageMd5(config.appId, gid, md5s);
+          return hit ? { id: hit.senderId, name: hit.senderName } : {};
+        }
+      : undefined,
+  );
 
   // 把"先发的图"补进 agentBody，否则 agent 不知道这几张图的存在
   if (carriedFiles.length > 0) {
@@ -246,6 +260,11 @@ function assembleAgentBody(
   scope: ChatScope,
   logger: Logger,
   anchor?: string,
+  botOpenid?: string,
+  /** 按内容反查引文发送者（独立归属索引，不受群历史清空影响） */
+  lookupSender?: (quotedText: string) => { id?: string; name?: string },
+  /** 按图片 MD5 反查（QQ 的图片文件名就是内容 MD5，无需下载图片） */
+  lookupImage?: (md5s: string[]) => { id?: string; name?: string },
 ): string | null {
   const isGroup = scope === 'group';
   const wasMentioned = state.mention?.wasMentioned ?? false;
@@ -254,7 +273,13 @@ function assembleAgentBody(
 
   if (isEmptyMessage(userContent, msg.attachments, isGroup, wasMentioned)) return null;
 
-  const quotePart = buildQuotePart(state.quote);
+  const quotePart = buildQuotePart(
+    state.quote,
+    state.history,
+    botOpenid || detectBotSelfId(state.history),
+    lookupSender,
+    lookupImage,
+  );
   const userMessage = buildUserMessage(userContent, quotePart, msg.senderId, msg.senderName, isGroup, wasMentioned);
 
   const dynamicCtx = buildDynamicCtx(msg, state);
@@ -310,14 +335,186 @@ function buildUserContent(msg: ProcessedMessage, state: MiddlewareState, logger:
 }
 
 /**
- * Layer 2: 引用消息块
+ * 从当前消息里认出机器人自己的 openid。
+ *
+ * QQ 群的 @ 在文本里表现为 `<@OPENID>`；那条"@小羽"的消息就是
+ * `<@B1FE2927B46C9AF15C464E62216395FF>` —— 那就是她自己。
+ * 拿到它，才能判断一段引文是不是"她自己说过的话"。
  */
-function buildQuotePart(quote?: ResolvedQuote): string {
+function detectBotSelfId(history?: HistoryEntry[]): string | undefined {
+  if (!history?.length) return undefined;
+  for (const h of history) {
+    const m = String(h.content ?? '').match(/<@([A-Fa-f0-9]{20,})>/);
+    if (m) return m[1];
+  }
+  return undefined;
+}
+
+/**
+ * Layer 2: 引用消息块
+ *
+ * 关键：**必须带发送者归属**。
+ * 之前这里只拼引文正文、不拼是谁说的，模型看到的是
+ *   [Quoted message begins] 卡了就别催了 [Quoted message ends]
+ *   [Current message] [……] (@you)
+ * 两条都没有署名 → 模型认为引文也是"你"说的，于是出现
+ * 「刚不是你那边卡了」这种把别人的话算到用户头上的错。
+ *
+ * 另外合并转发（msgType=103）本身带「=== 消息 N ===」编号，但编号同样没有署名，
+ * 需要逐条标注。已知小羽自己发的运维提示（⚠️ 本轮异常结束）不应参与对话，
+ * 这里一并过滤，避免它被当成聊天素材复述。
+ */
+export function buildQuotePart(
+  quote?: ResolvedQuote,
+  history?: HistoryEntry[],
+  botSelfId?: string,
+  lookupSender?: (quotedText: string) => { id?: string; name?: string },
+  lookupImage?: (md5s: string[]) => { id?: string; name?: string },
+): string {
   if (!quote?.text && !quote?.entry?.content) return '';
 
-  const quoteText = quote.text || quote.entry?.content || 'Original content unavailable';
+  const raw = quote.text || quote.entry?.content || 'Original content unavailable';
 
-  return `[Quoted message begins]\n${quoteText}\n[Quoted message ends]\n[Current message]\n`;
+  /** 运维提示的正判据：内容本身长得像运行状态播报（不能只看 isBot） */
+  const OPS_NOTICE = /(\u26a0\ufe0f\s*本轮异常结束|RATE_LIMIT|MISSING_CREDENTIAL|NO_ADAPTER|UNSUPPORTED_REASONING|SERVER:|超限|本轮异常)/;
+
+  /** 归一化：去合并转发头、去标签、压空白，用于内容比对 */
+  const norm = (t: string): string =>
+    t.replace(/^===.*===$/gm, '')
+      .replace(/\[消息类型\][^\n]*/g, '')
+      .replace(/\[消息内容\]/g, '')
+      .replace(/\s+/g, '')
+      .trim();
+
+  /**
+   * 按内容反查发送者。
+   *
+   * QQ 的合并转发（msgType=103）只给内容、**不给每条消息的发送者**，
+   * 且 ref_msg_idx 常是 `TMP_xxx` 临时 id（store 必查不到）→ 只会得到"未知"，
+   * 模型于是瞎猜归属。历史缓冲里有 senderId/senderName/content，可以反查。
+   *
+   * 注意：必须**逐条**反查。合并转发里每条可能来自不同的人，
+   * 整块套用一个人正是这次事故的同类错误。
+   */
+  const lookup = (text: string): { id?: string; name?: string } => {
+    // 优先用独立归属索引（不受群历史清空影响，能覆盖"引用上一轮说过的话"）
+    const fromIndex = lookupSender?.(text);
+    if (fromIndex && (fromIndex.id || fromIndex.name)) return fromIndex;
+    const probe = norm(text);
+    if (probe.length < 4 || !history?.length) return {};
+    for (const h of [...history].reverse()) {
+      const body = norm(String(h.content ?? ''));
+      if (!body || body.length < 4) continue;
+      if (probe.includes(body) || (body.length >= 8 && body.includes(probe))) {
+        return { id: h.senderId, name: h.senderName };
+      }
+    }
+    return {};
+  };
+
+  /** 这个人是不是"她自己"（用于把"别人说的"和"她自己说过的"区分开） */
+  const isSelf = (id?: string): boolean => Boolean(botSelfId && id && id === botSelfId);
+
+  /** 一段引文的归属短语 */
+  const labelOf = (text: string, storeId?: string, storeName?: string): string => {
+    const found = (storeId || storeName) ? { id: storeId, name: storeName } : lookup(text);
+    const name = found.name ?? (found.id ? shortSenderId(found.id) : undefined);
+    if (!name) return '某人';
+    if (isSelf(found.id)) return `这是你自己之前说的「${name}」`;
+    return `${name}${found.id ? ` (${found.id})` : ''}`;
+  };
+
+  // ── 合并转发：逐条归属 + 剥离运维提示 ──
+  if (raw.includes('=== 消息')) {
+    const headers: string[] = [];
+    for (const m of raw.matchAll(/^===\s*消息\s*\d+\s*===\s*$/gm)) headers.push(m[0].trim());
+    const parts = raw.split(/^===\s*消息\s*\d+\s*===\s*$/m).slice(1);
+
+    const lines: string[] = [];
+    let kept = 0;
+    parts.forEach((part, i) => {
+      const content = part.trim().replace(/^\[消息内容\]\s*/, '').replace(/\[消息类型\][^\n]*/g, '').trim();
+      if (!content) return;
+      const head = headers[i] ?? `=== 消息 ${i + 1} ===`;
+      if (OPS_NOTICE.test(content)) {
+        // 系统播报：整条略去，不留可被复述的素材
+        lines.push(`${head}\n[消息内容] （系统提示，已略去）`);
+        return;
+      }
+      kept += 1;
+      // 纯附件条目（"[附件1] 类型:图片 文件名:xxx URL:..."）：
+      // 满屏技术细节既占上下文，又会让模型照着念"文件名""URL 没带上"。
+      // 换成一句人能看懂的说明，具体图片由 attachmentProcessor 另走视觉识别。
+      // 块可能以 [消息类型] 开头（"引用消息"标签），附件标记在其后
+      const hasAttachment = /\[附件\d+\]/.test(content);
+      if (hasAttachment && !content.includes('[消息内容]')) {
+        // 类型字段直接就是中文（"类型:图片"），不是英文 image/video
+        const kind = content.match(/类型:([^\s]+)/)?.[1] ?? '';
+        const zh = /图/.test(kind) ? '图片' : /视频/.test(kind) ? '视频' : /文件/.test(kind) ? '文件' : '附件';
+
+        // 图片归属：文件名就是内容 MD5 → 直接对索引，不需要下载（URL 会过期）
+        const md5s = [...content.matchAll(/文件名:([A-Fa-f0-9]{32})/g)].map((m) => m[1]!.toLowerCase());
+        const byImage = md5s.length > 0 ? lookupImage?.(md5s) : undefined;
+        // 图片归属：先用 MD5 精确匹配
+        let who: string;
+        if (byImage?.id || byImage?.name) {
+          // MD5 命中就是硬证据，可以直接说
+          who = isSelf(byImage.id)
+            ? '你自己'
+            : (byImage.name ?? shortSenderId(byImage.id!));
+        } else {
+          // MD5 没命中。**不要**拿 fallbackOwner 套上去：
+          // 同一转发里能查到某条属于 A，不代表别的条目也属于 A
+          // —— 实测过这会造成"全标成我自己"的过度推断。
+          who = labelOf(content, quote.entry?.senderId, quote.entry?.senderName);
+        }
+
+        lines.push(`${head}\n[消息内容] （${who}发了一张${zh}）[${zh}]`);
+        return;
+      }
+
+      let label = labelOf(content, quote.entry?.senderId, quote.entry?.senderName);
+      // 过短的内容（如单个"1"）达不到反查门槛，只会落到"某人"。
+      // 同一合并转发里其他条目若能确定发送者，就归给此人。
+      //
+      // 措辞原则：**这是给模型看的提示，不是给用户的报告**。
+      // 不要写"推测""未知"这类官僚腔，否则她会照着复述成
+      // 「前后两条都标着'某人'，认不出是谁」——那是在念系统提示，不是活人说话。
+      // 注意：这里**不再**用 fallbackOwner 兜底。
+      // 实测（2026-11-01 02:27）：同一转发里只要能查到一条属于她，
+      // 就把查不到的条目全归成"你自己" —— 这是过度推断，比"某人"更糟
+      // （用户看到的正是"这两张图现在都标成我自己发的了"）。
+      // 宁可承认"看不出"，也不要瞎猜。
+      lines.push(`${head}\n[消息内容] （${label}）${content}`);
+    });
+
+    const body = lines.join('\n\n');
+    if (kept === 0) {
+      return '[Quoted message begins]\n（下面引用的全是系统代你发出的运行状态提示，不是在跟任何人聊天）\n'
+        + body + '\n[Quoted message ends]\n[Current message]\n';
+    }
+    // 顶部说明：如果只有她自己说的内容，就别用"不是你正在对话的那个人"这种措辞
+    const selfOnly = !lines.some((l) => !l.includes('你自己之前说的') && !l.includes('已略去'));
+    return `[Quoted message begins]\n（下面是合并转发，逐条标了是谁说的${
+      selfOnly ? '' : '；不是你正在对话的那个人就按那个人理解'
+    }）\n`
+      + body + '\n[Quoted message ends]\n[Current message]\n';
+  }
+
+  // ── 单条引文 ──
+  if (OPS_NOTICE.test(raw)) {
+    return '[Quoted message begins]\n（这是系统代你发出的运行状态提示，不是别人在跟你聊天）\n[消息内容] （系统提示，已略去）\n[Quoted message ends]\n[Current message]\n';
+  }
+
+  const label = labelOf(raw, quote.entry?.senderId, quote.entry?.senderName);
+  const found = lookup(raw);
+  const attribution = found.id && isSelf(found.id)
+    ? '[Quoted message begins]\n（这是你自己之前说过的话）\n'
+    : label === '某人'
+      ? '[Quoted message begins]\n（看不出这句是谁说的）\n'
+      : `[Quoted message begins]\n（这是「${label}」说的）\n`;
+
+  return `${attribution}${raw}\n[Quoted message ends]\n[Current message]\n`;
 }
 
 /**
@@ -428,11 +625,14 @@ function buildAgentBody(
   history: HistoryEntry[] | undefined,
   isGroup: boolean,
   wasMentioned: boolean,
-  anchor?: string,
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  _anchor?: string,
 ): string {
-  const tail = anchor ? `\n${anchor}` : '';
+  // 注意：anchor 不再拼进 user message。
+  // 拼进去会污染上下文，且模型可能复述出"你是小羽…"这类系统指令（思考泄漏）。
+  // 改为在 system prompt 层以最后 order 注入（见 service.buildSections）。
   if (!isGroup || !wasMentioned || !history || history.length === 0) {
-    return base + tail;
+    return base;
   }
 
   const historyLines = history.map(h => {
@@ -447,8 +647,6 @@ function buildAgentBody(
     '[Chat history ends]',
     '[Current message]',
     base,
-    // M13 抗漂移锚点：放在**历史之后、贴近生成点**的位置（CCv3 post_history_instructions）
-    ...(anchor ? ['', anchor] : []),
   ].join('\n');
 }
 

@@ -50,9 +50,12 @@ function logWakeDbg(sp: string, key: string, msg: any, decision: any, extra: str
 export function personaWakeGate(
   persona: PersonaService,
   logger: Logger,
+  opts: { fromBotAtMeAllowed?: boolean } = {},
 ): Middleware {
+  const fromBotAtMeAllowed = opts.fromBotAtMeAllowed !== false;
   return async (ctx: MiddlewareContext, next: () => Promise<void>): Promise<void> => {
     const msg = ctx.message;
+
     const scope = msg.kind === 'group' ? 'group' : 'c2c';
     const peerId = scope === 'group' ? (msg.groupOpenid ?? msg.senderId) : msg.senderId;
     const key = `${scope}:${peerId}`;
@@ -72,15 +75,56 @@ export function personaWakeGate(
     }
 
     const waker = persona.waker;
+
+    // ── 其他机器人的消息：读但不回（防 A↔B 死循环，但不屏蔽有用信息）──
+    // 放行条件：① @了她 ② 命中她的兴趣（如新闻 bot 推了她关注的新番）
+    // 否则只进历史缓冲（historyBuffer 在 gate 之前 + recordOnSkip:true），不回复。
+    if ((msg as unknown as { senderIsBot?: boolean }).senderIsBot === true) {
+      const atMe = ctx.state.mention?.wasMentioned === true;
+      const content = String(msg.content ?? '');
+      const hit = waker?.matchInterest(content);
+      const interestHit = hit?.hit ? hit.topics.join(',') : undefined;
+      if (atMe && fromBotAtMeAllowed) {
+        logger.debug('persona: 其他bot@我 → 放行');
+      } else if (interestHit) {
+        logger.debug(`persona: 其他bot的消息命中兴趣「${interestHit}」→ 放行`);
+      } else {
+        ctx.stop('from-bot-read-only');
+        return;
+      }
+      // 放行后**直接进处理**：跳过 shouldWake 判定。
+      // 因为 bot 消息的文本本来就不符合"@/名字/关键词"这些规则，
+      // 再走一遍唤醒判定必然被拦掉（实测就是 persona:not-woken）。
+      waker?.wake(key, msg.senderId);
+      persona.memory.touch(msg.senderId, { name: msg.senderName });
+      await next();
+      return;
+    }
+
     if (waker) {
       // c2c 恒醒（与原版"私聊每条都理"一致，也保住 mentionGate 对 c2c 的语义）
+      // 引用内容也要参与判定：有人引用小羽说过的话，说明她的发言成了话题中心，
+      // 这比"正文里碰巧出现兴趣词"更强 —— 不该因为正文没提到就整条跳过。
+      // （quoteRef 已前移到门禁之前，所以这里 state.quote 是解析好的）
+      const rawQuote = String(ctx.state.quote?.text ?? '');
+      const quoteText = rawQuote
+        // 去掉合并转发头/系统略去/署名，只留正文语义
+        .replace(/^===\s*消息\s*\d+\s*===\s*$/gm, '')
+        .replace(/\[消息内容\]\s*（[^）]*）/g, '')
+        .replace(/\[消息类型\][^\n]*/g, '')
+        .trim();
+
       const decision = scope === 'group'
         ? waker.shouldWake({
             key,
             userId: msg.senderId,
             name: msg.senderName,
             text: msg.content ?? '',
+            // 引文正文单独透传：唤醒判定里"命中兴趣/被引用"都该考虑它
+            quoteText,
             isAtMe: ctx.state.mention?.wasMentioned === true,
+            // 活跃期内按概率接话，避免变成应答器
+            inActiveWindow: waker.isSpeakerActive(key, msg.senderId),
           })
         : { wake: true, reason: 'c2c' as string };
       logWakeDbg('decision', key, msg, decision, `mentioned=${ctx.state.mention?.wasMentioned === true} implicit=${ctx.state.mention?.implicit === true}`);
@@ -120,7 +164,7 @@ export function personaWakeGate(
       logger.debug(`persona: wake-gate pass ${key} reason=${decision.reason}`);
       // 醒后才涨互动计数（m1①），并记录本次唤醒（潜水状态机消费 lastWakeAt）
       persona.memory.touch(msg.senderId, { name: msg.senderName });
-      waker.wake(key);
+      waker.wake(key, msg.senderId);
     }
 
     await next();

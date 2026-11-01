@@ -311,3 +311,71 @@ describe('OutboundRouter: deliverables/presented', () => {
     expect(bot.sendMarkdown).not.toHaveBeenCalled();
   });
 });
+
+describe('OutboundRouter · 备用通道换路通知 owner', () => {
+  const OWNER = '2DA749E82EB6FC4B2FCCD4102A3EB0AC';
+
+  function setupFailover(opts?: { notify?: boolean; owners?: string[] }) {
+    const session = createSession();
+    const bot = createBot(session);
+    const record = createRecord(groupTarget, 'sess-qq');
+    const manager = {
+      findBySessionId: vi.fn((id: string) => (id === 'sess-qq' ? record : undefined)),
+      // 模拟"确认是通道问题 → 换到备用"
+      maybeFailover: vi.fn(() => ({
+        from: { provider: 'trae', model: 'deepseek-v4.1-flash' },
+        to: { provider: 'our-free-model', model: 'deepseek-v4.1-flash-free' },
+      })),
+    } as unknown as SessionManager;
+    const config = createConfig({
+      appId: '1906131500',
+      persona: {
+        ownerOpenids: opts?.owners ?? [OWNER],
+        notifyOwnerOnFailover: opts?.notify ?? true,
+        fallbackRoutes: [{ provider: 'our-free-model', model: 'deepseek-v4.1-flash-free' }],
+      },
+    } as unknown as Partial<ImQQBotConfig>);
+    const outbound = createOutboundHandler(manager, bot, config, createLogger(), undefined, undefined);
+    return { outbound, bot, record };
+  }
+
+  it('限流触发换路时，私聊通知 owner 走了哪条通道、为什么', async () => {
+    const { outbound, bot } = setupFailover();
+    outbound.routeSessionEvent({ header: { id: 'sess-qq' } }, {
+      type: 'turn/end',
+      data: { reason: { kind: 'error', error: { code: 'RATE_LIMIT', message: 'rr' } } },
+    });
+    await new Promise((r) => setTimeout(r, 20));
+
+    // 通知必须发到 owner 的私聊，且带上"去了哪条"和"去看一眼"
+    const calls = (bot.sendMarkdown as ReturnType<typeof vi.fn>).mock.calls;
+    const ownerMsg = calls.find((c) => c[0]?.targetId === OWNER && c[0]?.scope === 'c2c');
+    expect(ownerMsg, '应给 owner 发一条私聊').toBeTruthy();
+    const text = String(ownerMsg![1]);
+    expect(text).toContain('备用通道');
+    expect(text).toContain('our-free-model/deepseek-v4.1-flash-free');
+    expect(text).toContain('RATE_LIMIT');
+  });
+
+  it('关掉 notifyOwnerOnFailover 就不发（尊重配置）', async () => {
+    const { outbound, bot } = setupFailover({ notify: false });
+    outbound.routeSessionEvent({ header: { id: 'sess-qq' } }, {
+      type: 'turn/end',
+      data: { reason: { kind: 'error', error: { code: 'RATE_LIMIT', message: 'rr' } } },
+    });
+    await new Promise((r) => setTimeout(r, 20));
+    const calls = (bot.sendMarkdown as ReturnType<typeof vi.fn>).mock.calls;
+    expect(calls.some((c) => c[0]?.targetId === OWNER)).toBe(false);
+  });
+
+  it('没配 ownerOpenids 时不崩（只记日志）', async () => {
+    const { outbound } = setupFailover({ owners: [] });
+    outbound.routeSessionEvent({ header: { id: 'sess-qq' } }, {
+      type: 'turn/end',
+      data: { reason: { kind: 'error', error: { code: 'RATE_LIMIT', message: 'rr' } } },
+    });
+    await new Promise((r) => setTimeout(r, 20));
+    // 走到这里没抛异常即通过
+    expect(true).toBe(true);
+  });
+});
