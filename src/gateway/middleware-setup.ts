@@ -141,13 +141,18 @@ export function setupMiddlewares(
       // Steam 绑定表里的群昵称（小周/芋头/混沌尽散…）：人格记忆只认识"跟她说过话的人"，
       // 没说过话的群友不在里面，而群里是会直呼昵称的。缺了这份名字，
       // 「芋头你今晚打不打」就会被判成省略主语的问句，被她抢着接。
-      extraNames: steam === undefined
-        ? undefined
-        : () => steam.bindings.list()
-          // 一个 alias 里可以用「、」「,」写多个叫法（"江铭鑫、铭鑫"），群里怎么喊都能认出来
-          .flatMap((b) => String(b.binding.alias ?? '').split(/[、,，/]/))
-          .map((n) => n.trim())
-          .filter((n) => n !== ''),
+      // 群友的称呼，两个来源：
+      //   1. 配置里的 persona.otherNames —— 没绑 Steam 的群友也能填，纯粹"这是别人"；
+      //   2. Steam 绑定表 alias —— 已绑定的人自动算进来（一个 alias 可用「、」写多个叫法）。
+      extraNames: () => [
+        ...(config.persona.otherNames ?? []),
+        ...(steam === undefined
+          ? []
+          : steam.bindings.list()
+            .flatMap((b) => String(b.binding.alias ?? '').split(/[、,，/]/))
+            .map((n) => n.trim())
+            .filter((n) => n !== '')),
+      ],
     }));
   }
 

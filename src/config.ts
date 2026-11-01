@@ -83,6 +83,13 @@ export interface PersonaConfig {
    * 留空则从消息里的自 @ 标记自动识别。
    */
   botOpenid: string;
+  /**
+   * 群里其他人的称呼 / 真名。
+   *
+   * 只用于唤醒判定里"这句是在叫别人，不是叫她"——填了之后「王运琦今晚打不打」
+   * 不会被当成省略主语的问句抢答。和 Steam 绑定无关。
+   */
+  otherNames: string[];
   /** 群闲聊随机插话概率（0 = 纯潜水） */
   groupProbability: number;
   /** 兴趣命中时的基础唤醒概率（实际 = chattiness × 兴趣权重 × 本值） */
@@ -396,6 +403,7 @@ export const ConfigSchema: Schema<ImQQBotConfig> = Schema.object({
     keywords: Schema.array(Schema.string()).default([]).description('关键词（命中即醒）'),
     ownerOpenids: Schema.array(Schema.string()).default([]).description('主人 openid 列表（命中即「必醒」+ own-life 静默内容投递目标）。和 access.c2cAllow 一样是 per-bot/per-context 的 openid——通常填「群里」你的 openid（和私聊的 openid 不是同一个值，正常）。多人可填多个。取 openid 的方法见仓库 SETUP.md。'),
     botOpenid: Schema.string().default('').description('机器人自己的 openid（群里 @ 自己时的那个；留空则自动识别）'),
+    otherNames: Schema.array(Schema.string()).default([]).description('群里其他人的称呼/真名（"王运琦""张谦"这种）。填了之后，群里喊这些名字她不会当成在叫她、不抢着答。和 Steam 绑定无关，纯粹是"这是别人"。绑定表里已有的群昵称会自动参与，这里只补没绑定的。'),
     groupProbability: Schema.number().default(0).description('群闲聊随机插话概率（0=纯潜水）'),
     interestBaseProbability: Schema.number().default(0.5).description('兴趣命中时的基础唤醒概率（实际=chattiness×权重×本值）'),
     idleDiveThreshold: Schema.number().default(5).description('同一个人在活跃窗口里连续多少条与她无关的消息后回潜水（默认5；只计提到过她的人）'),
@@ -448,6 +456,7 @@ export const ConfigSchema: Schema<ImQQBotConfig> = Schema.object({
     keywords: [],
     ownerOpenids: [],
     botOpenid: '',
+    otherNames: [],
     groupProbability: 0,
     interestBaseProbability: 0.5,
     idleDiveThreshold: 5,
