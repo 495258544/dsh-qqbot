@@ -15,7 +15,7 @@ import { homedir } from 'node:os';
 import path from 'node:path';
 import type { SteamConfig } from '../config.ts';
 import type { Logger } from '../types.ts';
-import { BindingStore, type BindingHit } from './bindings.ts';
+import { BindingStore, primaryName, type BindingHit } from './bindings.ts';
 import { SettingsStore } from './settings.ts';
 import { SteamApi, SteamApiError, type PlayerSummary, type RecentGame } from './steam-api.ts';
 import { parseSteamInput, steamProfileUrl, isSteamId64 } from './steam-id.ts';
@@ -518,7 +518,8 @@ export class SteamService {
     for (const { openid, binding } of this.bindings.list()) {
       // 同一个人被多人绑（不该发生但防一手）：先登记的优先，不覆盖
       if (!boundBySteamId.has(binding.steamId)) {
-        boundBySteamId.set(binding.steamId, binding.alias !== undefined && binding.alias !== '' ? binding.alias : openid);
+        // 只取群里的称呼。alias 里可能带着真名（"小周、周星宇"），那是识别用的，不该被说出来
+        boundBySteamId.set(binding.steamId, primaryName(binding.alias) || openid);
       }
     }
 
@@ -756,7 +757,7 @@ export class SteamService {
       for (const { openid, binding } of entries) {
         const s = summaries.get(binding.steamId);
         if (s === undefined) continue;
-        const who = binding.alias ?? s.personaName ?? openid;
+        const who = primaryName(binding.alias) || s.personaName || openid;
         if (s.gameName !== undefined) {
           playing.push(`${who} 正在玩 ${s.gameName}`);
         } else if (s.personaState === 1) {

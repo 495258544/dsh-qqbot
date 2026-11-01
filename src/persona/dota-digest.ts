@@ -22,6 +22,7 @@ import type { Logger } from '../types.ts';
 import type { DotaForm, DotaMatchSummary } from '../dota/service.ts';
 import { steamIdToAccountId } from '../dota/opendota.ts';
 import { DEFAULT_TZ, dayInTz, hourInTz, isHourInRange } from './clock.ts';
+import { primaryName } from '../steam/bindings.ts';
 
 const HOUR_MS = 3600 * 1000;
 const DAY_MS = 24 * HOUR_MS;
@@ -491,7 +492,7 @@ export function createDotaDigest(deps: DotaDigestDeps): DotaDigestHandle {
         // 时效过滤：只分析「当天或前一天打过」的人
         if (now - lastPlayedAt > cfg.recentHours * HOUR_MS) continue;
 
-        const alias = (typeof b.alias === 'string' ? b.alias.trim() : '') || FALLBACK_ALIAS;
+        const alias = primaryName(typeof b.alias === 'string' ? b.alias : '') || FALLBACK_ALIAS;
         const item = highlightOf({ form, openid, alias, steamId, now });
         if (item !== null) items.push(item);
       }
