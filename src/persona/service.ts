@@ -18,7 +18,7 @@ import { SelfProfileService } from './self.ts';
 import { VoiceService } from './voice.ts';
 import { SelfNoteService } from './self-note.ts';
 import { runSurfRound, inSurfWindow, surfTopic, type SurfResult } from './surf.ts';
-import { clockInTz, weekdayInTz, DEFAULT_TZ } from './clock.ts';
+import { clockInTz, weekdayInTz, dayInTz, DEFAULT_TZ } from './clock.ts';
 import { Humanizer } from './humanize.ts';
 import { extractFact, extractTrait } from './fact-extract.ts';
 import { pickDiaryMaterial, composeDiaryText, readTurnsOfDay, shouldWriteDiary } from './diary-auto.ts';
@@ -476,9 +476,8 @@ export class PersonaService {
    */
   private autoDiary(): void {
     try {
-      const today = new Date();
-      const pad = (n: number) => String(n).padStart(2, '0');
-      const day = `${today.getFullYear()}-${pad(today.getMonth() + 1)}-${pad(today.getDate())}`;
+      // 用显式时区算"今天"（容器无 tzdata，getDate() 是 UTC，会差 8 小时）
+      const day = dayInTz(new Date(), DEFAULT_TZ);
 
       // 当天已经写过就不重复
       const already = this.diary.recent(30).some((e) => e.day === day);

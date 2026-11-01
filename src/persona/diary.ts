@@ -13,14 +13,38 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
-const pad = (n: number): string => String(n).padStart(2, '0');
+
+
+/**
+ * 显式时区换算（容器无 tzdata，getHours() 返回 UTC，会差 8 小时）。
+ *
+ * 实测后果（2026-11-02）：她的"一天"从**北京 08:00** 才开始，
+ * 而不是零点 —— 早上 8 点前写的日记会被算进前一天。
+ */
+const TZ = 'Asia/Shanghai';
+
+function partsOf(d: Date): { y: string; m: string; day: string; hh: string; mm: string } {
+  const fmt = new Intl.DateTimeFormat('en-CA', {
+    timeZone: TZ, hour12: false,
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit',
+  });
+  const kv: Record<string, string> = {};
+  for (const p of fmt.formatToParts(d)) kv[p.type] = p.value;
+  return {
+    y: kv.year ?? '0000', m: kv.month ?? '01', day: kv.day ?? '01',
+    hh: kv.hour === '24' ? '00' : (kv.hour ?? '00'), mm: kv.minute ?? '00',
+  };
+}
 
 function dayOf(d = new Date()): string {
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+  const p = partsOf(d);
+  return `${p.y}-${p.m}-${p.day}`;
 }
 
 function clockOf(d = new Date()): string {
-  return `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  const p = partsOf(d);
+  return `${p.hh}:${p.mm}`;
 }
 
 export interface DiaryEntry {
