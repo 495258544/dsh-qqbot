@@ -262,3 +262,31 @@ describe('extractVocatives · 光杆「你」分支的误判（M33）', () => {
     expect(extractVocatives('小鲸鱼，在不在')).toEqual(['小鲸鱼']);
   });
 });
+
+describe('detectAddressee · 别人名字的排除边界', () => {
+  const others = ['江铭鑫', '铭鑫', '芋头'];
+
+  it('只叫别人 → 排除（别抢话）', () => {
+    const r = detectAddressee('江铭鑫你今晚打刀吗', { names: ['小深'], otherNames: others });
+    expect(r.excluded).toBe(true);
+    expect(r.explicit).toBe(false);
+  });
+
+  it('同时叫她和别人 → 不排除（"你俩"这种别装死）', () => {
+    const r = detectAddressee('江铭鑫 小深你俩打不打', { names: ['小深'], otherNames: others });
+    expect(r.excluded).toBe(false);
+    expect(r.explicit).toBe(true);
+  });
+
+  it('名字表里混进她自己时，按"点她"算，不按"点别人"算', () => {
+    const r = detectAddressee('小深今晚打不打', { names: ['小深'], otherNames: ['小深', '芋头'] });
+    expect(r.excluded).toBe(false);
+    expect(r.explicit).toBe(true);
+  });
+
+  it('没提任何人 → 既不排除也不明确指向', () => {
+    const r = detectAddressee('今晚有人打刀吗', { names: ['小深'], otherNames: others });
+    expect(r.excluded).toBe(false);
+    expect(r.explicit).toBe(false);
+  });
+});

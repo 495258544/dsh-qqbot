@@ -455,17 +455,21 @@ export function detectAddressee(text: string, ctx: AddresseeContext = {}): Addre
     explicit = true;
   }
   const names = (ctx.names ?? []).filter(Boolean);
-  if (names.length > 0 && names.some((n) => raw.includes(n))) {
+  const hitMe = names.length > 0 && names.some((n) => raw.includes(n));
+  if (hitMe) {
     add(0.7, 'name-mention');
     explicit = true;
   }
   if (VOCATIVE_HEAD.test(raw)) add(0.4, 'vocative-head');
 
   // B. 排他：点名了别人
+  //
+  // 但"点了别人"不等于"没点她"——群里常见的「江铭鑫 小深你俩打不打」是同时叫两个人。
+  // 只要正文里也出现了她的名字，就不能把她排除在外，否则她会对着一句叫了她的话装死。
   const others = (ctx.otherNames ?? []).filter(Boolean);
   const hitOthers = others.filter((n) => raw.includes(n));
   let excluded = false;
-  if (hitOthers.length > 0) {
+  if (hitOthers.length > 0 && !hitMe) {
     add(-0.6, `other-name:${hitOthers[0]}`);
     explicit = false;
     excluded = true;
