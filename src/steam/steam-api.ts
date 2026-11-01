@@ -15,10 +15,51 @@
  * 本文件只做单次请求的可靠性，缓存与节流在 service 层。
  */
 
+import { request as httpsRequest } from 'node:https';
+
 const API_BASE = 'https://api.steampowered.com';
 
 /** 批量查询单次上限（官方文档 max: 100） */
 const MAX_IDS_PER_CALL = 100;
+
+/**
+ * 「证书链不被信任」这一类错误。
+ *
+ * 本机装了 SteamTools / Watt Toolkit 之类的 Steam 加速工具时，它会把 api.steampowered.com
+ * 改写 hosts 指向 127.0.0.1，用自己的 CA（SteamTools Certificate）签发证书转发到真服务器。
+ * Windows 装了这个 CA，所以浏览器和 PowerShell 都正常；但 Node 用的是内置 CA 列表、
+ * 不读系统证书库，校验必然失败 —— 外部表现就是一句没有信息量的 "fetch failed"。
+ *
+ * 只对这几类「信任链」错误降级重试。域名不匹配（ERR_TLS_CERT_ALTNAME_INVALID）、
+ * 证书过期之类不在内，那些更像真的出问题了。
+ */
+const UNTRUSTED_CHAIN_CODES = new Set([
+  'UNABLE_TO_VERIFY_LEAF_SIGNATURE',
+  'SELF_SIGNED_CERT_IN_CHAIN',
+  'DEPTH_ZERO_SELF_SIGNED_CERT',
+  'UNABLE_TO_GET_ISSUER_CERT_LOCALLY',
+  'CERT_UNTRUSTED',
+]);
+
+/** 沿 cause 链找证书错误码（undici 把真实原因包在 TypeError.cause 里） */
+function untrustedChainCode(err: unknown): string | undefined {
+  let cur: unknown = err;
+  for (let depth = 0; depth < 4 && cur !== null && typeof cur === 'object'; depth += 1) {
+    const code = (cur as { code?: unknown }).code;
+    if (typeof code === 'string' && UNTRUSTED_CHAIN_CODES.has(code)) return code;
+    cur = (cur as { cause?: unknown }).cause;
+  }
+  return undefined;
+}
+
+/** 把错误压成一行好读的文本：带上 ECONNRESET / ETIMEDOUT 这类码 */
+function describeError(err: unknown): string {
+  if (err instanceof Error) {
+    const code = (err as NodeJS.ErrnoException).code;
+    return code !== undefined && code !== '' ? `${code} ${err.message}` : err.message;
+  }
+  return String(err);
+}
 
 export type SteamErrorKind =
   | 'no-key'      // 没配 API key
@@ -100,16 +141,22 @@ export function personaStateText(state: number): string {
 export interface SteamApiOptions {
   apiKey: string;
   timeoutMs?: number;
+  /** 诊断输出（证书降级只在第一次提示一次，避免刷日志） */
+  log?: (message: string) => void;
 }
 
 export class SteamApi {
   /** 可变：key 是运行时数据（存在数据目录里），换 key 不该重建整个 service */
   private apiKey: string;
   private readonly timeoutMs: number;
+  private readonly log: ((message: string) => void) | undefined;
+  /** 证书降级只提示一次 */
+  private tlsFallbackNoted = false;
 
-  constructor({ apiKey, timeoutMs = 8000 }: SteamApiOptions) {
+  constructor({ apiKey, timeoutMs = 8000, log }: SteamApiOptions) {
     this.apiKey = apiKey.trim();
     this.timeoutMs = timeoutMs;
+    this.log = log;
   }
 
   get configured(): boolean {
@@ -135,32 +182,86 @@ export class SteamApi {
     url.searchParams.set('key', this.apiKey);
     for (const [k, v] of Object.entries(params)) url.searchParams.set(k, v);
 
-    let res: Response;
-    try {
-      res = await fetch(url, {
-        signal: AbortSignal.timeout(this.timeoutMs),
-        headers: { accept: 'application/json' },
-      });
-    } catch (err) {
-      const reason = err instanceof Error ? err.message : String(err);
-      throw new SteamApiError('network', `请求 Steam API 失败: ${reason}`);
-    }
+    const { status, text } = await this.request(url);
 
-    if (res.status === 403) {
+    if (status === 403) {
       throw new SteamApiError('unauthorized', 'Steam API Key 无效或已被吊销（HTTP 403）', 403);
     }
-    if (res.status === 429) {
+    if (status === 429) {
       throw new SteamApiError('rate-limit', 'Steam API 限流（HTTP 429），稍后再试', 429);
     }
-    if (!res.ok) {
-      throw new SteamApiError('http', `Steam API 返回 HTTP ${res.status}`, res.status);
+    if (status < 200 || status >= 300) {
+      throw new SteamApiError('http', `Steam API 返回 HTTP ${status}`, status);
     }
 
     try {
-      return (await res.json()) as T;
+      return JSON.parse(text) as T;
     } catch {
       throw new SteamApiError('http', 'Steam API 返回的不是合法 JSON');
     }
+  }
+
+  /**
+   * 发请求。正常走 fetch；只有在证书链不被信任时才降级重试一次。
+   *
+   * 降级不是「无脑跳过校验」：先按标准流程请求，失败了再看错误码是不是
+   * UNTRUSTED_CHAIN_CODES 里的那几种。域名不匹配、连不上、超时都照旧报错。
+   */
+  private async request(url: URL): Promise<{ status: number; text: string }> {
+    try {
+      const res = await fetch(url, {
+        signal: AbortSignal.timeout(this.timeoutMs),
+        headers: { accept: 'application/json' },
+      });
+      return { status: res.status, text: await res.text() };
+    } catch (err) {
+      const code = untrustedChainCode(err);
+      if (code === undefined) {
+        const reason = err instanceof Error ? err.message : String(err);
+        throw new SteamApiError('network', `请求 Steam API 失败: ${reason}`);
+      }
+      if (!this.tlsFallbackNoted) {
+        this.tlsFallbackNoted = true;
+        this.log?.(
+          `steam: 证书链不被信任（${code}）—— 通常是本机 Steam 加速工具把 api.steampowered.com `
+          + '劫持到 127.0.0.1 并用自签 CA 转发。已改用不校验证书的方式重试（仅此请求，数据仍来自本机转发）。',
+        );
+      }
+      return this.requestIgnoringCert(url, code);
+    }
+  }
+
+  /** 证书链不可信时的兜底请求：只关掉 rejectUnauthorized，其余（超时、状态码）照常 */
+  private requestIgnoringCert(url: URL, code: string): Promise<{ status: number; text: string }> {
+    // 本地转发比直连慢（实测 6s 上下），给它比默认更宽的余量
+    const timeout = Math.max(this.timeoutMs, 15_000);
+    return new Promise((resolve, reject) => {
+      const req = httpsRequest(url, {
+        method: 'GET',
+        rejectUnauthorized: false,
+        timeout,
+        headers: { accept: 'application/json' },
+      }, (res) => {
+        const chunks: Buffer[] = [];
+        res.on('data', (chunk: Buffer) => chunks.push(chunk));
+        res.on('end', () => {
+          resolve({ status: res.statusCode ?? 0, text: Buffer.concat(chunks).toString('utf8') });
+        });
+        res.on('error', (err) => {
+          reject(new SteamApiError('network', `请求 Steam API 失败（证书降级重试）: ${describeError(err)}`));
+        });
+      });
+      req.on('timeout', () => {
+        req.destroy(new Error(`超时 ${timeout}ms`));
+      });
+      req.on('error', (err) => {
+        reject(new SteamApiError(
+          'network',
+          `请求 Steam API 失败（证书降级重试，原错误 ${code}）: ${describeError(err)}`,
+        ));
+      });
+      req.end();
+    });
   }
 
   /**
