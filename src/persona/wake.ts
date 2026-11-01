@@ -59,6 +59,15 @@ export interface WakeMessage {
    */
   inActiveWindow?: boolean;
   /**
+   * 这条消息 @ 了别人（不是她）。
+   *
+   * 为什么要单独标：QQ 群里的 @ 是一个 `<@openid>` 标记，contentSanitizer 只会清掉
+   * 「@ 机器人」那种 `<@数字appId>`，@ 群友的标记会原样留下。而文本里往往没有对方的名字，
+   * 光靠 detectAddressee 的「名字排除」判不出「这条话不是冲她说的」——
+   * 于是一句「@张三 你今晚打吗」会被当成省略主语的问句，让她抢着回答。
+   */
+  atSomeoneElse?: boolean;
+  /**
    * 这条消息引用的原文（已去噪的正文）。
    *
    * 为什么要单独传：有人引用她说过的话，说明她的发言本身成了话题中心，
@@ -367,12 +376,25 @@ export class Waker {
         return { wake: true, reason: 'active-window:my-words-quoted' };
       }
 
+      // ⓪.5 @ 了别人、又没点她的名 → 这条根本不是冲她说的。
+      //
+      //     必须排在 ① 之前。原因：@ 别人的句子里那个"你"指的是被 @ 的人，
+      //     但 SECOND_PERSON 规则会把它算成"在问她"，一句「@张三 你今晚打刀吗」
+      //     就被判成 explicit-question 抢着回答。这条标记只有门控拿得到
+      //     （它看得到原始 `<@openid>`），所以在这里拦最准。
+      //
+      //     例外是文本里明确点了她的名（"@张三 小深你打吗"）——那是把她也叫上。
+      const namedMe = addr.signals.includes('name-mention');
+      if (msg.atSomeoneElse === true && !namedMe) {
+        return { wake: false, reason: 'active-window:at-other' };
+      }
+
       // ① 明确在问她（点名她 / 第二人称"你" / 她刚说完的省略句）
       //    问句 + 指向她 → 必接（这是"吃了吗""在干嘛"这类没问号的省略句）
       if (q.isQuestion && addr.explicit && addr.score >= 0.5) {
         wake = true; reason = 'active-window:explicit-question';
       }
-      // ② 明确在问别人 → 一律不抢话，也不算到任何人头上
+      // ② 明确在跟别人说话（文本里点了别人的名字）→ 一律不抢话，也不算到任何人头上
       else if (addr.excluded) {
         return { wake: false, reason: 'active-window:excluded' };
       }

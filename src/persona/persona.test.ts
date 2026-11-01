@@ -526,3 +526,54 @@ describe('ProactiveBudget · 冷退避', () => {
     expect(b.prune(30 * 24 * 3600_000)).toBe(2); // 只清 empty1/empty2
   });
 });
+
+describe('Waker · @ 别人的消息不抢话（活跃对话期内）', () => {
+  const mk = () => new Waker({ names: ['小深'], probability: 0, idleDiveThreshold: 5, chimeInProbability: 0 });
+  const OTHER = '<@E102DAA44B3A34A6821AFA9C147EAD09>';
+
+  it('活跃期内 @ 了别人 + 问句 → 不醒（不再当成省略主语的问句）', () => {
+    const w = mk();
+    const k = 'group:g';
+    w.wake(k, 'A');
+    const d = w.shouldWake({
+      key: k,
+      userId: 'A',
+      text: `${OTHER} 你今晚打刀吗`,
+      inActiveWindow: w.isSpeakerActive(k, 'A'),
+      atSomeoneElse: true,
+    });
+    expect(d.wake).toBe(false);
+    expect(d.reason).toBe('active-window:at-other');
+  });
+
+  it('同一条话没 @ 别人时，照常接（证明不是一刀切）', () => {
+    const w = mk();
+    const k = 'group:g';
+    w.wake(k, 'A');
+    const d = w.shouldWake({
+      key: k,
+      userId: 'A',
+      text: '你今晚打刀吗',
+      inActiveWindow: w.isSpeakerActive(k, 'A'),
+    });
+    expect(d.wake).toBe(true);
+    // 有"你"→ 走 explicit-question；没有"你"时才是 implicit-question。
+    // 这里只要求"接"，不锁死具体走哪条分支。
+    expect(d.reason).toContain('question');
+  });
+
+  it('@ 别人但同时点了她的名 → 照常醒（别把"叫上她"也静音）', () => {
+    const w = mk();
+    const k = 'group:g';
+    w.wake(k, 'A');
+    const d = w.shouldWake({
+      key: k,
+      userId: 'A',
+      text: `${OTHER} 小深你今晚打刀吗`,
+      inActiveWindow: w.isSpeakerActive(k, 'A'),
+      atSomeoneElse: true,
+    });
+    expect(d.wake).toBe(true);
+    expect(d.reason).not.toBe('active-window:at-other');
+  });
+});

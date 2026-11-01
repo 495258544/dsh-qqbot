@@ -11,6 +11,8 @@
  * - memory.touch（涨 interactions、建账）只在醒后执行，防虚高
  */
 import { appendFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
 
 /** 「被嫌吵」的抱怨特征词 */
 const COMPLAINT_RE = /太吵|别刷屏|刷屏了|安静点|安静些|闭嘴|别发了|少说点|烦死了|别吵|能不能别发|话太多/;
@@ -18,12 +20,32 @@ import type { Middleware, MiddlewareContext } from '@tencent-connect/qqbot-nodej
 import type { PersonaService } from '../persona/service.ts';
 import type { Logger } from '../types.ts';
 
-/** 诊断：记录每条群/私聊消息的唤醒判定 + 附件情况（排查"图片收不到"） */
+/**
+ * 这条群消息是不是 @ 了别人（而不是她）。
+ *
+ * 判据：正文里还留着 `<@32位openid>` 这样的 @ 标记，且事件本身不是「@ 我」
+ * （@ 我时 QQ 的事件类型是 GROUP_AT_MESSAGE_CREATE，mentionGate 会置 wasMentioned=true）。
+ * contentSanitizer 只清「@ 机器人」那种 `<@数字appId>`，@ 群友的标记会原样留下，
+ * 所以这里还能看到的一定是 @ 别人。
+ *
+ * 用途：活跃对话期内，一条「@张三 你今晚打吗」不该被她当成省略主语的问句抢着回答。
+ */
+function mentionsOtherPeople(content: string, wasMentioned: boolean): boolean {
+  if (wasMentioned) return false;
+  return /<@!?[A-Fa-f0-9]{20,}>/.test(content);
+}
+
+/** 诊断文件位置：跟着用户目录走。原来写死成 /root/，在 Windows 上会落到 C:\root\ 去 */
+function debugLogPath(): string {
+  return join(homedir(), '.dsh-qqbot', 'debug-wakegate.jsonl');
+}
+
+/** 诊断：记录每条群/私聊消息的唤醒判定 + 附件情况（排查「图片收不到」） */
 function logWakeDbg(sp: string, key: string, msg: any, decision: any, extra: string): void {
   try {
     const atts = (msg.attachments ?? []) as Array<Record<string, unknown>>;
     appendFileSync(
-      '/root/.dsh-qqbot/debug-wakegate.jsonl',
+      debugLogPath(),
       `${JSON.stringify({
         t: new Date().toISOString(),
         stage: sp,
@@ -123,11 +145,13 @@ export function personaWakeGate(
             // 引文正文单独透传：唤醒判定里"命中兴趣/被引用"都该考虑它
             quoteText,
             isAtMe: ctx.state.mention?.wasMentioned === true,
+            // @ 了别人 → 活跃期内也不该抢话（详见 mentionsOtherPeople 的注释）
+            atSomeoneElse: mentionsOtherPeople(msg.content ?? '', ctx.state.mention?.wasMentioned === true),
             // 活跃期内按概率接话，避免变成应答器
             inActiveWindow: waker.isSpeakerActive(key, msg.senderId),
           })
         : { wake: true, reason: 'c2c' as string };
-      logWakeDbg('decision', key, msg, decision, `mentioned=${ctx.state.mention?.wasMentioned === true} implicit=${ctx.state.mention?.implicit === true}`);
+      logWakeDbg('decision', key, msg, decision, `mentioned=${ctx.state.mention?.wasMentioned === true} implicit=${ctx.state.mention?.implicit === true} atOthers=${mentionsOtherPeople(msg.content ?? '', ctx.state.mention?.wasMentioned === true)}`);
 
       // 「是不是冲 bot 说的」判定。手机端无法同时 @ + 发图，纯图片消息 content 为空，
       // shouldWake 只按文本判会误判"潜水"→ctx.stop()→附件不下载→agent 永远收不到图。
