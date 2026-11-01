@@ -17,6 +17,7 @@ import type { ContentBlock } from '@deepseek-ai/dsh-llm';
 import type { DshAgent, SessionManager } from '../session/index.ts';
 import type { Logger } from '../types.ts';
 import type { SteamService, FriendEntry } from './service.ts';
+import { primaryName } from './bindings.ts';
 
 interface ToolsRegistryLike {
   register(definition: unknown): unknown;
@@ -332,8 +333,9 @@ export function registerSteamTools(
 
       const people = result.people.map((p) => ({
         // alias 可能是"江铭鑫、铭鑫"这种多叫法，兜底取名时只用第一个
-        name: p.personaName !== '' ? p.personaName : (primaryAlias(p.alias) || p.steamId),
-        ...(p.alias !== undefined ? { alias: p.alias } : {}),
+        name: p.personaName !== '' ? p.personaName : (primaryName(p.alias) || p.steamId),
+        // 给模型的 alias 也只给群名：真名是"识别用"的，不该被她喊出来
+        ...(p.alias !== undefined ? { alias: primaryName(p.alias) } : {}),
         state: p.state,
         ...(p.inGame !== undefined ? { inGame: p.inGame } : {}),
         ...(p.recent !== undefined ? { recent: p.recent } : {}),
@@ -520,11 +522,6 @@ interface RenderedPerson {
   note?: string;
 }
 
-/** alias 允许写多个叫法（"江铭鑫、铭鑫"），取第一个当主称呼 */
-function primaryAlias(alias: string | undefined): string {
-  return String(alias ?? '').split(/[、,，/]/)[0]?.trim() ?? '';
-}
-
 /** 拼一句人话摘要（工具结果同时给模型看，summary 是它最可能直接复述的部分） */
 function buildSummary(people: RenderedPerson[], ok: boolean, warning?: string): string {
   if (people.length === 0) return ok ? '没有可查的人' : '查询失败';
@@ -532,7 +529,7 @@ function buildSummary(people: RenderedPerson[], ok: boolean, warning?: string): 
   const parts = people.map((p) => {
     // alias 允许写多个叫法（"江铭鑫、铭鑫"），念出来只取第一个，
     // 不然她会照着复述成"江铭鑫、铭鑫（GIANT D/CK LANM）：离线"。
-    const primary = primaryAlias(p.alias);
+    const primary = primaryName(p.alias);
     const head = primary !== '' && primary !== p.name ? `${primary}（${p.name}）` : p.name;
     const playing = p.inGame !== undefined ? `正在玩 ${p.inGame}` : p.state;
     const recent = p.recent !== undefined && p.recent.length > 0
