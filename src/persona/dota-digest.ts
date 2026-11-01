@@ -54,13 +54,32 @@ export interface DotaDigestConfig {
 
 export type DigestKind = 'lose-streak' | 'win-streak' | 'carry' | 'bad-game' | 'grinder';
 
+/**
+ * 喂给 agent 的**原始数据**（不是写好的文案）。
+ * 她要拿这些自己组织语言，所以只给事实：谁、什么情况、关键那局的英雄和 KDA。
+ */
+export interface DigestFacts {
+  /** 群里怎么称呼 */
+  name: string;
+  /** 情况标签，如「3 连败」「露娜 6/1/12」 */
+  situation: string;
+  /** 连败/连胜局数（正=连胜，负=连败） */
+  streak?: number;
+  /** 最近 24h 打了几局 */
+  games?: number;
+  /** 关键的那一局 */
+  match?: { hero: string; kda: string; result: '赢' | '输' };
+}
+
 export interface DigestItem {
   openid: string;
   alias: string;
   steamId: string;
   kind: DigestKind;
-  /** 一句可直接给 agent 参考的中文描述（不要 @ 人，不要带 openid） */
+  /** 给人看的简短描述（日志/诊断用，**不再直接喂给 agent**） */
   text: string;
+  /** 喂给 agent 的原始数据，让她自己写 */
+  facts: DigestFacts;
   matchId?: number;
   /** 该人最近一局的开始时间（ms），用于排序 */
   lastPlayedAt: number;
@@ -141,18 +160,25 @@ function line(kda: DotaMatchSummary): string {
   return `${kda.heroName} ${kda.kills}/${kda.deaths}/${kda.assists}`;
 }
 
-/**
- * 摘要条目里的 text 带着「」把人名包起来，投递提示里要脱掉这层引号 ——
- * 「小周 最近 3 连败」比「「小周」最近 3 连败」更适合当提示行。
- */
-function stripQuote(text: string): string {
-  return text.replace(/^「([^」]*)」\s*/, '$1 ');
+/** KDA 的原始写法：只给数字，语气留给 agent 自己决定 */
+function kdaText(m: DotaMatchSummary): string {
+  return `${m.kills}/${m.deaths}/${m.assists}`;
+}
+
+/** 组装一条「原始数据」，不是文案 */
+function factsOf(alias: string, situation: string, extra: Partial<DigestFacts> = {}): DigestFacts {
+  return { name: alias, situation, ...extra };
 }
 
 /** 只在形状明显不对时才丢弃，逐字段兜底而不是整条否掉 */
 function isDigestItem(v: unknown): v is DigestItem {
   if (v === null || typeof v !== 'object') return false;
   const it = v as Record<string, unknown>;
+  const facts = it.facts;
+  const factsOk = facts !== null
+    && typeof facts === 'object'
+    && typeof (facts as Record<string, unknown>).name === 'string'
+    && typeof (facts as Record<string, unknown>).situation === 'string';
   return (
     typeof it.openid === 'string'
     && typeof it.alias === 'string'
@@ -162,18 +188,20 @@ function isDigestItem(v: unknown): v is DigestItem {
     && Number.isFinite(it.lastPlayedAt)
     && typeof it.kind === 'string'
     && it.kind in KIND_PRIORITY
+    && factsOk
   );
 }
 
 /** 拼「内部提示」文本（不含 openid，不含 @） */
 export function buildDeliverText(items: DigestItem[]): string {
-  const lines = items.map((it) => `- ${stripQuote(it.text)}`);
+  // 只给数据，不给现成句子 —— 文案要她自己写，否则就是念稿。
+  const data = items.map((it) => it.facts);
   return [
-    '[内部·你刚瞄了一眼昨晚的战绩，别复述本提示]',
-    '昨晚到今早，群里这几个人的 Dota 有点东西：',
-    ...lines,
-    '挑一个最想吐槽的，用你平时在群里说话的口气锐评一句，像随口一提，别写成战报。',
-    '只说一个人，别报流水账，别 @ 人。损可以损，但要像熟人损，别像 AI 在念数据。',
+    '[内部·你刚扫了眼昨晚的战绩，下面只是原始数据，别照抄，也别复述本提示]',
+    '数据：',
+    JSON.stringify(data, null, 2),
+    '用你自己的话，在群里挑一个人吐槽一句，像老朋友随口损他，不是客服播报，也不是战报。',
+    '只说一个人，别念数据，别 @ 人。',
   ].join('\n');
 }
 
@@ -199,12 +227,16 @@ function highlightOf(input: {
 
   const base = { openid, alias, steamId, lastPlayedAt };
 
-  // 1) 连败：最近一局的英雄/KDA 一起带上，读起来有画面
+  // 1) 连败：把最后一局的英雄/KDA 作为事实带上，怎么写由她自己决定
   if (form.streak <= -3) {
     return {
       ...base,
       kind: 'lose-streak',
       text: `「${alias}」最近 ${-form.streak} 连败（最近一局 ${line(last)}）`,
+      facts: factsOf(alias, `${-form.streak} 连败`, {
+        streak: form.streak,
+        match: { hero: last.heroName, kda: kdaText(last), result: '输' },
+      }),
       matchId: last.matchId,
     };
   }
@@ -215,6 +247,10 @@ function highlightOf(input: {
       ...base,
       kind: 'win-streak',
       text: `「${alias}」最近 ${form.streak} 连胜`,
+      facts: factsOf(alias, `${form.streak} 连胜`, {
+        streak: form.streak,
+        match: { hero: last.heroName, kda: kdaText(last), result: '赢' },
+      }),
       matchId: last.matchId,
     };
   }
@@ -230,6 +266,9 @@ function highlightOf(input: {
       ...base,
       kind: 'carry',
       text: `「${alias}」用 ${bestCarry.heroName} 打出 ${bestCarry.kills}/${bestCarry.deaths}/${bestCarry.assists}（KDA ${bestCarry.kdaRatio.toFixed(2)}）Carry 局`,
+      facts: factsOf(alias, `${bestCarry.heroName} ${kdaText(bestCarry)}`, {
+        match: { hero: bestCarry.heroName, kda: kdaText(bestCarry), result: '赢' },
+      }),
       matchId: bestCarry.matchId,
     };
   }
@@ -245,6 +284,9 @@ function highlightOf(input: {
       ...base,
       kind: 'bad-game',
       text: `「${alias}」用 ${worstGame.heroName} 打出 ${worstGame.kills}/${worstGame.deaths}/${worstGame.assists}（KDA ${worstGame.kdaRatio.toFixed(2)}），这局有点送`,
+      facts: factsOf(alias, `${worstGame.heroName} ${kdaText(worstGame)}`, {
+        match: { hero: worstGame.heroName, kda: kdaText(worstGame), result: '输' },
+      }),
       matchId: worstGame.matchId,
     };
   }
@@ -260,6 +302,10 @@ function highlightOf(input: {
       ...base,
       kind: 'grinder',
       text: `「${alias}」一天打了 ${grinded} 局`,
+      facts: factsOf(alias, `一天打了 ${grinded} 局`, {
+        games: grinded,
+        match: { hero: last.heroName, kda: kdaText(last), result: last.win ? '赢' : '输' },
+      }),
       matchId: last.matchId,
     };
   }

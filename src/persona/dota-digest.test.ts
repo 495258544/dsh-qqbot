@@ -373,9 +373,12 @@ describe('tickDeliver · 日期与时段', () => {
     expect(text).toContain('小周');
     expect(text).not.toContain('u_a');
     expect(text).toContain('别 @ 人');
-    // 提示里把「」脱掉，读起来像一句话而不是引述
-    expect(text).toContain('- 小周 最近 3 连败（最近一局 影魔 3/9/4）');
-    expect(text).toContain('锐评一句');
+    // 给的是原始数据，不是现成句子 —— 文案要她自己写
+    expect(text).toContain('"name": "小周"');
+    expect(text).toContain('"situation": "3 连败"');
+    expect(text).toContain('"hero": "影魔"');
+    expect(text).toContain('别照抄');
+    expect(text).toContain('吐槽一句');
     expect(h.deliverCalls[0]?.groupId).toBe('group-openid-1');
 
     const again = await h.handle.tickDeliver(cst(2026, 3, 10, 11, 0));
