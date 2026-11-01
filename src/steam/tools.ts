@@ -331,7 +331,8 @@ export function registerSteamTools(
       }
 
       const people = result.people.map((p) => ({
-        name: p.personaName !== '' ? p.personaName : (p.alias ?? p.steamId),
+        // alias 可能是"江铭鑫、铭鑫"这种多叫法，兜底取名时只用第一个
+        name: p.personaName !== '' ? p.personaName : (primaryAlias(p.alias) || p.steamId),
         ...(p.alias !== undefined ? { alias: p.alias } : {}),
         state: p.state,
         ...(p.inGame !== undefined ? { inGame: p.inGame } : {}),
@@ -519,12 +520,20 @@ interface RenderedPerson {
   note?: string;
 }
 
+/** alias 允许写多个叫法（"江铭鑫、铭鑫"），取第一个当主称呼 */
+function primaryAlias(alias: string | undefined): string {
+  return String(alias ?? '').split(/[、,，/]/)[0]?.trim() ?? '';
+}
+
 /** 拼一句人话摘要（工具结果同时给模型看，summary 是它最可能直接复述的部分） */
 function buildSummary(people: RenderedPerson[], ok: boolean, warning?: string): string {
   if (people.length === 0) return ok ? '没有可查的人' : '查询失败';
 
   const parts = people.map((p) => {
-    const head = p.alias !== undefined && p.alias !== p.name ? `${p.alias}（${p.name}）` : p.name;
+    // alias 允许写多个叫法（"江铭鑫、铭鑫"），念出来只取第一个，
+    // 不然她会照着复述成"江铭鑫、铭鑫（GIANT D/CK LANM）：离线"。
+    const primary = primaryAlias(p.alias);
+    const head = primary !== '' && primary !== p.name ? `${primary}（${p.name}）` : p.name;
     const playing = p.inGame !== undefined ? `正在玩 ${p.inGame}` : p.state;
     const recent = p.recent !== undefined && p.recent.length > 0
       ? `；最近玩过 ${p.recent.slice(0, 3).map((g) => g.name).join('、')}`

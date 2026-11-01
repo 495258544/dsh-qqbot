@@ -144,7 +144,9 @@ export function setupMiddlewares(
       extraNames: steam === undefined
         ? undefined
         : () => steam.bindings.list()
-          .map((b) => b.binding.alias ?? '')
+          // 一个 alias 里可以用「、」「,」写多个叫法（"江铭鑫、铭鑫"），群里怎么喊都能认出来
+          .flatMap((b) => String(b.binding.alias ?? '').split(/[、,，/]/))
+          .map((n) => n.trim())
           .filter((n) => n !== ''),
     }));
   }
