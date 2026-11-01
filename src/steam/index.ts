@@ -11,6 +11,8 @@ export { registerSteamTools } from './tools.ts';
 export { BindingStore } from './bindings.ts';
 export type { SteamBinding, BindingHit } from './bindings.ts';
 export { SteamApi, SteamApiError, personaStateText } from './steam-api.ts';
+export { SettingsStore } from './settings.ts';
+export type { SteamSettings } from './settings.ts';
 export type { PlayerSummary, RecentGame, SteamErrorKind } from './steam-api.ts';
 export {
   parseSteamInput,

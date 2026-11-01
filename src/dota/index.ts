@@ -22,6 +22,9 @@ import {
   type OpenDotaErrorKind,
   type PlayerProfile,
   type RawMatch,
+  type RawMatchDetail,
+  type RawMatchPlayer,
+  type RawObjective,
 } from './opendota.ts';
 import {
   DotaService,
@@ -29,6 +32,7 @@ import {
   type DotaForm,
   type DotaFormOutcome,
   type DotaMatchSummary,
+  type MatchDetailForm,
 } from './service.ts';
 import { registerDotaTools } from './tools.ts';
 
@@ -90,7 +94,11 @@ export type {
   DotaFormOutcome,
   DotaMatchSummary,
   DotaQuota,
+  MatchDetailForm,
   OpenDotaErrorKind,
   PlayerProfile,
   RawMatch,
+  RawMatchDetail,
+  RawMatchPlayer,
+  RawObjective,
 };

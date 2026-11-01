@@ -22,6 +22,7 @@ import {
 } from './attachment.ts';
 import { clearGroupHistory } from '../features/history-store.ts';
 import { lookupAttribution, lookupByImageMd5 } from '../features/attribution-index.ts';
+import { recordGroupActivity } from '../features/group-activity.ts';
 import { stashPendingAttachments, takePendingAttachments, pendingKey } from '../features/pending-attachments.ts';
 
 import type { MiddlewareContext } from '@tencent-connect/qqbot-nodejs';
@@ -162,6 +163,10 @@ export async function handleInbound(
   }
 
   if (!agentBody) return;
+
+  // 群活跃度埋点：只记聚合指标（时间戳 / 关键词命中 / 发言者），不留原文。
+  // 用途是「Dota 战绩播报该发哪个群」的相关度评分，未配置时静默忽略。
+  if (scope === 'group') recordGroupActivity(peerId, msg.senderId, agentBody);
 
   logger.info(`Processing: scope=${scope} peerId=${peerId} body="${agentBody.slice(0, 200)}"`);
 

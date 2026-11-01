@@ -164,7 +164,190 @@ export function registerDotaTools(ctx: Context, service: DotaService, logger: Lo
     },
   });
 
-  logger.info(`im-qqbot: Dota2 工具已注册（${TOOL_NAME}）`);
+  // ── qq_dota_match：单场详细解析 ─────────────────────────────
+  tools.register({
+    name: 'qq_dota_match',
+    description:
+      '解析一场具体的 Dota2 对局（比 qq_dota_recent 细得多）：经济/输出/正反补、队内排名、对位对比、'
+      + '首血/肉山/推塔、经济曲线、团战参与、双方阵容、出装。'
+      + '给了 match_id 就查那场；只给 account 不给 match_id 时，自动取该账号最近一场。'
+      + 'account 仍然是必需的（要定位这局里的哪个人）。数据来自 OpenDota 公开数据；'
+      + '对方关掉「公开比赛数据」时查不到，要如实说查不到。',
+    parameters: {
+      type: 'object',
+      properties: {
+        match_id: {
+          type: 'integer',
+          description: '对局 ID（qq_dota_recent 返回的 matchId）；省略则取该账号最近一场',
+        },
+        account_id: {
+          type: 'integer',
+          description: 'Dota2 的 32 位 account_id（OpenDota 用的那个）',
+        },
+        steam_id: {
+          type: 'string',
+          description: 'SteamID64（17 位数字），工具内部换算成 account_id',
+        },
+      },
+      additionalProperties: false,
+    },
+    output: {
+      schema: {
+        type: 'object',
+        properties: {
+          ok: { type: 'boolean' },
+          matchId: { type: 'integer' },
+          summary: { type: 'string' },
+          heroName: { type: 'string' },
+          win: { type: 'boolean' },
+          kills: { type: 'integer' },
+          deaths: { type: 'integer' },
+          assists: { type: 'integer' },
+          kdaRatio: { type: 'number' },
+          gpm: { type: 'integer' },
+          xpm: { type: 'integer' },
+          lastHits: { type: 'integer' },
+          denies: { type: 'integer' },
+          heroDamage: { type: 'integer' },
+          towerDamage: { type: 'integer' },
+          heroHealing: { type: 'integer' },
+          netWorth: { type: 'integer' },
+          level: { type: 'integer' },
+          items: { type: 'array', items: { type: 'string' } },
+          teamRank: {
+            type: 'object',
+            properties: {
+              netWorth: { type: 'integer' },
+              heroDamage: { type: 'integer' },
+              teamSize: { type: 'integer' },
+            },
+            additionalProperties: false,
+          },
+          laneOpponent: {
+            type: 'object',
+            properties: {
+              heroName: { type: 'string' },
+              gpmDiff: { type: 'integer' },
+              damageDiff: { type: 'integer' },
+            },
+            additionalProperties: false,
+          },
+          objectives: {
+            type: 'object',
+            properties: {
+              firstBlood: { type: 'string' },
+              roshanRadiant: { type: 'integer' },
+              roshanDire: { type: 'integer' },
+              towersRadiant: { type: 'integer' },
+              towersDire: { type: 'integer' },
+            },
+            additionalProperties: false,
+          },
+          goldSwing: {
+            type: 'object',
+            properties: {
+              maxLead: { type: 'integer' },
+              maxDeficit: { type: 'integer' },
+              leadMinute: { type: 'integer' },
+              deficitMinute: { type: 'integer' },
+            },
+            additionalProperties: false,
+          },
+          teamfights: {
+            type: 'object',
+            properties: {
+              count: { type: 'integer' },
+              participated: { type: 'integer' },
+            },
+            additionalProperties: false,
+          },
+          lineup: {
+            type: 'object',
+            properties: {
+              radiant: { type: 'array', items: { type: 'string' } },
+              dire: { type: 'array', items: { type: 'string' } },
+            },
+            additionalProperties: false,
+          },
+          notes: { type: 'array', items: { type: 'string' } },
+        },
+        required: ['ok', 'matchId', 'summary'],
+        additionalProperties: false,
+      },
+      render: (_args: unknown, value: unknown): ContentBlock[] => {
+        const v = value as { summary?: string };
+        return [{ type: 'text', text: v.summary ?? '没有可展示的解析' }];
+      },
+    },
+    async execute(args: unknown): Promise<Record<string, unknown>> {
+      const { match_id, account_id, steam_id } = args as {
+        match_id?: number;
+        account_id?: number;
+        steam_id?: string;
+      };
+
+      const accountId = resolveAccountId(account_id, steam_id, 'qq_dota_match');
+
+      // 没给对局 ID 就取该账号最近一场（recentForm 已带缓存，不会多打一次）
+      let matchId: number;
+      if (match_id !== undefined && match_id !== null) {
+        const n = Number(match_id);
+        if (!Number.isSafeInteger(n) || n <= 0) {
+          throw new Error(`qq_dota_match: match_id 必须是正整数，收到 ${String(match_id)}`);
+        }
+        matchId = n;
+      } else {
+        const recent = await service.recentForm(accountId, 1);
+        const first = recent.matches[0];
+        if (first === undefined) {
+          throw new Error('qq_dota_match: 这个账号最近没有比赛，取不到「最近一场」');
+        }
+        matchId = first.matchId;
+      }
+
+      const form = await service.matchDetail(matchId, accountId);
+      logger.info(`dota: 单场解析 ${matchId} → ${form.player.heroName}`);
+
+      const p = form.player;
+      const ob = form.objectives;
+      return {
+        ok: true,
+        matchId: form.matchId,
+        summary: form.summaryText,
+        heroName: p.heroName,
+        win: p.win,
+        kills: p.kills,
+        deaths: p.deaths,
+        assists: p.assists,
+        kdaRatio: p.kdaRatio,
+        gpm: p.gpm,
+        xpm: p.xpm,
+        lastHits: p.lastHits,
+        denies: p.denies,
+        heroDamage: p.heroDamage,
+        towerDamage: p.towerDamage,
+        heroHealing: p.heroHealing,
+        netWorth: p.netWorth,
+        level: p.level,
+        items: p.items,
+        teamRank: form.teamRank,
+        ...(form.laneOpponent !== null ? { laneOpponent: form.laneOpponent } : {}),
+        objectives: {
+          firstBlood: ob.firstBlood ?? 'unknown',
+          roshanRadiant: ob.roshan.radiant,
+          roshanDire: ob.roshan.dire,
+          towersRadiant: ob.towers.radiant,
+          towersDire: ob.towers.dire,
+        },
+        ...(form.goldSwing !== null ? { goldSwing: form.goldSwing } : {}),
+        ...(form.teamfights !== null ? { teamfights: form.teamfights } : {}),
+        lineup: form.lineup,
+        notes: form.notes,
+      };
+    },
+  });
+
+  logger.info(`im-qqbot: Dota2 工具已注册（${TOOL_NAME} / qq_dota_match）`);
 }
 
 /**
@@ -172,11 +355,11 @@ export function registerDotaTools(ctx: Context, service: DotaService, logger: Lo
  * 注意：account_id 给了但非法时**不**回落到 steam_id —— 静默换一个账号查，
  * 比直接报错更危险（群里会把 A 的战绩当 B 的说出来）。
  */
-function resolveAccountId(accountId: unknown, steamId: unknown): number {
+function resolveAccountId(accountId: unknown, steamId: unknown, toolName = 'qq_dota_recent'): number {
   if (accountId !== undefined && accountId !== null) {
     const n = Number(accountId);
     if (!Number.isSafeInteger(n) || n <= 0) {
-      throw new Error(`qq_dota_recent: account_id 必须是正整数，收到 ${String(accountId)}`);
+      throw new Error(`${toolName}: account_id 必须是正整数，收到 ${String(accountId)}`);
     }
     return n;
   }
@@ -185,11 +368,11 @@ function resolveAccountId(accountId: unknown, steamId: unknown): number {
     const converted = steamIdToAccountId(steamId);
     if (converted === null) {
       throw new Error(
-        `qq_dota_recent: ${steamId.trim()} 不是合法的 SteamID64（需要 17 位数字，且属于个人账号）`,
+        `${toolName}: ${steamId.trim()} 不是合法的 SteamID64（需要 17 位数字，且属于个人账号）`,
       );
     }
     return converted;
   }
 
-  throw new Error('qq_dota_recent: 需要 account_id 或 steam_id 其中一个（account_id 优先）');
+  throw new Error(`${toolName}: 需要 account_id 或 steam_id 其中一个（account_id 优先）`);
 }

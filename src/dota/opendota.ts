@@ -105,6 +105,69 @@ export interface OpenDotaOptions {
   userAgent?: string;
 }
 
+/** /matches/{id} 里的一个玩家（只取"详细解析"要用的字段，其余忽略） */
+export interface RawMatchPlayer {
+  account_id: number | null;
+  player_slot: number;
+  hero_id: number;
+  kills: number;
+  deaths: number;
+  assists: number;
+  gold_per_min: number;
+  xp_per_min: number;
+  last_hits: number;
+  denies: number;
+  hero_damage: number | null;
+  tower_damage: number | null;
+  hero_healing: number | null;
+  net_worth: number | null;
+  level: number | null;
+  item_0: number;
+  item_1: number;
+  item_2: number;
+  item_3: number;
+  item_4: number;
+  item_5: number;
+  backpack_0: number | null;
+  backpack_1: number | null;
+  backpack_2: number | null;
+  /** 1=优势路 2=中路 3=劣势路 4=打野（OpenDota 口径） */
+  lane_role: number | null;
+}
+
+/** /matches/{id} 的一条目标事件（首血 / 肉山 / 推塔） */
+export interface RawObjective {
+  /** 秒（相对开局，可能为负 = 开局前） */
+  time: number;
+  type: string;
+  /**
+   * 2 = 天辉方做的，3 = 夜魇方做的。
+   * 注意：**推塔事件（building_kill）通常没有 team**，首血也常常没有 ——
+   * 这时要靠 playerSlot / key 推，别直接当 0 处理。
+   */
+  team: number | null;
+  /** 做事的人（首血/肉山常有；推塔不一定） */
+  playerSlot: number | null;
+  /** 推塔时的建筑名，如 npc_dota_badguys_tower1_mid */
+  key: string | null;
+}
+
+/** /matches/{id} 的裁剪结果 */
+export interface RawMatchDetail {
+  matchId: number;
+  startTime: number;
+  durationSec: number;
+  gameMode: number;
+  lobbyType: number;
+  radiantWin: boolean;
+  players: RawMatchPlayer[];
+  objectives: RawObjective[];
+  /** 每分钟天辉经济领先（负 = 夜魇领先）；未解析时为 null */
+  radiantGoldAdv: number[] | null;
+  /** 团战片段；未解析时为 null。players 按对局 players 数组顺序排列（没有 player_slot） */
+  teamfights: Array<{ players?: Array<{ player_slot?: number; damage?: number; healing?: number }> }> | null;
+}
+
 /** 天梯奖章编号 → 中文。51 = 传奇 1 星（十位是等级，个位是星级） */
 export function rankTierText(rankTier: number | null | undefined): string | null {
   if (typeof rankTier !== 'number' || !Number.isFinite(rankTier) || rankTier <= 0) return null;
@@ -158,6 +221,9 @@ export class OpenDotaApi {
 
   /** 最近一次响应的剩余额度（含 4xx/5xx 响应，Header 在错误响应上也有） */
   lastQuota: DotaQuota | undefined;
+
+  /** 物品 id → 名称；/constants/items 拉一次后进程内永久缓存 */
+  private itemNamesCache: Map<number, string> | null = null;
 
   constructor({ timeoutMs = 8000, userAgent = 'dsh-qqbot/dota' }: OpenDotaOptions = {}) {
     this.timeoutMs = timeoutMs;
@@ -349,6 +415,46 @@ export class OpenDotaApi {
     return { win, lose };
   }
 
+  /**
+   * 单场详细数据（/matches/{id}）。
+   *
+   * 是否"解析过"决定能不能看到经济曲线 / 团战：未解析的局只有基础 KDA，
+   * 调用方要靠 `radiantGoldAdv === null` 判断，而不是硬算出一个假的曲线。
+   * 找不到该场（404）抛 not-found，由上层翻译成"这场查不到/还没被收录"。
+   */
+  async matchDetails(matchId: number): Promise<RawMatchDetail> {
+    const id = Number(matchId);
+    if (!Number.isSafeInteger(id) || id <= 0) {
+      throw new OpenDotaError('bad-request', `match_id 必须是正整数，收到 ${String(matchId)}`);
+    }
+    const data = await this.get(`/matches/${id}`);
+    if (data === null || typeof data !== 'object') {
+      throw new OpenDotaError('bad-response', 'match 详情返回的不是对象');
+    }
+    return normalizeMatchDetail(data as Record<string, unknown>, id);
+  }
+
+  /**
+   * 物品 id → 显示名。
+   * /constants/items 一次给 501 条，拉一次就永久缓存（进程内），失败由调用方降级成 `#id`。
+   */
+  async itemNames(): Promise<Map<number, string>> {
+    if (this.itemNamesCache !== null) return this.itemNamesCache;
+    const data = await this.get('/constants/items');
+    const map = new Map<number, string>();
+    if (data !== null && typeof data === 'object') {
+      for (const value of Object.values(data as Record<string, unknown>)) {
+        if (value === null || typeof value !== 'object') continue;
+        const item = value as { id?: unknown; dname?: unknown };
+        const id = num(item.id, 0);
+        const name = typeof item.dname === 'string' ? item.dname.trim() : '';
+        if (id > 0 && name !== '') map.set(id, name);
+      }
+    }
+    this.itemNamesCache = map;
+    return map;
+  }
+
   /** 当前剩余额度（给日志/降级用） */
   get quota(): DotaQuota | undefined {
     return this.lastQuota;
@@ -394,5 +500,88 @@ function normalizeMatch(v: Record<string, unknown>): RawMatch {  return {
     leaver_status: num(v.leaver_status),
     party_size: numOrNull(v.party_size),
     hero_variant: numOrNull(v.hero_variant),
+  };
+}
+
+/**
+ * /matches/{id} 的归一化。
+ * 字段缺失一律给安全默认值，绝不让 undefined 流到文案里；
+ * 未解析的局没有 radiant_gold_adv / teamfights，这两个给 null 而不是空数组 ——
+ * 「没有」和「空」在分析里是两种意思。
+ */
+function normalizeMatchDetail(v: Record<string, unknown>, id: number): RawMatchDetail {
+  const players: RawMatchPlayer[] = [];
+  if (Array.isArray(v.players)) {
+    for (const item of v.players) {
+      if (item === null || typeof item !== 'object') continue;
+      const p = item as Record<string, unknown>;
+      const heroId = num(p.hero_id);
+      if (heroId <= 0) continue;
+      players.push({
+        account_id: numOrNull(p.account_id),
+        player_slot: num(p.player_slot),
+        hero_id: heroId,
+        kills: num(p.kills),
+        deaths: num(p.deaths),
+        assists: num(p.assists),
+        gold_per_min: num(p.gold_per_min),
+        xp_per_min: num(p.xp_per_min),
+        last_hits: num(p.last_hits),
+        denies: num(p.denies),
+        hero_damage: numOrNull(p.hero_damage),
+        tower_damage: numOrNull(p.tower_damage),
+        hero_healing: numOrNull(p.hero_healing),
+        net_worth: numOrNull(p.net_worth),
+        level: numOrNull(p.level),
+        item_0: num(p.item_0),
+        item_1: num(p.item_1),
+        item_2: num(p.item_2),
+        item_3: num(p.item_3),
+        item_4: num(p.item_4),
+        item_5: num(p.item_5),
+        backpack_0: numOrNull(p.backpack_0),
+        backpack_1: numOrNull(p.backpack_1),
+        backpack_2: numOrNull(p.backpack_2),
+        lane_role: numOrNull(p.lane_role),
+      });
+    }
+  }
+
+  const objectives: RawObjective[] = [];
+  if (Array.isArray(v.objectives)) {
+    for (const item of v.objectives) {
+      if (item === null || typeof item !== 'object') continue;
+      const o = item as Record<string, unknown>;
+      const type = typeof o.type === 'string' ? o.type : '';
+      if (type === '') continue;
+      objectives.push({
+        time: num(o.time),
+        type,
+        team: numOrNull(o.team),
+        playerSlot: numOrNull(o.player_slot),
+        key: typeof o.key === 'string' ? o.key : o.key === undefined ? null : String(o.key),
+      });
+    }
+  }
+
+  const radiantGoldAdv = Array.isArray(v.radiant_gold_adv) && v.radiant_gold_adv.length > 0
+    ? v.radiant_gold_adv.map((x) => num(x))
+    : null;
+
+  const teamfights = Array.isArray(v.teamfights)
+    ? (v.teamfights as Array<{ players?: Array<{ player_slot?: number; damage?: number; healing?: number }> }>)
+    : null;
+
+  return {
+    matchId: id,
+    startTime: num(v.start_time),
+    durationSec: num(v.duration),
+    gameMode: num(v.game_mode),
+    lobbyType: num(v.lobby_type),
+    radiantWin: v.radiant_win === true,
+    players,
+    objectives,
+    radiantGoldAdv,
+    teamfights,
   };
 }
