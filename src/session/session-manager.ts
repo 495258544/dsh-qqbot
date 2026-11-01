@@ -110,6 +110,12 @@ export class SessionManager {
   public approvalChannel?: ApprovalChannel;
   /** 由 bootstrap 注入的活人感服务（人格/记忆/日记 section 注入，DESIGN §7） */
   public persona?: PersonaService;
+  /**
+   * 由 bootstrap 注入的 Steam 服务（只用于主动感知 section 注入）。
+   * 只暴露 peekSection()：它是同步读内存快照，绝不发网络请求 —— turn 组装
+   * 路径上等网络会直接拖慢每一次回复，刷新交给 service 自己在后台做。
+   */
+  public steam?: { peekSection(): string[] };
 
   constructor(
     ctx: Context,
@@ -178,10 +184,18 @@ export class SessionManager {
         if (clock) personaSections.push(clock);
       }
 
-      const prompt = record.scope === 'group' ? this.config.groupPrompt : this.config.directPrompt;
-      if (!prompt && personaSections.length === 0) return assembled;
+      // Steam 主动感知（order 65）：只在有绑定用户、且有配置 Key 时才会有内容；
+      // 内容本身已经过 service 裁剪，这里不再判断。
+      const steamSections = (this.steam?.peekSection() ?? []).map((text) => ({
+        name: 'qqbot:steam-presence',
+        order: 65,
+        text,
+      }));
 
-      const extra = personaSections;
+      const prompt = record.scope === 'group' ? this.config.groupPrompt : this.config.directPrompt;
+      const extra = [...personaSections, ...steamSections];
+      if (!prompt && extra.length === 0) return assembled;
+
       return {
         ...assembled,
         sections: [

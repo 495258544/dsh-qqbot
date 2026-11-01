@@ -32,6 +32,7 @@ import { registerStickerTool, registerArchiveTool } from '../media/sticker-tool.
 import { DeliverablesDeliverer } from '../transport/deliverables.ts';
 import { PersonaService } from '../persona/service.ts';
 import { registerPersonaTools } from '../persona/tools.ts';
+import { SteamService, registerSteamTools } from '../steam/index.ts';
 import { createBridgeProbe, renderScreenNudge } from '../persona/screen-watch.ts';
 import { createUpstreamWatch, makeBridgeNotifier, type UpstreamWatchHandle } from '../ops/index.ts';
 import { existsSync } from 'node:fs';
@@ -94,6 +95,21 @@ export async function bootstrapGateway(
     persona = new PersonaService({ config: config.persona, dataDir, logger });
     manager.persona = persona;
     logger.info(`persona: 已启用（dataDir=${dataDir}）`);
+  }
+
+  // ── Steam 集成（查群友状态/最近游戏）──
+  // enabled=false 时完全不创建，不注册工具，也不碰网络。
+  // 没有 apiKey 也照样创建：绑定表（SteamID64 直填）不依赖 Key，
+  // 缺 Key 只影响"查状态"和"解析自定义 ID"。
+  let steam: SteamService | undefined;
+  if (config.steam.enabled) {
+    try {
+      steam = new SteamService({ config: config.steam, logger });
+      manager.steam = steam;
+    } catch (err) {
+      // 绑定表目录不可写之类的问题不该让整个 bot 起不来
+      logger.warn(`steam: 初始化失败，功能已跳过: ${err instanceof Error ? err.message : String(err)}`);
+    }
   }
 
   // ── 初始化 QQ Bot SDK ──
@@ -238,6 +254,11 @@ export async function bootstrapGateway(
   // ── persona 工具（qq_write_diary / qq_read_diary / qq_memory_append）──
   if (persona) {
     registerPersonaTools(ctx, persona, (agent) => manager.findByAgent(agent as Parameters<SessionManager['findByAgent']>[0]), logger);
+  }
+
+  // ── Steam 工具（qq_steam_bind / qq_steam_forget / qq_steam_lookup）──
+  if (steam) {
+    registerSteamTools(ctx, steam, manager, logger);
   }
 
   // ── own-life 静默唤醒：只投递给**存活**的 owner c2c 会话（peek 不重建），

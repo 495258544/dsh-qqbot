@@ -143,6 +143,40 @@ export interface PersonaConfig {
 }
 
 /**
+ * Steam 集成配置（`src/steam/`）—— 查群友状态与最近游戏。
+ *
+ * 三条硬约束（改配置也绕不过去）：
+ *   1. 必须有 Steam Web API Key（https://steamcommunity.com/dev/apikey，免费）；
+ *   2. 只能读**公开**资料 —— 对方把「游戏详情」设为仅好友/私密时，
+ *      只能看到昵称与在线状态，gameid / 最近游戏全为空；
+ *   3. GetRecentlyPlayedGames 只能一人一次，所以必须靠缓存压住调用量。
+ */
+export interface SteamConfig {
+  /** 总开关（关 = 不注册任何 Steam 工具） */
+  enabled: boolean;
+  /** Steam Web API Key（空 = 工具会提示去申请，但绑定表与 SteamID 解析仍可用） */
+  apiKey: string;
+  /** 绑定表目录（默认 ~/.dsh-qqbot/steam） */
+  dataDir: string;
+  /** 预置绑定：QQ openid → SteamID64（管理员维护；每次启动同步，配置是权威） */
+  friends: Record<string, string>;
+  /** 在线状态/当前游戏缓存秒数（默认 60；批量接口一次可覆盖 100 人，可高频） */
+  summaryTtlSec: number;
+  /** 最近游戏缓存秒数（默认 900；一人一次调用，别压太短） */
+  recentTtlSec: number;
+  /** 查不到的账号（注销/ID 填错）的负缓存秒数（默认 600） */
+  negativeTtlSec: number;
+  /** 单次 API 请求超时(ms) */
+  timeoutMs: number;
+  /** 每人默认返回几条最近游戏 */
+  maxRecentGames: number;
+  /** 主动感知：把「谁在玩什么」注入 system prompt，让她能顺着话题接话 */
+  proactiveEnabled: boolean;
+  /** 主动感知注入文本的字符上限（防止把 prompt 撑大） */
+  proactiveMaxChars: number;
+}
+
+/**
  * 运维巡检配置（`src/ops/`）。
  * 与 persona 完全解耦：persona 关掉、甚至没配置角色卡，这个模块照样能跑。
  * 全部默认关——巡检会碰 git 与网络，不该在用户不知情时自动启用。
@@ -219,6 +253,8 @@ export interface ImQQBotConfig {
   sendFile: SendFileConfig;
   /** 活人感 persona（ai-companion-kit 移植：角色卡/记忆/唤醒/拟人化/日记/自我时间） */
   persona: PersonaConfig;
+  /** Steam 集成（查群友状态/最近游戏，只读公开资料） */
+  steam: SteamConfig;
   /** 运维巡检（独立模块，与 persona 无关）：上游同步检查 */
   ops: OpsConfig;
 }
@@ -379,6 +415,31 @@ export const ConfigSchema: Schema<ImQQBotConfig> = Schema.object({
     maxProactivePerDay: 2,
     proactiveMinGapMs: 2 * 3600 * 1000,
   }).description('活人感 persona 配置（移植自 ai-companion-kit，默认关）'),
+  steam: Schema.object({
+    enabled: Schema.boolean().default(true).description('Steam 集成总开关（关=不注册 Steam 工具）'),
+    apiKey: Schema.string().default('').description('Steam Web API Key（https://steamcommunity.com/dev/apikey 免费申请；空=只能绑定不能查询）'),
+    dataDir: Schema.string().default('').description('绑定表目录（默认 ~/.dsh-qqbot/steam）'),
+    friends: Schema.dict(Schema.string()).default({}).description('预置绑定：QQ openid → SteamID64（每次启动同步，配置是权威；群友也可自助绑定）'),
+    summaryTtlSec: Schema.natural().default(60).description('在线状态/当前游戏缓存秒数（默认 60）'),
+    recentTtlSec: Schema.natural().default(900).description('最近游戏缓存秒数（默认 900；一人一次调用，别设太小）'),
+    negativeTtlSec: Schema.natural().default(600).description('查不到的账号的负缓存秒数（默认 600，避免对错误 ID 反复打 API）'),
+    timeoutMs: Schema.natural().default(8000).description('单次 API 请求超时(ms)'),
+    maxRecentGames: Schema.natural().default(5).description('每人默认返回几条最近游戏'),
+    proactiveEnabled: Schema.boolean().default(true).description('主动感知：把「谁在玩什么」注入 system prompt，让她能顺着游戏话题接话'),
+    proactiveMaxChars: Schema.natural().default(600).description('主动感知注入文本的字符上限'),
+  }).default({
+    enabled: true,
+    apiKey: '',
+    dataDir: '',
+    friends: {},
+    summaryTtlSec: 60,
+    recentTtlSec: 900,
+    negativeTtlSec: 600,
+    timeoutMs: 8000,
+    maxRecentGames: 5,
+    proactiveEnabled: true,
+    proactiveMaxChars: 600,
+  }).description('Steam 集成配置（查群友状态/最近游戏；只读公开资料，需自备 API Key）'),
   ops: Schema.object({
     upstreamWatchEnabled: Schema.boolean().default(false).description('上游同步巡检（只读：只报告，不自动合并）'),
     upstreamWatchRepo: Schema.string().default('').description('被巡检仓库绝对路径（空=自动探测 dsh-qqbot 自身）'),
