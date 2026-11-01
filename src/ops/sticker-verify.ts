@@ -20,9 +20,19 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { platformDefaultRoot } from '../media/sticker-tool.ts';
 
-/** 表情库根 */
-const LIB_ROOT = '/sdcard/表情包';
+/**
+ * 表情库根。
+ * 上游写死 /sdcard/表情包（安卓），桌面端不存在该路径。
+ * 这里改为：--root 参数 > QQBOT_STICKER_ROOT 环境变量 > 平台默认（桌面端 ~/stickers）。
+ */
+function libRoot(): string {
+  const i = process.argv.indexOf('--root');
+  const fromArgv = i >= 0 ? (process.argv[i + 1] ?? '') : '';
+  const fromEnv = process.env.QQBOT_STICKER_ROOT ?? '';
+  return (fromArgv || fromEnv || platformDefaultRoot()).replace(/[\\/]+$/, '');
+}
 /** 索引文件 */
 const INDEX_FILE = '_index.json';
 
@@ -36,6 +46,25 @@ const VALID_USE = new Set([
 
 /** 图片扩展名 */
 const IMG_RE = /\.(jpg|jpeg|png|gif|webp)$/i;
+
+/**
+ * `_` 开头目录里，只有收集目录算库的一部分。
+ * `_inbox` 这类原始素材池属于「还没挑过的原料」，扫进来会让报告被几千条噪音淹没。
+ */
+const SCANNED_UNDERSCORE_DIRS = new Set(['_群聊收集']);
+
+/** Windows / macOS 文件系统默认大小写不敏感 */
+const CASE_INSENSITIVE_FS = process.platform === 'win32' || process.platform === 'darwin';
+
+/**
+ * 路径归一化，用于和索引里的字符串比对。
+ * 索引里存的是正斜杠（Windows 也接受），scanImages 产出的是 path.join 的反斜杠，
+ * 不做归一化会让「已入库」的图全部被判成孤儿。
+ */
+function normPath(p: string): string {
+  const abs = path.resolve(p);
+  return CASE_INSENSITIVE_FS ? abs.toLowerCase() : abs;
+}
 
 /** 一条索引记录 */
 interface StickerEntry {
@@ -78,7 +107,8 @@ function scanImages(dir: string, out: string[] = []): string[] {
     if (e.name.startsWith('.')) continue;
     const p = path.join(dir, e.name);
     if (e.isDirectory()) {
-      // _ 开头的目录（如 _群聊收集）也扫，但 _ 开头的普通文件是元数据不扫
+      // _ 开头的目录默认跳过（_inbox 等原始素材池不是库），只放行已知的收集目录
+      if (e.name.startsWith('_') && !SCANNED_UNDERSCORE_DIRS.has(e.name)) continue;
       scanImages(p, out);
     } else if (IMG_RE.test(e.name) && !e.name.startsWith('_')) {
       out.push(p);
@@ -98,7 +128,7 @@ function md5(file: string): string {
 
 /** 读索引 */
 function loadIndex(): StickerEntry[] {
-  const p = path.join(LIB_ROOT, INDEX_FILE);
+  const p = path.join(libRoot(), INDEX_FILE);
   if (!fs.existsSync(p)) return [];
   try {
     const raw = JSON.parse(fs.readFileSync(p, 'utf8')) as { stickers?: StickerEntry[] };
@@ -114,8 +144,8 @@ function loadIndex(): StickerEntry[] {
  */
 export function verifyStickerLibrary(checkDuplicates = true): VerifyReport {
   const stickers = loadIndex();
-  const diskFiles = scanImages(LIB_ROOT);
-  const indexedSet = new Set(stickers.map((s) => s.path));
+  const diskFiles = scanImages(libRoot());
+  const indexedSet = new Set(stickers.map((s) => normPath(s.path)));
 
   // 1. 失效索引
   const staleEntries = stickers
@@ -123,7 +153,7 @@ export function verifyStickerLibrary(checkDuplicates = true): VerifyReport {
     .map((s) => ({ path: s.path, desc: s.desc }));
 
   // 2. 孤儿文件（磁盘有、索引无）
-  const orphans = diskFiles.filter((f) => !indexedSet.has(f));
+  const orphans = diskFiles.filter((f) => !indexedSet.has(normPath(f)));
 
   // 3. 结构问题
   const structuralIssues: Array<{ path: string; issue: string }> = [];
@@ -146,7 +176,7 @@ export function verifyStickerLibrary(checkDuplicates = true): VerifyReport {
     const byMd5 = new Map<string, string[]>();
     for (const f of diskFiles) {
       // 只对已入库的查重（孤儿本来就待处理）
-      if (!indexedSet.has(f)) continue;
+      if (!indexedSet.has(normPath(f))) continue;
       const h = md5(f);
       if (!h) continue;
       const arr = byMd5.get(h);
@@ -176,7 +206,7 @@ export function verifyStickerLibrary(checkDuplicates = true): VerifyReport {
 
 /** 清理索引里指向不存在文件的条目（**只改索引，不动文件**） */
 export function fixStaleIndex(): { removed: number; remaining: number } {
-  const p = path.join(LIB_ROOT, INDEX_FILE);
+  const p = path.join(libRoot(), INDEX_FILE);
   if (!fs.existsSync(p)) return { removed: 0, remaining: 0 };
   const raw = JSON.parse(fs.readFileSync(p, 'utf8')) as {
     version?: number;
