@@ -26,7 +26,7 @@ function cst(year: number, month: number, day: number, hour: number, minute = 0)
 /** 查询时刻：2026-03-10 03:30（北京时间） */
 const QUERY_AT = cst(2026, 3, 10, 3, 30);
 /** 投递日：2026-03-11 */
-const FOR_DAY = '2026-03-11';
+const FOR_DAY = '2026-03-10';
 
 const silentLogger: Logger = {
   info: () => {},
@@ -360,15 +360,11 @@ function preparedHarness(o: Parameters<typeof harness>[0] = {}): Harness {
 }
 
 describe('tickDeliver · 日期与时段', () => {
-  it('当天（今天 < forDay）→ not-yet；次日时段内 → 发一次；再发 → already-delivered', async () => {
+  it('同一天：查询后当天时段内发一次；再发 → already-delivered', async () => {
     const h = preparedHarness();
     await prepare(h);
 
-    const early = await h.handle.tickDeliver(cst(2026, 3, 10, 10, 30));
-    expect(early).toEqual({ sent: false, reason: 'not-yet' });
-    expect(h.deliverCalls).toHaveLength(0);
-
-    const sent = await h.handle.tickDeliver(cst(2026, 3, 11, 10, 30));
+    const sent = await h.handle.tickDeliver(cst(2026, 3, 10, 10, 30));
     expect(sent.sent).toBe(true);
     expect(h.deliverCalls).toHaveLength(1);
 
@@ -376,13 +372,13 @@ describe('tickDeliver · 日期与时段', () => {
     const text = h.deliverCalls[0]?.text ?? '';
     expect(text).toContain('小周');
     expect(text).not.toContain('u_a');
-    expect(text).toContain('不要 @ 任何人');
+    expect(text).toContain('别 @ 人');
     // 提示里把「」脱掉，读起来像一句话而不是引述
     expect(text).toContain('- 小周 最近 3 连败（最近一局 影魔 3/9/4）');
-    expect(text).toContain('挑最多一条最有趣的');
+    expect(text).toContain('锐评一句');
     expect(h.deliverCalls[0]?.groupId).toBe('group-openid-1');
 
-    const again = await h.handle.tickDeliver(cst(2026, 3, 11, 11, 0));
+    const again = await h.handle.tickDeliver(cst(2026, 3, 10, 11, 0));
     expect(again).toEqual({ sent: false, reason: 'already-delivered' });
     expect(h.deliverCalls).toHaveLength(1);
   });
@@ -390,7 +386,7 @@ describe('tickDeliver · 日期与时段', () => {
   it('不在投递时段 → not-deliver-window', async () => {
     const h = preparedHarness();
     await prepare(h);
-    const res = await h.handle.tickDeliver(cst(2026, 3, 11, 9, 0));
+    const res = await h.handle.tickDeliver(cst(2026, 3, 10, 9, 0));
     expect(res.reason).toBe('not-deliver-window');
     expect(h.deliverCalls).toHaveLength(0);
   });
@@ -398,7 +394,7 @@ describe('tickDeliver · 日期与时段', () => {
   it('pickGroup 返回 null → no-group，且不调 deliver', async () => {
     const h = preparedHarness({ pickGroup: () => null });
     await prepare(h);
-    const res = await h.handle.tickDeliver(cst(2026, 3, 11, 10, 30));
+    const res = await h.handle.tickDeliver(cst(2026, 3, 10, 10, 30));
     expect(res).toEqual({ sent: false, reason: 'no-group' });
     expect(h.deliverCalls).toHaveLength(0);
     // 没投出去就不能标已投递
@@ -430,7 +426,7 @@ describe('tickDeliver · 失败重试', () => {
     await prepare(h);
 
     for (let i = 0; i < 3; i += 1) {
-      const res = await h.handle.tickDeliver(cst(2026, 3, 11, 10, i * 5));
+      const res = await h.handle.tickDeliver(cst(2026, 3, 10, 10, i * 5));
       expect(res.sent).toBe(false);
       expect(res.reason).toBe('会话没活着');
       // 每次失败都不能标已投递
@@ -438,7 +434,7 @@ describe('tickDeliver · 失败重试', () => {
     }
     expect(calls).toBe(3);
 
-    const fourth = await h.handle.tickDeliver(cst(2026, 3, 11, 11, 0));
+    const fourth = await h.handle.tickDeliver(cst(2026, 3, 10, 11, 0));
     expect(fourth).toEqual({ sent: false, reason: 'too-many-attempts' });
     // 第 4 次连 deliver 都不调，避免死循环刷日志
     expect(calls).toBe(3);
@@ -446,7 +442,7 @@ describe('tickDeliver · 失败重试', () => {
 });
 
 describe('持久化', () => {
-  it('重启后读回摘要，仍能在次日投递', async () => {
+  it('重启后读回摘要，仍能在当天投递', async () => {
     const dataDir = tmpDir();
     const first = createDotaDigest({
       config: cfg(),
@@ -479,11 +475,11 @@ describe('持久化', () => {
         calls.push(text);
         return { ok: true };
       },
-      now: () => cst(2026, 3, 11, 10, 30),
+      now: () => cst(2026, 3, 10, 10, 30),
     });
 
     expect(second.snapshot().digest?.forDay).toBe(FOR_DAY);
-    const res = await second.tickDeliver(cst(2026, 3, 11, 10, 30));
+    const res = await second.tickDeliver(cst(2026, 3, 10, 10, 30));
     expect(res.sent).toBe(true);
     expect(calls).toHaveLength(1);
 
@@ -555,7 +551,7 @@ describe('跨天去重 · 同人同类 3 天内不重复播', () => {
     const q1 = await h.handle.tickQuery(QUERY_AT);
     expect(q1.ran).toBe(true);
     expect(q1.count).toBe(1);
-    const d1 = await h.handle.tickDeliver(cst(2026, 3, 11, 10, 30));
+    const d1 = await h.handle.tickDeliver(cst(2026, 3, 10, 10, 30));
     expect(d1.sent).toBe(true);
 
     // 第二天：还是 3 连败（换了新败局，但 kind 一样）→ 被去重，不播
@@ -594,7 +590,7 @@ describe('跨天去重 · 同人同类 3 天内不重复播', () => {
       bindings: () => [{ openid: 'o1', alias: '小周', steamId: STEAM_A }],
     });
     await first.handle.tickQuery(QUERY_AT);
-    await first.handle.tickDeliver(cst(2026, 3, 11, 10, 30));
+    await first.handle.tickDeliver(cst(2026, 3, 10, 10, 30));
 
     // 第二天又是 3 连败，且是新鲜战绩（避免被 48h 窗口过滤，确保考的是"去重"而不是"过期"）
     forms[1] = mkForm(1, [

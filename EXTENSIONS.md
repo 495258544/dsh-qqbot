@@ -14,7 +14,7 @@
 |---|---|---|---|
 | Steam 状态 | `src/steam/{settings,bindings,steam-id,steam-api,service,tools,index}.ts` | 查群友在线/在玩什么、好友列表、自助绑定、凭据运行时存储 | 低（上游基本不碰 `src/steam`） |
 | Dota 战绩 | `src/dota/{heroes,heroes-data,opendota,service,tools,index}.ts` | 最近战绩、单场详细解析（经济/对位/目标/曲线/团战） | 低 |
-| 战绩隔夜播报 | `src/persona/dota-digest.ts` | 凌晨查已绑定群友 → 次日 10-12 点发群活跃气氛（3 天内同类不重复） | **中**（在 `src/persona` 下，上游常改） |
+| 战绩播报 | `src/persona/dota-digest.ts` | 每天 10-12 点查最近 24h → 当天发群锐评（3 天内同类不重复） | **中**（在 `src/persona` 下，上游常改） |
 | 群活跃度评分 | `src/features/group-activity.ts` | 按「Dota 相关度」给群打分，决定播报发哪个群 | **中**（`src/features` 上游也动） |
 | 会话枚举 | `src/session/session-manager.ts` 的 `listLiveGroups()` | 列出存活群会话，供选群 | **中**（该文件上游常改） |
 | 群消息埋点 | `src/transport/inbound.ts` 的 `recordGroupActivity(...)` | 只记聚合指标（时间戳/关键词命中/发言者），不留原文 | **中**（该文件上游常改） |
