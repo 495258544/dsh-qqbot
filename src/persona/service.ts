@@ -17,7 +17,7 @@ import { Waker } from './wake.ts';
 import { SelfProfileService } from './self.ts';
 import { VoiceService } from './voice.ts';
 import { SelfNoteService } from './self-note.ts';
-import { runSurfRound, inSurfWindow, type SurfResult } from './surf.ts';
+import { runSurfRound, inSurfWindow, surfTopic, type SurfResult } from './surf.ts';
 import { clockInTz, weekdayInTz, DEFAULT_TZ } from './clock.ts';
 import { Humanizer } from './humanize.ts';
 import { extractFact, extractTrait } from './fact-extract.ts';
@@ -336,6 +336,26 @@ export class PersonaService {
     });
     this.screenWatch.start();
     return this.screenWatch;
+  }
+
+  /**
+   * 按需冲浪（供 qq_browse 工具调用）。
+   *
+   * 与 startSurf 的区别：这是**她主动想查**的时候用，不受 3-7 点时段限制。
+   * 实测事故（2026-11-01）：用户让她"去逛逛"，她没有工具可用，
+   * 结果**编造了具体文章**（"散文吧有篇《修鞋摊子收起来了》"）。
+   * 有了这个入口，她就能真的查，查不到也如实说查不到。
+   */
+  surf(topic: string, opts: { deep?: boolean } = {}): SurfResult | undefined {
+    const t = String(topic ?? '').trim();
+    if (!t) return undefined;
+    try {
+      const r = surfTopic(t, { deep: opts.deep === true, maxFindings: 5 });
+      return r;
+    } catch (err) {
+      this.deps.logger.warn(`persona: 按需冲浪失败 ${err instanceof Error ? err.message : String(err)}`);
+      return undefined;
+    }
   }
 
   /**
