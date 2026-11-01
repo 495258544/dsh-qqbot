@@ -103,7 +103,8 @@ export interface SteamApiOptions {
 }
 
 export class SteamApi {
-  private readonly apiKey: string;
+  /** 可变：key 是运行时数据（存在数据目录里），换 key 不该重建整个 service */
+  private apiKey: string;
   private readonly timeoutMs: number;
 
   constructor({ apiKey, timeoutMs = 8000 }: SteamApiOptions) {
@@ -113,6 +114,16 @@ export class SteamApi {
 
   get configured(): boolean {
     return this.apiKey !== '';
+  }
+
+  /** 运行时换 key（命令行 / 选项面板改了之后即刻生效，不用重启宿主） */
+  setApiKey(apiKey: string): void {
+    this.apiKey = (apiKey ?? '').trim();
+  }
+
+  /** 当前生效的 key（仅用于与数据目录比对判断是否需要换，不要拿去打印） */
+  get currentApiKey(): string {
+    return this.apiKey;
   }
 
   /** 统一 GET + 错误分类 + 超时 */

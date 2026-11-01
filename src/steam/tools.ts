@@ -8,6 +8,9 @@
  *
  * 身份安全：绑定的 key 永远取 SessionRecord.senderId（消息发送者），
  * 不接受模型传 openid —— 否则群里任何人说一句"帮张三绑上"就能篡改别人的绑定。
+ *
+ * 主人账号（qq_steam_owner）只能由主人自己改：它决定了"拉谁的好友列表"，
+ * 群里随便一个人改了就能把整个群友名单指向别人的 Steam 好友。
  */
 import type { Context } from '@deepseek-ai/cordis';
 import type { ContentBlock } from '@deepseek-ai/dsh-llm';
@@ -25,11 +28,25 @@ function senderOf(exec: { agent?: unknown }, manager: SessionManager): string | 
   return manager.findByAgent(exec.agent as DshAgent)?.senderId;
 }
 
+/**
+ * 判断当前发言人能不能改主人账号。
+ *
+ * ownerOpenids 来自 access.c2cAllow（私聊白名单，也就是"主人是谁"）。
+ * 没配白名单时退化为"只在私聊里允许"——群聊里绝不默认放行。
+ */
+function isOwner(exec: { agent?: unknown }, manager: SessionManager, ownerOpenids: string[]): boolean {
+  const record = exec.agent === undefined ? undefined : manager.findByAgent(exec.agent as DshAgent);
+  if (record === undefined) return false;
+  if (ownerOpenids.length > 0) return ownerOpenids.includes(record.senderId);
+  return record.scope === 'c2c';
+}
+
 export function registerSteamTools(
   ctx: Context,
   steam: SteamService,
   manager: SessionManager,
   logger: Logger,
+  ownerOpenids: string[] = [],
 ): void {
   const tools = ctx.get('tools') as ToolsRegistryLike | undefined;
   if (!tools?.register) {
@@ -137,6 +154,86 @@ export function registerSteamTools(
         throw new Error('qq_steam_forget: 取不到当前发言人身份');
       }
       return { removed: steam.unbind(openid) };
+    },
+  });
+
+  // ── qq_steam_owner ────────────────────────────────────────
+  tools.register({
+    name: 'qq_steam_owner',
+    description:
+      '查看或设置主人自己的 Steam 账号——它是「拉好友列表」的起点（Steam 没有按昵称找人的接口，必须有这么一个起点）。'
+      + '不传 account 就是查看当前设置。只有主人本人能改，其他人说也不能改。'
+      + 'account 接受 17 位 SteamID64、个人主页链接、或自定义 ID。',
+    parameters: {
+      type: 'object',
+      properties: {
+        account: {
+          type: 'string',
+          description: '要设成的账号：SteamID64 / 主页链接 / 自定义 ID。留空 = 只查看不改动',
+        },
+      },
+      additionalProperties: false,
+    },
+    output: {
+      schema: {
+        type: 'object',
+        properties: {
+          steamId: { type: 'string' },
+          personaName: { type: 'string' },
+          source: { type: 'string' },
+          file: { type: 'string' },
+          hasKey: { type: 'boolean' },
+          note: { type: 'string' },
+        },
+        required: ['steamId'],
+        additionalProperties: false,
+      },
+      render: (_args: unknown, value: unknown): ContentBlock[] => {
+        const v = value as { personaName?: string; steamId: string; note?: string };
+        const who = v.personaName !== undefined ? `${v.personaName}（${v.steamId}）` : v.steamId;
+        return [{ type: 'text', text: v.note !== undefined ? `${who}。${v.note}` : who }];
+      },
+    },
+    async execute(args: unknown, exec: { signal: AbortSignal; agent?: unknown }): Promise<Record<string, unknown>> {
+      const { account } = args as { account?: string };
+
+      // 查看：谁都能看（这只是"当前用的是哪个账号"，不是凭据）
+      if (account === undefined || account.trim() === '') {
+        const info = steam.ownerInfo();
+        const notes: string[] = [];
+        if (info.steamId === '') {
+          notes.push('还没设主人账号。跟我说一句你的 Steam 主页地址就行，会记住，以后不用再给。');
+        } else if (!info.hasKey) {
+          notes.push('账号已记下，但还没配 API Key，暂时查不到状态。');
+        }
+        return {
+          steamId: info.steamId,
+          source: info.source,
+          file: info.file,
+          hasKey: info.hasKey,
+          ...(notes.length > 0 ? { note: notes.join('') } : {}),
+        };
+      }
+
+      // 修改：只有主人本人
+      const openid = senderOf(exec, manager);
+      if (openid === undefined || openid === '') {
+        throw new Error('qq_steam_owner: 取不到当前发言人身份，无法判断是否有权限修改');
+      }
+      if (!isOwner(exec, manager, ownerOpenids)) {
+        throw new Error('qq_steam_owner: 主人账号只有主人本人能改，请让他在私聊里说');
+      }
+
+      const result = await steam.setOwner(account);
+      logger.info(`steam: 主人账号已改为 ${result.steamId}`);
+      return {
+        steamId: result.steamId,
+        source: 'runtime',
+        file: steam.ownerInfo().file,
+        hasKey: steam.hasKey,
+        ...(result.personaName !== undefined ? { personaName: result.personaName } : {}),
+        ...(result.hint !== undefined ? { note: result.hint } : {}),
+      };
     },
   });
 
@@ -287,6 +384,8 @@ export function registerSteamTools(
           ok: { type: 'boolean' },
           summary: { type: 'string' },
           total: { type: 'integer' },
+          /** 其中已经和 QQ 用户对上号的人数 */
+          boundCount: { type: 'integer' },
           filtered: { type: 'boolean' },
           hint: { type: 'string' },
           friends: {
@@ -299,6 +398,8 @@ export function registerSteamTools(
                 profileUrl: { type: 'string' },
                 state: { type: 'string' },
                 inGame: { type: 'string' },
+                /** 已经绑定时的群内称呼；没有 = 还不知道这人是群里的谁 */
+                boundAs: { type: 'string' },
               },
               required: ['name', 'steamId'],
               additionalProperties: false,
@@ -341,15 +442,24 @@ export function registerSteamTools(
         ...(f.profileUrl !== undefined ? { profileUrl: f.profileUrl } : {}),
         state: f.stateText,
         ...(f.inGame !== undefined ? { inGame: f.inGame } : {}),
+        ...(f.boundAs !== undefined ? { boundAs: f.boundAs } : {}),
       }));
 
+      // 已绑定人数只作为结构化数据返回，不写进 summary：
+      // 群里不是人人都有 Steam 账号，主动念"还有 N 人没对上号"是骚扰，
+      // 绑定一律等对方自己说（qq_steam_bind）。
+      const boundCount = all.filter((f) => f.boundAs !== undefined).length;
       const summary = buildFriendSummary(result.owner, all, shown, filtered, cap);
-      logger.info(`steam: 好友列表 → 共 ${all.length} 人，返回 ${shown.length} 人${filtered ? '（只看游戏中）' : ''}`);
+      logger.info(
+        `steam: 好友列表 → 共 ${all.length} 人（已绑定 ${boundCount} 人），返回 ${shown.length} 人`
+        + `${filtered ? '（只看游戏中）' : ''}`,
+      );
 
       return {
         ok: result.ok,
         summary,
         total: all.length,
+        boundCount,
         filtered,
         friends,
         ...(result.hint !== undefined ? { hint: result.hint } : {}),
@@ -357,7 +467,7 @@ export function registerSteamTools(
     },
   });
 
-  logger.info('im-qqbot: Steam 工具已注册（qq_steam_bind / qq_steam_forget / qq_steam_lookup / qq_steam_friends）');
+  logger.info('im-qqbot: Steam 工具已注册（qq_steam_bind / qq_steam_forget / qq_steam_lookup / qq_steam_friends / qq_steam_owner）');
 }
 
 /** 好友列表的摘要：先按「正在玩 / 在线 / 离线」分层，模型最常直接复述这段 */

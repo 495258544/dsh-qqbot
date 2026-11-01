@@ -16,6 +16,7 @@ import path from 'node:path';
 import type { SteamConfig } from '../config.ts';
 import type { Logger } from '../types.ts';
 import { BindingStore, type BindingHit } from './bindings.ts';
+import { SettingsStore } from './settings.ts';
 import { SteamApi, SteamApiError, type PlayerSummary, type RecentGame } from './steam-api.ts';
 import { parseSteamInput, steam64ToSteam2, steamProfileUrl, isSteamId64 } from './steam-id.ts';
 
@@ -78,6 +79,11 @@ export interface FriendEntry {
   inGame?: string;
   /** 1 = 资料不可见，3 = 公开 */
   visibility: number;
+  /**
+   * 这个人已经和哪个 QQ 用户对上号了（绑定表里的称呼）。
+   * 空 = 好友里有他，但群里还不知道是谁 —— 这正是"新朋友"要靠自助绑定补上的缺口。
+   */
+  boundAs?: string;
 }
 
 export interface FriendListResult {
@@ -85,9 +91,23 @@ export interface FriendListResult {
   /** 被查的那个人（好友列表的起点） */
   owner?: FriendEntry;
   friends: FriendEntry[];
+  /** 好友里已经和 QQ 用户对上号的人数 */
+  boundCount?: number;
   error?: { kind: string; message: string };
   /** 面向模型的行动建议（如引导改隐私设置） */
   hint?: string;
+}
+
+/** 主人账号的当前状态（qq_steam_owner 回执用） */
+export interface OwnerInfo {
+  steamId: string;
+  /** config = 从插件选项采纳；runtime = 命令行/聊天里设定的；none = 还没设 */
+  source: 'config' | 'runtime' | 'none';
+  /** 落盘位置，方便备份/迁移 */
+  file: string;
+  /** 是否已配置 API Key（决定能不能真的查到东西） */
+  hasKey: boolean;
+  updatedAt?: number;
 }
 
 interface CacheEntry<T> {
@@ -105,6 +125,8 @@ export class SteamService {
   private readonly logger: Logger;
   private readonly api: SteamApi;
   readonly bindings: BindingStore;
+  /** 凭据与主人账号：跟着数据目录走，插件选项只做一次性采纳 */
+  readonly settings: SettingsStore;
 
   /** 只存真实结果。"查不到"走 missingCache，避免两种 TTL 互相遮蔽 */
   private readonly summaryCache = new Map<string, CacheEntry<PlayerSummary>>();
@@ -129,7 +151,6 @@ export class SteamService {
   constructor({ config, logger }: { config: SteamConfig; logger: Logger }) {
     this.config = config;
     this.logger = logger;
-    this.api = new SteamApi({ apiKey: config.apiKey, timeoutMs: config.timeoutMs });
 
     const dir = config.dataDir !== ''
       ? path.resolve(config.dataDir)
@@ -138,13 +159,86 @@ export class SteamService {
     this.bindings = new BindingStore(dir, logger);
     this.bindings.syncFromConfig(config.friends);
 
+    // 先结算凭据：插件选项里的值只在「和上次消费过的不同」时采纳一次，
+    // 之后一切增删改都落在这个文件里，改 key / 换账号都不必再动 profile。
+    this.settings = new SettingsStore(dir, logger);
+    this.settings.applyConfig({ ownerSteamId: config.ownerSteamId, apiKey: config.apiKey });
+    this.api = new SteamApi({ apiKey: this.settings.apiKey, timeoutMs: config.timeoutMs });
+
     if (!this.api.configured) {
       logger.warn('steam: 未配置 apiKey —— Steam 工具会提示用户去申请，绑定表仍可用');
     } else {
-      logger.info(`steam: 已就绪（绑定 ${this.bindings.size()} 人，数据目录 ${dir}）`);
+      logger.info(
+        `steam: 已就绪（绑定 ${this.bindings.size()} 人，数据目录 ${dir}`
+        + `${this.settings.ownerSteamId !== '' ? `，主人账号 ${this.settings.ownerSteamId}` : '，主人账号未设置'}）`,
+      );
       // 预热一次快照，让第一轮对话就有内容；失败静默（没有 key 之外的错误大多可自愈）
       void this.refreshSnapshot().catch(() => {});
     }
+  }
+
+  /**
+   * 把数据目录里的 key 同步给 API 客户端。
+   *
+   * 命令行脚本（另一个进程）改了 key 之后，这里靠 SettingsStore 的 mtime 热重读
+   * 能立刻看到新值 —— 用户不必重启宿主。
+   */
+  private syncApiKey(): void {
+    const key = this.settings.apiKey;
+    if (key !== this.api.currentApiKey) this.api.setApiKey(key);
+  }
+
+  // ── 主人账号 / 凭据 ─────────────────────────────────────────
+
+  /** 当前主人账号（没有则 steamId 为空串） */
+  ownerInfo(): OwnerInfo {
+    this.syncApiKey();
+    const s = this.settings.get();
+    return {
+      steamId: s.ownerSteamId,
+      source: s.ownerSteamId === '' ? 'none' : (s.ownerSource ?? 'runtime'),
+      file: this.settings.filePath,
+      hasKey: this.api.configured,
+      ...(s.ownerUpdatedAt !== undefined ? { updatedAt: s.ownerUpdatedAt } : {}),
+    };
+  }
+
+  /**
+   * 设定主人账号（聊天里说一句就改，不用碰 YAML）。
+   *
+   * 接受一切 parseSteamInput 支持的形态，vanity 会就地解析成 SteamID64 ——
+   * 只有 ID64 才落盘，因为 vanity 随时可能被对方改掉。
+   */
+  async setOwner(account: string): Promise<{ steamId: string; personaName?: string; hint?: string }> {
+    this.syncApiKey();
+    const raw = account.trim();
+    if (raw === '') throw new Error('setOwner: 账号不能为空');
+    const steamId = await this.resolveOneSteamId(raw);
+    this.settings.setOwner(steamId, 'runtime');
+
+    let personaName: string | undefined;
+    let hint: string | undefined;
+    if (this.api.configured) {
+      try {
+        const summary = (await this.summaries([steamId])).get(steamId);
+        personaName = summary?.personaName;
+      } catch {
+        // 查昵称只是确认用，失败不影响写入
+      }
+      try {
+        // 顺手验证一次好友列表能不能拉到 —— 拉不到通常是隐私没开，早知道比晚知道好
+        await this.api.getFriendList(steamId);
+      } catch (err) {
+        if (err instanceof SteamApiError && err.kind === 'friendlist-private') {
+          hint =
+            '这个账号的「好友列表」不是公开的（Steam 返回 401）。去 Steam → 个人资料 → 编辑个人资料 → '
+            + '隐私设置，把「好友列表」改成「公开」，否则查不到好友。';
+        }
+      }
+    } else {
+      hint = '还没配 API Key，账号已记下，但暂时查不了状态。';
+    }
+    return { steamId, ...(personaName !== undefined ? { personaName } : {}), ...(hint !== undefined ? { hint } : {}) };
   }
 
   get enabled(): boolean {
@@ -314,6 +408,7 @@ export class SteamService {
    * 用 Gabe Newell 的公开账号作探针：资料公开、永远在线、不涉及任何群友。
    */
   async selfCheck(): Promise<void> {
+    this.syncApiKey();
     if (!this.api.configured) {
       this.logger.info('steam: 未配置 apiKey，跳过连通性自检（绑定/解析仍可用，查询不可用）');
       return;
@@ -364,14 +459,15 @@ export class SteamService {
       };
     }
 
-    // 确定起点账号
-    const raw = (input ?? '').trim() || this.config.ownerSteamId.trim();
+    this.syncApiKey();
+    // 确定起点账号：参数优先，其次用运行时存的主人账号
+    const raw = (input ?? '').trim() || this.settings.ownerSteamId;
     if (raw === '') {
       return {
         ok: false,
         friends: [],
-        error: { kind: 'no-owner', message: '还不知道要查谁的好友列表：没有配置 ownerSteamId，也没有指定账号' },
-        hint: '把你的 SteamID64 或主页链接填进 config.steam.ownerSteamId，或直接说一个账号让我查',
+        error: { kind: 'no-owner', message: '还不知道要查谁的好友列表：还没设主人账号，也没有指定账号' },
+        hint: '跟我说一句你的 Steam 主页地址（或者 SteamID64）就行，会存下来，以后不用再给。',
       };
     }
 
@@ -411,6 +507,16 @@ export class SteamService {
     const ids = records.map((r) => r.steamId);
     const summaries = ids.length > 0 ? await this.summaries(ids) : new Map<string, PlayerSummary>();
 
+    // 反向索引：SteamID64 → 群里怎么称呼他。绑定表是"谁是谁"的唯一真相，
+    // 有了它，好友列表才能直接回答"这个好友在群里叫什么"。
+    const boundBySteamId = new Map<string, string>();
+    for (const { openid, binding } of this.bindings.list()) {
+      // 同一个人被多人绑（不该发生但防一手）：先登记的优先，不覆盖
+      if (!boundBySteamId.has(binding.steamId)) {
+        boundBySteamId.set(binding.steamId, binding.alias !== undefined && binding.alias !== '' ? binding.alias : openid);
+      }
+    }
+
     const friends: FriendEntry[] = records.map((r) => {
       const s = summaries.get(r.steamId);
       const entry: FriendEntry = {
@@ -422,6 +528,8 @@ export class SteamService {
       };
       if (s?.profileUrl !== undefined) entry.profileUrl = s.profileUrl;
       if (s?.gameName !== undefined) entry.inGame = s.gameName;
+      const boundAs = boundBySteamId.get(r.steamId);
+      if (boundAs !== undefined) entry.boundAs = boundAs;
       return entry;
     });
 
@@ -472,6 +580,7 @@ export class SteamService {
   }
 
   async lookup(options: SteamLookupOptions = {}): Promise<SteamLookupResult> {
+    this.syncApiKey();
     if (!this.config.enabled) {
       return { ok: false, people: [], error: { kind: 'disabled', message: 'Steam 功能未启用（config.steam.enabled=false）' } };
     }
@@ -609,6 +718,7 @@ export class SteamService {
 
   /** 刷新快照：只拉摘要（1 次调用覆盖所有人），只保留"正在玩游戏"的人 */
   async refreshSnapshot(): Promise<string[]> {
+    this.syncApiKey();
     if (this.refreshing !== undefined) return this.refreshing;
     if (!this.api.configured || this.bindings.size() === 0 || !this.config.proactiveEnabled) return [];
 

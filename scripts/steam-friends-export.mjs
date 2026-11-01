@@ -2,12 +2,17 @@
 /**
  * 导出 Steam 好友列表为可填写的表格
  * ─────────────────────────────────────────────────────────────
- * 用途：把「Steam 好友」和「QQ 群里的人」对上号。
- *       QQ 和 Steam 之间没有任何自动关联手段，只能人工填一次。
+ * 用途：把「Steam 好友」一次性列出来，方便你人工核对"这个好友是群里的谁"。
+ *
+ * 它只是**排查对照用的导出**，不是绑定输入：
+ *   真正的绑定请在 QQ 群里让对方说一句自己的 Steam 主页（自动写入绑定表），
+ *   这样以后加新朋友也不用维护任何清单。
+ * 主人账号和 API Key 都从数据目录 ~/.dsh-qqbot/steam/settings.json 读；
+ * 想改请用 scripts/steam-config.mjs，不要去改 cordis.patch.yml。
  *
  * 用法：
- *   node scripts/steam-friends-export.mjs                  # 用 config 里的 ownerSteamId
- *   node scripts/steam-friends-export.mjs 7656119xxxxxxxxxx  # 指定起点账号
+ *   node scripts/steam-friends-export.mjs                  # 用 settings.json 里的主人账号
+ *   node scripts/steam-friends-export.mjs 7656119xxxxxxxxxx  # 临时指定起点账号
  *   node scripts/steam-friends-export.mjs --out D:/x.txt
  *
  * 输出（默认写到 ~/steam-friends.txt，同时生成同名 .tsv）：
@@ -59,6 +64,23 @@ function readSteamConfig() {
   return out;
 }
 
+/**
+ * 读运行时设置（数据目录里的 settings.json）。
+ * 这才是生效值：插件选项只在首次采纳时用一次，之后一切以这里为准。
+ */
+function readRuntimeSettings() {
+  const out = { apiKey: '', ownerSteamId: '' };
+  try {
+    const p = path.join(homedir(), '.dsh-qqbot', 'steam', 'settings.json');
+    const parsed = JSON.parse(readFileSync(p, 'utf8'));
+    if (typeof parsed.apiKey === 'string') out.apiKey = parsed.apiKey.trim();
+    if (typeof parsed.ownerSteamId === 'string') out.ownerSteamId = parsed.ownerSteamId.trim();
+  } catch {
+    // 没有就留空，交给 cordis.patch.yml 兜底
+  }
+  return out;
+}
+
 function parseArgs(argv) {
   const args = { steamId: '', out: '' };
   for (let i = 0; i < argv.length; i += 1) {
@@ -93,17 +115,21 @@ const stateText = (s) => (s.gameName !== undefined ? `正在玩 ${s.gameName}` :
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
+  const runtime = readRuntimeSettings();
   const cfg = readSteamConfig();
-  const apiKey = cfg.apiKey;
-  const steamId = args.steamId || cfg.ownerSteamId;
+  // 数据目录优先，插件选项兜底（它只在首次采纳时有用）
+  const apiKey = runtime.apiKey !== '' ? runtime.apiKey : cfg.apiKey;
+  const steamId = args.steamId || (runtime.ownerSteamId !== '' ? runtime.ownerSteamId : cfg.ownerSteamId);
 
   if (apiKey === '') {
-    console.error('✗ 没有找到 Steam Web API Key。请先填 profile 的 cordis.patch.yml → steam.apiKey');
+    console.error('✗ 没有找到 Steam Web API Key。');
+    console.error('  设置：node scripts/steam-config.mjs --key 你的Key');
+    console.error('  （也可以先填 cordis.patch.yml 的 steam.apiKey，插件启动时会采纳一次）');
     process.exit(1);
   }
   if (steamId === '') {
     console.error('✗ 没指定起点账号。用法：node scripts/steam-friends-export.mjs 7656119xxxxxxxxxx');
-    console.error('  （或把它写进 cordis.patch.yml 的 steam.ownerSteamId）');
+    console.error('  设置：node scripts/steam-config.mjs --owner 你的Steam主页地址');
     process.exit(1);
   }
   if (!/^\d{17}$/.test(steamId)) {
