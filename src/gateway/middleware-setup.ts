@@ -136,15 +136,15 @@ export function setupMiddlewares(
   //     /stop /new 回归）、附件不下载（成本翻倍）一并归零。
   //     依赖：mentionGate(5) 的 ctx.state.mention、contentSanitizer(6) 的清洗文本。
   if (manager.persona) {
-    bot.use(personaWakeGate(manager.persona, logger, {
+    const persona = manager.persona;
+    bot.use(personaWakeGate(persona, logger, {
       fromBotAtMeAllowed: config.persona.fromBotAtMeAllowed,
-      // Steam 绑定表里的群昵称（小周/芋头/混沌尽散…）：人格记忆只认识"跟她说过话的人"，
-      // 没说过话的群友不在里面，而群里是会直呼昵称的。缺了这份名字，
-      // 「芋头你今晚打不打」就会被判成省略主语的问句，被她抢着接。
-      // 群友的称呼，两个来源：
-      //   1. 配置里的 persona.otherNames —— 没绑 Steam 的群友也能填，纯粹"这是别人"；
-      //   2. Steam 绑定表 alias —— 已绑定的人自动算进来（一个 alias 可用「、」写多个叫法）。
-      extraNames: () => [
+      // 群友的称呼，三个来源：
+      //   1. runtime.json 的 otherNames —— 改完即时生效，加名字不用重启；
+      //   2. 配置里的 persona.otherNames —— 没绑 Steam 的群友也能填；
+      //   3. Steam 绑定表 alias —— 已绑定的人自动算进来（一个 alias 可用「、」写多个叫法）。
+      extraNames: () => [...new Set([
+        ...persona.runtime.otherNames(),
         ...(config.persona.otherNames ?? []),
         ...(steam === undefined
           ? []
@@ -152,7 +152,7 @@ export function setupMiddlewares(
             .flatMap((b) => String(b.binding.alias ?? '').split(/[、,，/]/))
             .map((n) => n.trim())
             .filter((n) => n !== '')),
-      ],
+      ])],
     }));
   }
 

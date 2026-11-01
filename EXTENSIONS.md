@@ -61,3 +61,45 @@ persona:
 |---|---|
 | `extensions-20261101` | 本轮扩展清单与合并上游（20 提交）后的状态 |
 | `backup-before-upstream-20261101` | 合并前的安全点 |
+
+## 五、改完要不要重启
+
+原则：**数据即时生效，代码和启动配置才需要重启**。目标是日常调整（加人、改称呼、换词）都不用停 bot。
+
+| 改什么 | 文件 | 生效方式 |
+|---|---|---|
+| 绑 Steam（加人/解绑/改称呼） | `~/.dsh-qqbot/steam/bindings.json` | **立即**（按 mtime 热重读） |
+| Steam Key / 主人账号 | `~/.dsh-qqbot/steam/settings.json` | **立即** |
+| 她的名字、关键词、群友称呼 | `<personaDataDir>/runtime.json` | **立即** |
+| 她接受的称呼 / 兴趣 / 话痨度 | `<personaDataDir>/self.json` | **立即** |
+| 群友昵称记忆 | `<personaDataDir>/memory/people.json` | **立即**（30s 缓存） |
+| profile 里其它配置（时段、概率、开关） | `~/.dsh/profiles/web/cordis.patch.yml` | 重启 |
+| 插件代码 | `src/` + `lib/` | 重启 |
+
+`<personaDataDir>` 一般是 `~/.dsh-qqbot/persona/app-<appId>/`。
+
+### runtime.json 怎么用
+
+改 profile 要重启，但「她叫什么」「群里都有谁」「哪些词该接」这三样变得最勤，所以单独放到数据目录：
+
+```json
+{
+  "names": ["小深", "阿深"],
+  "keywords": ["打刀", "开黑"],
+  "otherNames": ["刘宗锴"]
+}
+```
+
+语义是**追加**：profile 里那份是基线，这里只往上加，两边不用惦记对方。
+写坏了会降级为空并记一条 warn，不会让她变哑巴。
+
+改完不用做任何事，下一轮对话就按新的来。想加个人：
+
+```bash
+node -e "const p='<personaDataDir>/runtime.json';const fs=require('fs');const j=fs.existsSync(p)?JSON.parse(fs.readFileSync(p,'utf8')):{};j.otherNames=[...new Set([...(j.otherNames||[]),'某某'])];fs.writeFileSync(p,JSON.stringify(j,null,2))"
+```
+
+### 为什么代码改不了
+
+插件没有加载器级的热重载（`fs.watch` + 重新 `import`），改 `lib/*.js` 只能重启宿主。
+真要频繁改代码，就在开发时用 `dsh web` 前台跑，改完手动重启那一个进程，不影响 DSH NEXT。

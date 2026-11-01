@@ -286,6 +286,20 @@ export class Waker {
     return dyn && dyn.length > 0 ? [...new Set([...this.names, ...dyn])] : this.names;
   }
 
+  /** 关键词提供者（runtime.json 里随时能加，不用重启） */
+  private keywordsProvider?: () => string[];
+
+  /** 注入动态关键词来源 */
+  setKeywordsProvider(fn: () => string[]): void {
+    this.keywordsProvider = fn;
+  }
+
+  /** 当前生效的关键词（配置词 ∪ 动态词） */
+  private currentKeywords(): string[] {
+    const dyn = this.keywordsProvider?.();
+    return dyn && dyn.length > 0 ? [...new Set([...this.keywords, ...dyn])] : this.keywords;
+  }
+
   /** 注入兴趣上下文来源（SelfProfileService 接入用） */
   setInterestProvider(fn: () => InterestContext | undefined): void {
     this.interestProvider = fn;
@@ -472,7 +486,7 @@ export class Waker {
       if (!namedMe) return { wake: false, reason: 'at-other' };
     }
 
-    const kw = [...(c.keywords ?? []), ...this.keywords];
+    const kw = [...(c.keywords ?? []), ...this.currentKeywords()];
     if (kw.length) {
       const hit = kw.find((k) => k && text.includes(k));
       if (hit) return { wake: true, reason: 'keyword:' + hit };
