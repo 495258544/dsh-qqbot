@@ -23,6 +23,7 @@ import {
 import type { ImQQBotConfig } from '../config.ts';
 import type { SessionManager } from '../session/index.ts';
 import type { Logger } from '../types.ts';
+import type { SteamService } from '../steam/service.ts';
 import { buildCommandList } from '../commands/index.ts';
 import { attributionRecorder } from '../middleware/attribution-recorder.ts';
 import { attachmentProcessor } from '../middleware/attachment.ts';
@@ -35,6 +36,8 @@ export function setupMiddlewares(
   config: ImQQBotConfig,
   manager: SessionManager,
   logger: Logger,
+  /** 可选：用于把绑定表里的群昵称补进"别人名字"表（唤醒判定用） */
+  steam?: Pick<SteamService, 'bindings'>,
 ): void {
   // 1. 错误兜底（最外层洋葱皮）
   bot.use(errorHandler());
@@ -135,6 +138,14 @@ export function setupMiddlewares(
   if (manager.persona) {
     bot.use(personaWakeGate(manager.persona, logger, {
       fromBotAtMeAllowed: config.persona.fromBotAtMeAllowed,
+      // Steam 绑定表里的群昵称（小周/芋头/混沌尽散…）：人格记忆只认识"跟她说过话的人"，
+      // 没说过话的群友不在里面，而群里是会直呼昵称的。缺了这份名字，
+      // 「芋头你今晚打不打」就会被判成省略主语的问句，被她抢着接。
+      extraNames: steam === undefined
+        ? undefined
+        : () => steam.bindings.list()
+          .map((b) => b.binding.alias ?? '')
+          .filter((n) => n !== ''),
     }));
   }
 
