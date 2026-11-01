@@ -72,7 +72,17 @@ function logWakeDbg(sp: string, key: string, msg: any, decision: any, extra: str
 export function personaWakeGate(
   persona: PersonaService,
   logger: Logger,
-  opts: { fromBotAtMeAllowed?: boolean } = {},
+  opts: {
+    fromBotAtMeAllowed?: boolean;
+    /**
+     * 额外的人名表（Steam 绑定表里的群昵称）。
+     *
+     * 人格记忆只认得「跟她说过话的人」，没说过话的群友（比如芋头、春雪一号）
+     * 不在里面。但他们在群里是会互相直呼昵称的，缺了这些名字，
+     * 「芋头你今晚打不打」就会被她当成省略主语的问句抢着接。
+     */
+    extraNames?: () => string[];
+  } = {},
 ): Middleware {
   const fromBotAtMeAllowed = opts.fromBotAtMeAllowed !== false;
   return async (ctx: MiddlewareContext, next: () => Promise<void>): Promise<void> => {
@@ -147,6 +157,8 @@ export function personaWakeGate(
             isAtMe: ctx.state.mention?.wasMentioned === true,
             // @ 了别人 → 活跃期内也不该抢话（详见 mentionsOtherPeople 的注释）
             atSomeoneElse: mentionsOtherPeople(msg.content ?? '', ctx.state.mention?.wasMentioned === true),
+            // 群友的昵称（带 30s 缓存 + 绑定表补全）：用来识别"这句话是在叫别人"
+            otherNames: [...persona.memory.knownNames(), ...(opts.extraNames?.() ?? [])],
             // 活跃期内按概率接话，避免变成应答器
             inActiveWindow: waker.isSpeakerActive(key, msg.senderId),
           })

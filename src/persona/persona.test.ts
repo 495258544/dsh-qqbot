@@ -577,3 +577,63 @@ describe('Waker · @ 别人的消息不抢话（活跃对话期内）', () => {
     expect(d.reason).not.toBe('active-window:at-other');
   });
 });
+
+describe('Waker · 潜水期也不该抢别人 @ 的话', () => {
+  const mk = () => new Waker({ names: ['小深'], keywords: ['打刀', '开黑'], probability: 0, chimeInProbability: 0 });
+  const OTHER = '<@E102DAA44B3A34A6821AFA9C147EAD09>';
+
+  it('@ 别人 + 命中关键词 → 不醒', () => {
+    const w = mk();
+    const d = w.shouldWake({ key: 'group:g', userId: 'A', text: `${OTHER} 今晚打刀吗`, atSomeoneElse: true });
+    expect(d.wake).toBe(false);
+    expect(d.reason).toBe('at-other');
+  });
+
+  it('没 @ 别人时，关键词照常触发（证明没误伤正常接话）', () => {
+    const w = mk();
+    const d = w.shouldWake({ key: 'group:g', userId: 'A', text: '今晚打刀吗' });
+    expect(d.wake).toBe(true);
+    expect(d.reason).toContain('keyword');
+  });
+
+  it('@ 别人但同时点了她的名 → 仍然接（走 name 分支）', () => {
+    const w = mk();
+    const d = w.shouldWake({ key: 'group:g', userId: 'A', text: `${OTHER} 小深今晚打刀吗`, atSomeoneElse: true });
+    expect(d.wake).toBe(true);
+    expect(d.reason).toContain('name');
+  });
+});
+
+describe('Waker · 直呼群友昵称也算"在叫别人"', () => {
+  const mk = () => new Waker({ names: ['小深'], probability: 0, idleDiveThreshold: 5, chimeInProbability: 0 });
+
+  it('活跃期内叫别人的昵称（没有 @、没有她）→ 不抢话', () => {
+    const w = mk();
+    const k = 'group:g';
+    w.wake(k, 'A');
+    const d = w.shouldWake({
+      key: k,
+      userId: 'A',
+      text: '芋头你今晚打刀吗',
+      inActiveWindow: w.isSpeakerActive(k, 'A'),
+      otherNames: ['芋头', '小周', '春雪一号'],
+    });
+    expect(d.wake).toBe(false);
+    expect(d.reason).toBe('active-window:excluded');
+  });
+
+  it('别的昵称里含有她的名字时，不算"别人"（避免把她自己也排掉）', () => {
+    const w = mk();
+    const k = 'group:g';
+    w.wake(k, 'A');
+    const d = w.shouldWake({
+      key: k,
+      userId: 'A',
+      text: '小深你今晚打刀吗',
+      inActiveWindow: w.isSpeakerActive(k, 'A'),
+      otherNames: ['小深'],   // 名字表里混进了她自己
+    });
+    expect(d.wake).toBe(true);
+    expect(d.reason).not.toBe('active-window:excluded');
+  });
+});

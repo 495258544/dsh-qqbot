@@ -140,7 +140,7 @@ export async function bootstrapGateway(
   logger.info(`QQBot SDK initialized (UA: ${userAgent})`);
 
   // ── 中间件链 ──
-  setupMiddlewares(bot, config, manager, logger);
+  setupMiddlewares(bot, config, manager, logger, steam);
 
   // ── 入站：经过中间件链后的消息交给 dsh agent ──
   bot.on('message', async (mCtx: MiddlewareContext) => {

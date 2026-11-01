@@ -68,6 +68,14 @@ export interface WakeMessage {
    */
   atSomeoneElse?: boolean;
   /**
+   * 已知的其他群友昵称（由门控从人格记忆里取）。
+   *
+   * 用来判「这句话是不是在叫别人」：群友之间会直呼昵称（"芋头你今天打不打"），
+   * 没有 @ 也没有"你"，光看句式判不出来。原来这里填的是 owner 的 openid，
+   * 正文里永远不会出现，等于这条保护没生效过。
+   */
+  otherNames?: string[];
+  /**
    * 这条消息引用的原文（已去噪的正文）。
    *
    * 为什么要单独传：有人引用她说过的话，说明她的发言本身成了话题中心，
@@ -307,12 +315,27 @@ export class Waker {
    */
   private addresseeContext(
     c: WakeConfig,
-    uid: string,
     ownsWindow: boolean,
+    extraOtherNames?: string[],
   ): { names: string[]; otherNames: string[]; botSpokeLast?: boolean; inConversationWithMe?: boolean; sameSpeakerAsLast?: boolean } {
+    const mine = this.currentNames();
+    // 别人的名字有两份来源：
+    //   1. 配置里的 speakerIds —— 语义上主要是"这些人说话必醒"，但历史上也当名字表用过
+    //      （测试里塞的是 '老张' 这种昵称），保留兼容，反正 openid 不会在正文里出现；
+    //   2. 人格记忆里见过的群友昵称 —— 门控传入，这才是真正管用的那份。
+    // 剔掉她自己的名字：否则同一个词既算"点她"又算"点别人"，正负抵消。
+    const candidates = [
+      ...(c.speakerIds ?? []).map(String),
+      ...(extraOtherNames ?? []),
+    ];
+    const otherNames = [...new Set(
+      candidates
+        .map((n) => String(n ?? '').trim())
+        .filter((n) => n !== '' && !mine.includes(n)),
+    )];
     return {
-      names: this.currentNames(),
-      otherNames: (c.speakerIds ?? []).map(String).filter((x) => x !== uid),
+      names: mine,
+      otherNames,
       inConversationWithMe: ownsWindow,
       sameSpeakerAsLast: ownsWindow && (c.lastWakeAt ?? 0) > 0,
     };
@@ -362,7 +385,7 @@ export class Waker {
       // 兴趣匹配用 probe（含引文）：别人引用她说过的话，引文本身可能就是她的兴趣话题
       const it = this.matchInterest(probe);
       const q = detectQuestion(text);
-      const addr = detectAddressee(text, this.addresseeContext(c, uid, ownsWindow));
+      const addr = detectAddressee(text, this.addresseeContext(c, ownsWindow, msg.otherNames));
 
       let wake = false;
       let reason = '';
@@ -440,6 +463,15 @@ export class Waker {
       if (hit) return { wake: true, reason: 'name:' + hit };
     }
 
+    // @ 了别人 → 这句是冲那个人说的，别因为命中关键词就插进来。
+    // 用户明确要求：`@张三 今晚打刀吗` 这类不该被她接。
+    // 例外是正文里点了她的名（"@张三 小深你说呢"）——那是把她也叫上了，
+    // 所以这里不能直接 return，得先确认没点她。
+    if (msg.atSomeoneElse === true) {
+      const namedMe = this.currentNames().some((n) => n && text.includes(n));
+      if (!namedMe) return { wake: false, reason: 'at-other' };
+    }
+
     const kw = [...(c.keywords ?? []), ...this.keywords];
     if (kw.length) {
       const hit = kw.find((k) => k && text.includes(k));
@@ -462,7 +494,7 @@ export class Waker {
     // 「吃了吗」「在干嘛」「忙不忙」全漏）。这里更严：只有**确实像在问她**才醒。
     if (c.question) {
       const q = detectQuestion(text);
-      const addr = detectAddressee(text, this.addresseeContext(c, uid, false));
+      const addr = detectAddressee(text, this.addresseeContext(c, false, msg.otherNames));
       if (q.isQuestion && !addr.excluded && (addr.explicit || addr.score >= 0.4)) {
         return { wake: true, reason: `question(${q.score.toFixed(2)}${addr.explicit ? ',explicit' : ''})` };
       }
