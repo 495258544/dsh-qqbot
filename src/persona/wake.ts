@@ -73,6 +73,13 @@ export interface WakeMessage {
 export interface InterestContext {
   /** 兴趣词 -> 权重(0~1) */
   interests: Array<{ topic: string; weight: number }>;
+  /**
+   * 她讨厌的话题 -> 强度(0~1)。命中会**降**唤醒概率（M30）。
+   *
+   * 为什么是"降概率"而不是"不提"：人不会因为讨厌就不说话，
+   * 只是会**明显懒得开口**。做成硬否决会让她在群里显得像坏了。
+   */
+  dislikes?: Array<{ topic: string; weight: number }>;
   /** 话痨度 0~1，被嫌吵会降低 */
   chattiness: number;
   /** 兴趣命中时的基础唤醒概率（默认 0.5） */
@@ -278,6 +285,10 @@ export class Waker {
   /**
    * 兴趣匹配：返回命中的兴趣及综合权重。
    * 权重 = Σ(命中兴趣的 weight)，再按话痨度折算。
+   *
+   * M30：厌恶在**这里**做减法。
+   * 为什么不塞进 prompt 说一句"你不喜欢X"——那样模型只会照着演，不会真变沉默；
+   * 接在概率公式上，她才是**真的**懒得开口。这是"情绪要接在有返回值的闸门上"的实例。
    */
   matchInterest(text: string): { hit: boolean; topics: string[]; probability: number } {
     const ctx = this.interestProvider?.();
@@ -289,7 +300,12 @@ export class Waker {
     const sumWeight = Math.min(1, hits.reduce((a, b) => a + b.weight, 0));
     const base = ctx.baseProbability ?? 0.5;
     // 被嫌吵后 chattiness 降低，接话概率同步下降
-    const probability = Math.max(0, Math.min(1, ctx.chattiness * sumWeight * base));
+    const raw = ctx.chattiness * sumWeight * base;
+    // 厌恶惩罚：最多打到 4 折（不归零 —— 讨厌的话题也可能正是她想吐槽的）
+    const aversion = Math.min(1, (ctx.dislikes ?? [])
+      .filter((d) => d.weight > 0 && matchesTopic(text, d.topic))
+      .reduce((a, b) => a + b.weight, 0));
+    const probability = Math.max(0, Math.min(1, raw * (1 - 0.6 * aversion)));
     return { hit: true, topics: hits.map((h) => h.topic), probability };
   }
 

@@ -103,6 +103,17 @@ export interface WishRequest {
 export interface SelfProfile {
   names: SelfName[];
   interests: SelfInterest[];
+  /**
+   * 她**讨厌**什么（M30）。
+   *
+   * 为什么要独立成一列，而不是给 interests 加负权重：
+   * 现有强化是饱和式 `s ← s + α(1-s)`，这是**单调递增**函数 ——
+   * 负数喂进去会得到 `s=-0.5 → -0.5+0.05*1.5 = -0.425`，
+   * 也就是「越提越不讨厌」。负权重在这个模型里从数学上就是错的。
+   * 所以要的是**结构完全同构、符号相反**的另一列：
+   * 一样用 `s ← s + α(1-s)`，只是它影响的方向反过来（降唤醒概率）。
+   */
+  dislikes: SelfInterest[];
   engagement: SelfEngagement;
   screenWatch: SelfScreenWatch;
   /** 自主冲浪：上次活动时间 */
@@ -125,8 +136,22 @@ const ACCESS_COOLDOWN_MS = 60 * 60 * 1000;
 const EVIDENCE_STRENGTH = 1.0;
 /** 活跃兴趣上限（Reddit 研究：人的活跃兴趣数量极少） */
 const MAX_ACTIVE_INTERESTS = 5;
+/** 活跃厌恶上限（讨厌的东西人记得更牢，但同样不该有几百条） */
+const MAX_ACTIVE_DISLIKES = 5;
 /** 兴趣上限 */
 const MAX_INTEREST_WEIGHT = 1.0;
+
+// ───────────── 厌恶参数（M30）─────────────
+//
+// 与兴趣的**唯一**差别是半衰期：厌恶比喜好更持久。
+// 这个数字不是读来的（MaiBot/fish-memory 都只有一套参数，没有按极性分档的先例），
+// 是按「人对负面体验的记忆更久」这条常识定的，属于可调参数。
+/** 厌恶衰减半衰期：72 小时（兴趣是 24 小时） */
+const DISLIKE_HALF_LIFE_MS = 72 * 3600_000;
+/** 厌恶饱和强化系数（比 ACCESS 的 0.05 大：一次明确的"我讨厌X"比一次提及分量重） */
+const ALPHA_DISLIKE = 0.35;
+/** 因讨厌被强提到嗓子眼时的降温速率（乘性，见 dampenInterest 的注释） */
+const DAMPEN_RATE = 0.15;
 /** 称呼被叫多少次才进入"候选"（还需她表态接受） */
 const NAME_ACCEPT_THRESHOLD = 3;
 
@@ -135,6 +160,7 @@ function emptyProfile(): SelfProfile {
   return {
     names: [],
     interests: [],
+    dislikes: [],
     engagement: { chattiness: 1.0, lastComplainedAt: 0, complaints: 0 },
     screenWatch: { enabled: false, allowedApps: [], intervalMs: 30 * 60 * 1000 },
     wishes: [],
@@ -161,6 +187,8 @@ export class SelfProfileService {
       return {
         names: Array.isArray(raw.names) ? raw.names : base.names,
         interests: Array.isArray(raw.interests) ? raw.interests : base.interests,
+        // M30：老 self.json 没有 dislikes 字段，读成空数组即可（向后兼容）
+        dislikes: Array.isArray(raw.dislikes) ? raw.dislikes : base.dislikes,
         engagement: { ...base.engagement, ...(raw.engagement ?? {}) },
         screenWatch: { ...base.screenWatch, ...(raw.screenWatch ?? {}) },
         lastSurfAt: raw.lastSurfAt,
@@ -317,11 +345,19 @@ export class SelfProfileService {
     this.save();
   }
 
-  /** 因兴趣接话但没人理 → 兴趣降温（线性小幅下调，不参与衰减曲线） */
+  /**
+   * 因兴趣接话但没人理 → 兴趣降温（**乘性**小幅下调）。
+   *
+   * 为什么必须是乘性（M30 修的 bug）：
+   *   原实现是 `s - 0.05` 线性减法。在 s=0.06 时减 0.05 只剩 0.01，
+   *   直接击穿 FREEZE_THRESHOLD=0.1 被冻结 —— 而这条线本来是给
+   *   "很久没碰"留的，结果成了"两次没人理就死了"。
+   *   乘性 `s *= 0.85` 永远不会因为一次事件跨过数量级，符合"慢慢淡掉"的直觉。
+   */
   dampenInterest(topic: string): void {
     const e = this.data.interests.find((i) => i.topic === topic);
     if (!e) return;
-    this.setStrength(e, this.strengthOf(e) - 0.05);
+    this.setStrength(e, this.strengthOf(e) * (1 - DAMPEN_RATE));
     this.save();
   }
 
@@ -365,6 +401,95 @@ export class SelfProfileService {
   /** 全部未冻结兴趣数量（用于"活跃兴趣上限"检查） */
   activeInterestCount(): number {
     return this.data.interests.filter((i) => !i.frozen).length;
+  }
+
+  // ───────────── 厌恶（M30：与兴趣结构同构、符号相反） ─────────────
+  //
+  // 为什么不做成 interests 的负权重：
+  //   强化函数 `s ← s + α(1-s)` 是单调递增的，负数喂进去 = 越提越不讨厌，
+  //   数学上就是错的。所以这里是**另一列数据**，同样只会往 0~1 涨，
+  //   只是在消费端（唤醒概率）做减法。
+
+  /**
+   * 她明确讨厌某样东西。
+   * 与 touchInterest 的差别：α 更大（0.35 vs 0.05），因为"我讨厌X"比"提到X"信号强得多。
+   */
+  recordDislike(topic: string, strength = ALPHA_DISLIKE): void {
+    const now = Date.now();
+    let e = this.data.dislikes.find((i) => i.topic === topic);
+    if (!e) {
+      e = { topic, weight: 0, strength: 0, kind: 'current', count: 0, lastAt: now };
+      this.data.dislikes.push(e);
+    }
+    e.count += 1;
+    this.saturate(e, strength);
+    e.lastAt = now;
+    if (e.frozen && this.strengthOf(e) >= REVIVE_THRESHOLD) e.frozen = false;
+    // 上限：讨厌的东西记得牢，但同样不该无限增长（留最强的 MAX_ACTIVE_DISLIKES 条）
+    this.trimDislikes();
+    this.save();
+  }
+
+  /** 修剪厌恶列表到上限（按强度，弱的最先丢） */
+  private trimDislikes(): void {
+    const live = this.data.dislikes.filter((i) => !i.frozen);
+    if (live.length <= MAX_ACTIVE_DISLIKES) return;
+    const keep = new Set(
+      [...live]
+        .sort((a, b) => this.strengthOf(b) - this.strengthOf(a))
+        .slice(0, MAX_ACTIVE_DISLIKES)
+        .map((i) => i.topic),
+    );
+    this.data.dislikes = this.data.dislikes.filter((i) => i.frozen || keep.has(i.topic));
+  }
+
+  /**
+   * 厌恶衰减：半衰期 72h（兴趣是 24h —— 人忘掉讨厌比忘掉喜欢慢）。
+   * 跌破冻结线同样只冻结不删除。
+   */
+  decayDislikes(now = Date.now()): number {
+    let frozen = 0;
+    for (const e of this.data.dislikes) {
+      if (e.frozen) continue;
+      const idle = now - e.lastAt;
+      if (idle <= 0) continue;
+      const strength = this.strengthOf(e) * Math.pow(2, -idle / DISLIKE_HALF_LIFE_MS);
+      this.setStrength(e, strength);
+      if (strength < FREEZE_THRESHOLD) {
+        e.frozen = true;
+        frozen += 1;
+      }
+    }
+    if (frozen > 0) this.log?.(`self: 冻结 ${frozen} 个厌恶（不那么讨厌了，但还记着）`);
+    this.save();
+    return frozen;
+  }
+
+  /** 当前最讨厌的前 n 样（排除已淡忘的） */
+  topDislikes(n = 3): SelfInterest[] {
+    return this.data.dislikes
+      .filter((i) => !i.frozen)
+      .sort((a, b) => this.strengthOf(b) - this.strengthOf(a))
+      .slice(0, Math.min(n, MAX_ACTIVE_DISLIKES));
+  }
+
+  /** 有没有讨厌这个具体的话题 */
+  dislikesTopic(topic: string): boolean {
+    return this.data.dislikes.some((i) => !i.frozen && i.topic === topic && this.strengthOf(i) > 0);
+  }
+
+  /**
+   * 这句话里命中的**厌恶**总强度（0~1，封顶 1）。
+   * 用于唤醒闸门做减法：讨厌的东西被提起来，她会**更不想开口**。
+   */
+  dislikeLoad(text: string, matcher: (text: string, topic: string) => boolean): number {
+    const live = this.data.dislikes.filter((i) => !i.frozen);
+    if (live.length === 0) return 0;
+    let sum = 0;
+    for (const d of live) {
+      if (matcher(text, d.topic)) sum += this.strengthOf(d);
+    }
+    return Math.min(1, sum);
   }
 
   /** 记录一次冲浪成果 */

@@ -209,11 +209,16 @@ export class PersonaService {
         idleDiveThreshold: config.idleDiveThreshold,
       });
       // 兴趣驱动唤醒：从 self.json 实时取兴趣与话痨度
-      waker.setInterestProvider(() => ({
-        interests: this.self.snapshot().interests.map((i) => ({ topic: i.topic, weight: i.weight })),
-        chattiness: this.self.chattiness(),
-        baseProbability: config.interestBaseProbability,
-      }));
+      waker.setInterestProvider(() => {
+        const snap = this.self.snapshot();
+        return {
+          interests: snap.interests.map((i) => ({ topic: i.topic, weight: i.weight })),
+          // M30：讨厌的话题把唤醒概率打下来（在 wake.ts 的公式里做减法）
+          dislikes: (snap.dislikes ?? []).filter((i) => !i.frozen).map((i) => ({ topic: i.topic, weight: i.strength ?? i.weight })),
+          chattiness: this.self.chattiness(),
+          baseProbability: config.interestBaseProbability,
+        };
+      });
       // 动态称呼：配置名 ∪ 她自己接受的称呼
       waker.setNameProvider(() => {
         const extra = this.self.activeNames();
@@ -240,6 +245,28 @@ export class PersonaService {
     const a = this.waker?.prune(SW) ?? 0;
     const b = this.budget.prune(SW);
     if (a || b) this.deps.logger.info(`persona: prune 清理 waker=${a} budget=${b}`);
+    this.decaySelf();
+  }
+
+  /**
+   * 兴趣/厌恶惰性衰减（M30 修的一处死链）。
+   *
+   * 实测发现：`decayInterests()` 从写出来那天起**没有任何调用点** ——
+   * 也就是说「兴趣会随时间淡掉」这条设计一直是文档里的话，代码里从没跑过。
+   * 表现就是 self.json 里的兴趣强度只会涨不会跌，最后全都顶到 1.0。
+   *
+   * 挂在 pruneStale 里（每 6h 一次）而不是单独起定时器：
+   * 衰减本来就是小时级的慢变量，6h 的粒度足够；少一个定时器少一处电量开销。
+   */
+  private decaySelf(): void {
+    try {
+      const now = Date.now();
+      const fi = this.self.decayInterests(now);
+      const fd = this.self.decayDislikes(now);
+      if (fi || fd) this.deps.logger.info(`persona: 衰减冻结 兴趣=${fi} 厌恶=${fd}`);
+    } catch (err) {
+      this.deps.logger.warn(`persona: 衰减失败: ${err instanceof Error ? err.message : String(err)}`);
+    }
   }
 
   /** 该 peer 的注入 section（人格 + 该人的账 + 日记连续性）；空数组 = 不注入 */
