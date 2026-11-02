@@ -598,6 +598,17 @@ export class SessionManager {
     const key = this.sessionKey(scope, peerId);
     const existing = this.sessions.get(key);
 
+    // M32：冷却到期就回主通道。
+    //
+    // `maybeResetRoute` 的注释写着"每轮开始时调用一次即可，幂等"，
+    // 但从写出来起**没有任何调用点** —— 于是 `clearOverride` 永不执行，
+    // 一次 429 降级之后该会话会**永久**停在备用通道上，
+    // 主通道恢复了也不会自己回来。
+    //
+    // 放在 getOrCreate 顶部而不是 openSession 里：已存在的会话也要检查，
+    // 而那条路径根本不走 openSession。
+    this.maybeResetRoute(scope, peerId);
+
     if (existing) {
       existing.replyTarget = replyTarget;
       existing.lastActivity = Date.now();

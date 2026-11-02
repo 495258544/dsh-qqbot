@@ -297,6 +297,11 @@ export class PersonaService {
       const fi = this.self.decayInterests(now);
       const fd = this.self.decayDislikes(now);
       if (fi || fd) this.deps.logger.info(`persona: 衰减冻结 兴趣=${fi} 厌恶=${fd}`);
+      // M32：被嫌吵之后的话痨度恢复（原来也是零调用 —— 一旦被嫌就永远安静下去）
+      const before = this.self.chattiness();
+      this.self.recoverIfCalm(now);
+      const after = this.self.chattiness();
+      if (after !== before) this.deps.logger.info(`persona: 24h 没再被嫌，话痨度 ${before.toFixed(2)} → ${after.toFixed(2)}`);
     } catch (err) {
       this.deps.logger.warn(`persona: 衰减失败: ${err instanceof Error ? err.message : String(err)}`);
     }
@@ -328,6 +333,22 @@ export class PersonaService {
       const after = this.budget.peerSnapshot(peerId)?.unansweredStreak ?? 0;
       if (after > before) this.emotion.onIgnored();
     }
+  }
+
+  /**
+   * 记一次"她可能被叫成什么"（M32）。
+   *
+   * `recordNameCall()` 原来零调用 → names 候选永远是空的 →
+   * `qq_decide_name`（"她能拒绝某个称呼"）面对一个永远为空的列表，
+   * 等于一个永远点不动的按钮。
+   *
+   * 已配置的名字、已接受的称呼都不算候选（否则会把自己的名字记成"新称呼"）。
+   */
+  notePossibleName(name: string): { isNew: boolean; reachedThreshold: boolean } {
+    const known = new Set([...this.deps.config.names, ...this.self.activeNames()]);
+    if (!name || known.has(name)) return { isNew: false, reachedThreshold: false };
+    const r = this.self.recordNameCall(name);
+    return { isNew: r.isNew, reachedThreshold: r.reachedThreshold };
   }
 
   /** 该 peer 的注入 section（人格 + 该人的账 + 日记连续性）；空数组 = 不注入 */
@@ -533,6 +554,20 @@ export class PersonaService {
     this.turnLedger.set(sessionId, { user: cur.user, who: cur.who, reply: (cur.reply + ' ' + text).slice(0, 300) });
     // M11：记下她说的话，等后续判定是否被"接住"（key 用 sessionId 即可，只需同会话判定）
     this.voice.recordUtterance(`${sessionId}#${Date.now()}`, sessionId, text);
+
+    // M32：口癖使用计数。
+    //
+    // `markUsed()` 原来零调用 → `lastSaidAt` 永远是 undefined →
+    // `retireStale()` 会按"上次使用时间"判定退役，而那个时间从来没被写过。
+    // 更直接的问题是 `h.count` 永远不涨，于是"这条口癖被用过几次"永远是接手时的数字。
+    //
+    // 判据：她这条回复里真的出现了这条口癖的词面。简单、可解释，
+    // 但只认**完整词面出现**，不做模糊匹配（错记会让退役判断失真）。
+    if (text) {
+      for (const h of this.voice.activeHabits()) {
+        if (h.style && text.includes(h.style)) this.voice.markUsed(h.id);
+      }
+    }
   }
 
   /** inbound：判定她之前的发言是否被接住（M11） */

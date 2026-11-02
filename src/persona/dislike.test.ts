@@ -380,3 +380,33 @@ describe('衰减参数 · 必须"活得下来"（M30 重标定的回归测试）
     expect(svc.snapshot().interests[0]!.strength).toBeCloseTo(0.4, 1);
   });
 });
+
+describe('recoverIfCalm · 被嫌之后要能慢慢恢复（M32）', () => {
+  // 防的是零调用：一旦被嫌吵，chattiness 打三折后**永远回不来**，
+  // 她就永久变安静了（warmUp 只在对方主动找她时才调）。
+
+  it('被嫌后 24h 没人再嫌 → 话痨度回升', () => {
+    const { svc } = mkSelf();
+    svc.registerComplaint();
+    const low = svc.chattiness();
+    expect(low).toBeLessThan(0.5);
+
+    svc.recoverIfCalm(Date.now() + 25 * 3600_000);
+    expect(svc.chattiness()).toBeGreaterThan(low);
+  });
+
+  it('刚被嫌完不会立刻恢复', () => {
+    const { svc } = mkSelf();
+    svc.registerComplaint();
+    const low = svc.chattiness();
+    svc.recoverIfCalm(Date.now() + 3600_000);
+    expect(svc.chattiness()).toBeCloseTo(low, 6);
+  });
+
+  it('从没被嫌过的不动', () => {
+    const { svc } = mkSelf();
+    expect(svc.chattiness()).toBe(1.0);
+    svc.recoverIfCalm(Date.now() + 48 * 3600_000);
+    expect(svc.chattiness()).toBe(1.0);
+  });
+});

@@ -186,3 +186,28 @@ describe('口癖管线 · 从样本到生效（M32 修的死链）', () => {
     expect(v2.extractCandidates()).toEqual([]);
   });
 });
+
+describe('markUsed · 使用计数必须真的在涨（M32）', () => {
+  // 防的是 markUsed 零调用：lastSaidAt 永远 undefined，
+  // retireStale 按一个从没被写过的时间判定退役，count 也永远不涨。
+
+  it('说出口癖后会计数，并刷新 lastSaidAt', () => {
+    const dir2 = fs.mkdtempSync(path.join(os.tmpdir(), 'voice-used-'));
+    const svc = new VoiceService(dir2);
+    // 造一条生效口癖
+    for (let i = 0; i < 6; i++) {
+      svc.recordUtterance(`t${i}`, 'group:g', '说实话这事挺离谱的吧');
+      svc.judgeIncoming('group:g', '哈哈哈确实');
+    }
+    svc.extractCandidates();
+    svc.promoteHabits();
+    const h = svc.activeHabits()[0];
+    expect(h).toBeDefined();
+
+    const before = h!.count;
+    svc.markUsed(h!.id);
+    const after = svc.activeHabits().find((x) => x.id === h!.id)!;
+    expect(after.count).toBe(before + 1);
+    expect(after.lastSaidAt).toBeGreaterThan(0);
+  });
+});

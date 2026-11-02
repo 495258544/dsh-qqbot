@@ -7,7 +7,7 @@
  *  3. 陈述句反例（最容易误报的：吧字祈使、呢字进行、疑问代词任指）
  */
 import { describe, expect, it } from 'vitest';
-import { detectQuestion, detectAddressee, classifyUtterance, isQuestion } from './question-detect.ts';
+import { detectQuestion, detectAddressee, classifyUtterance, isQuestion, extractVocatives } from './question-detect.ts';
 
 describe('detectQuestion · 原始失败样例', () => {
   it('旧正则漏掉的 7 条，现在都能识别', () => {
@@ -204,5 +204,40 @@ describe('classifyUtterance · 接不接话', () => {
   it('陈述句默认不接（避免变成应答器）', () => {
     expect(classifyUtterance('今天好热', { inConversationWithMe: true }).shouldReply).toBe(false);
     expect(classifyUtterance('你吃吧', { inConversationWithMe: true }).shouldReply).toBe(false);
+  });
+});
+
+describe('extractVocatives · 提取"她可能被叫成什么"（M32）', () => {
+  // 防的是 recordNameCall 零调用导致的死链：
+  // names 候选永远为空 → qq_decide_name 面对空列表 = 点不动的按钮。
+  //
+  // 提取必须**保守**：错记一个称呼，她就会去接受一个从没人叫过的名字。
+
+  it('「叫你X」「以后叫你X」', () => {
+    expect(extractVocatives('以后叫你阿羽吧')).toEqual(['阿羽']);
+    expect(extractVocatives('叫你小鲸鱼')).toEqual(['小鲸鱼']);
+    expect(extractVocatives('喊你阿羽行吗')).toEqual(['阿羽']);
+  });
+
+  it('带客气后缀的不会被吞进名字', () => {
+    expect(extractVocatives('叫你小鱼可以吗')).toEqual(['小鱼']);
+    expect(extractVocatives('那就叫小鱼吧')).toEqual(['小鱼']);
+  });
+
+  it('句首称呼 + 停顿', () => {
+    expect(extractVocatives('小羽，在吗')).toEqual(['小羽']);
+  });
+
+  it('转述不算（"小羽说得对"不是在叫她）', () => {
+    expect(extractVocatives('小羽说得对')).toEqual([]);
+  });
+
+  it('普通句子不误判', () => {
+    expect(extractVocatives('我觉得这个不错')).toEqual([]);
+    expect(extractVocatives('今天天气挺好的')).toEqual([]);
+  });
+
+  it('"叫我X"不算（那是对方在说自己）', () => {
+    expect(extractVocatives('叫我小明')).toEqual([]);
   });
 });

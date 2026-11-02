@@ -356,6 +356,67 @@ export function isQuestion(text: string): boolean {
  *   C. 上下文：她刚说完话 / 正在和她对话 / 这人连续发言 → 省略主语默认指向她
  *      （这是补上"吃了吗""在干嘛"这类无标记句的关键）
  */
+/**
+ * 从一句话里提取"对方可能在叫她"的称呼候选（M32）。
+ *
+ * 为什么需要这个：`SelfProfileService.recordNameCall()` 写好了但**零调用**，
+ * 于是 `names` 里的候选永远只有角色卡里那一个，
+ * `qq_decide_name` 这个工具面对的是一个永远为空的候选列表 ——
+ * 她能"拒绝某个称呼"，但那个称呼从来没被记进来过。
+ *
+ * 提取规则刻意保守（只认**称呼句式**，不认正文里出现的词）：
+ *   "小羽，在吗"        → 小羽（句首 + 逗号）
+ *   "叫你小鱼可以吗"     → 小鱼（"叫你X"）
+ *   "以后叫你阿羽吧"     → 阿羽（"以后叫你X"）
+ * 不认："小羽说得对"（这是转述，不是叫）
+ *
+ * 宁可漏，不能错：错记的称呼会让她接受一个从没人叫过的名字。
+ */
+export function extractVocatives(text: string): string[] {
+  const raw = String(text ?? '').trim();
+  if (!raw) return [];
+  const out = new Set<string>();
+
+  // ① 「叫你X」「以后叫你X」—— 最明确
+  //    名字贪婪取 1~4 字，但**排除以语气词结尾**（否则 "叫你小鱼可以吗"
+  //    会把"小鱼可以吗"整串当名字）；再剥掉尾部残留的语气词。
+  const NAME = '[\\u4e00-\\u9fa50-9A-Za-z]{1,4}';
+  // 尾部语气词/客气话，可能叠加（"小鱼可以吗" → "小鱼" + "可以" + "吗"）
+  const TAIL = /(?:可以|好吗|行吗|好了|就行|就好|吧|吗|啊|呀|呗|呢)+$/;
+  const stripTail = (w: string): string => {
+    let prev = '';
+    let cur = w.trim();
+    while (cur !== prev) {
+      prev = cur;
+      cur = cur.replace(TAIL, '');
+    }
+    return cur;
+  };
+
+  // 「叫你X」「以后叫你X」—— 最明确。独占匹配，避免 "叫你小鱼" 里再命中 "你小鱼"
+  for (const m of raw.matchAll(new RegExp(`(?:叫|喊)(?:你|她|它)\\s*(${NAME})`, 'g'))) {
+    const w = stripTail(m[1] ?? '');
+    if (w && !/^(我|他|她)$/.test(w)) out.add(w);
+  }
+
+  // 「叫X吧」开头的祈使句（没有"你"，靠"那就/就"或句首定位）
+  // 注意要排除 "叫你X" —— 那种情况上一段已经处理过，
+  // 否则会从"叫"后面取到"你小鲸"当成名字。
+  const lead = raw.match(new RegExp(`^(?:那就|就)?叫(${NAME})`));
+  if (lead?.[1]) {
+    const w = stripTail(lead[1]);
+    if (w && !/^[你我他她它]/.test(w)) out.add(w);
+  }
+
+  // ③ 句首称呼 + 停顿（"XX，在吗"）
+  const voc = raw.match(/^([\u4e00-\u9fa5A-Za-z0-9]{1,5})[，,、!！\s]/);
+  if (voc?.[1] && !/^(我|你|他|她|这|那|就|好|行|嗯|啊|哦|对|是)/.test(voc[1])) {
+    out.add(voc[1]);
+  }
+
+  return [...out];
+}
+
 export function detectAddressee(text: string, ctx: AddresseeContext = {}): AddresseeSignal {
   const raw = String(text ?? '');
   const signals: string[] = [];
