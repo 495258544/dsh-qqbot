@@ -342,6 +342,12 @@ export function createDotaDigest(deps: DotaDigestDeps): DotaDigestHandle {
   let counterDay = '';
   let deliveredToday = 0;
   let attemptsToday = 0;
+  /**
+   * 「选不到群」这个警告按天只打一次。
+   * 投递窗口每分钟 tick 一次，不节流的话一天能刷一百多条同样的 warn，
+   * 反而把真正的线索淹掉。
+   */
+  let noGroupWarnDay = '';
 
   function loadDigest(): DigestFile | null {
     try {
@@ -602,7 +608,18 @@ export function createDotaDigest(deps: DotaDigestDeps): DotaDigestHandle {
       logger.warn(`dota-digest: 选群失败: ${err instanceof Error ? err.message : String(err)}`);
       return { sent: false, reason: 'no-group' };
     }
-    if (groupId === null || groupId === '') return { sent: false, reason: 'no-group' };
+    if (groupId === null || groupId === '') {
+      // 以前这里直接 return，什么都不记 —— 于是「一整天没播报」只能靠翻状态文件反推。
+      // 2026-11-02 就是这么悄无声息过去的：摘要备好 2 条，然后在选群处空转一百多次。
+      if (noGroupWarnDay !== today) {
+        noGroupWarnDay = today;
+        logger.warn(
+          'dota-digest: 选不到能发的群（内存里没有存活群会话，也没有历史活跃群记录），'
+          + `今天的战绩摘要发不出去（forDay ${digest.forDay}）`,
+        );
+      }
+      return { sent: false, reason: 'no-group' };
+    }
 
     if (delivering) return { sent: false, reason: 'busy' };
     delivering = true;

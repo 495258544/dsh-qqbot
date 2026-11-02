@@ -144,6 +144,8 @@ function harness(o: {
   forms?: Record<number, DotaForm | Error>;
   pickGroup?: DotaDigestDeps['pickGroup'];
   deliver?: DotaDigestDeps['deliver'];
+  /** 想断言日志的用例自己传一个 */
+  logger?: Logger;
 } = {}): Harness {
   const dataDir = tmpDir();
   const deliverCalls: Array<{ groupId: string; text: string }> = [];
@@ -152,7 +154,7 @@ function harness(o: {
   const deps: DotaDigestDeps = {
     config: cfg(o.config),
     dataDir,
-    logger: silentLogger,
+    logger: o.logger ?? silentLogger,
     bindings: o.bindings ?? (() => []),
     queryForm: async (accountId: number) => {
       const f = forms[accountId];
@@ -617,3 +619,48 @@ describe('跨天去重 · 同人同类 3 天内不重复播', () => {
     expect(res.reason).toBe('no-highlight');
   });
 });
+
+describe('DotaDigest · 选不到群时要留下线索', () => {
+  // 2026-11-02 的教训：摘要备好 2 条，投递窗口里每分钟在选群处静默返回，
+  // 一整天没有任何日志，事后只能靠翻状态文件反推"为什么没播报"。
+  it('no-group 时 warn 只打一次，不跟着 tick 刷屏', async () => {
+    const warns: string[] = []
+    const h = preparedHarness({
+      pickGroup: () => null,
+      logger: { info: () => {}, warn: (m) => warns.push(String(m)), error: () => {}, debug: () => {} },
+    })
+    await prepare(h)
+    for (const minute of [5, 10, 15, 20]) {
+      const r = await h.handle.tickDeliver(cst(2026, 3, 10, 10, minute))
+      expect(r.reason).toBe('no-group')
+    }
+    const hits = warns.filter((w) => w.includes('选不到能发的群'))
+    expect(hits).toHaveLength(1)
+  })
+
+  it('pickGroup 返回空字符串也按 no-group 处理', async () => {
+    const h = preparedHarness({ pickGroup: () => '' })
+    await prepare(h)
+    const r = await h.handle.tickDeliver(cst(2026, 3, 10, 10, 30))
+    expect(r).toEqual({ sent: false, reason: 'no-group' })
+    expect(h.deliverCalls).toHaveLength(0)
+  })
+
+  it('投递被跳过（没有活会话）时不标已投递，之后还能重试', async () => {
+    let attempts = 0
+    const h = preparedHarness({
+      deliver: async () => {
+        attempts += 1
+        return attempts === 1 ? { ok: false, reason: 'no-live-session' } : { ok: true }
+      },
+    })
+    await prepare(h)
+    const first = await h.handle.tickDeliver(cst(2026, 3, 10, 10, 30))
+    expect(first.sent).toBe(false)
+    expect(h.handle.snapshot().digest?.deliveredAt).toBeUndefined()
+
+    const second = await h.handle.tickDeliver(cst(2026, 3, 10, 10, 31))
+    expect(second.sent).toBe(true)
+    expect(h.handle.snapshot().digest?.deliveredAt).toBeDefined()
+  })
+})
