@@ -169,3 +169,64 @@ class TestTranscriptCondensing:
         full = sum(len(x["content"]) for x in items)
         packed = sum(len(x) for x in lines)
         assert packed < full / 4, f"压缩不够：{full} → {packed}"
+
+
+class TestNewTools:
+    """新增的 4 个工具（stats / relation / dm_list / dm_read）。
+
+    这几个的工具函数直接调 run_bili，所以用 monkeypatch 喂假数据测字段解析。
+    重点是**字段名**——实测发现 dm 的字段是 messages/last_message.text 而不是
+    items/content，写错就静默返回"没有记录"。
+    """
+
+    def test_stats_parses_numbers(self, monkeypatch):
+        monkeypatch.setattr(server, "run_bili", lambda *a, **k: {
+            "ok": True, "data": {"stat": {"view": 558027, "like": 12346, "coin": 3969}}
+        })
+        out = server.bili_stats("BV1")
+        assert "558,027" in out and "12,346" in out
+
+    def test_relation_all_untouched(self, monkeypatch):
+        monkeypatch.setattr(server, "run_bili", lambda *a, **k: {
+            "ok": True, "data": {"liked": False, "coin": 0, "favorited": False, "followed": False}
+        })
+        out = server.bili_relation("BV1")
+        assert "还没动过" in out
+
+    def test_relation_reports_actions(self, monkeypatch):
+        monkeypatch.setattr(server, "run_bili", lambda *a, **k: {
+            "ok": True, "data": {"liked": True, "coin": 2, "favorited": True, "followed": True}
+        })
+        out = server.bili_relation("BV1")
+        assert "赞过了" in out and "2 个币" in out and "收藏了" in out
+
+    def test_dm_list_uses_last_message_text(self, monkeypatch):
+        # 实测字段：{uid, name, unread, last_message:{text, auto_reply}}
+        monkeypatch.setattr(server, "run_bili", lambda *a, **k: {
+            "ok": True, "data": {"items": [
+                {"name": "影视飓风", "unread": 1,
+                 "last_message": {"text": "感谢关注", "auto_reply": True}},
+            ]}
+        })
+        out = server.bili_dm_list()
+        assert "影视飓风" in out
+        assert "感谢关注" in out
+        # 自动回复必须标出来，否则她会以为对方在等她回话
+        assert "自动回复" in out
+
+    def test_dm_read_uses_messages(self, monkeypatch):
+        # 实测字段是 messages（不是 items），每条有 from/text
+        monkeypatch.setattr(server, "run_bili", lambda *a, **k: {
+            "ok": True, "data": {"messages": [
+                {"from": "them", "text": "你好呀"},
+                {"from": "me", "text": "在的"},
+            ]}
+        })
+        out = server.bili_dm_read("946974")
+        assert "对方" in out and "我" in out
+        assert "你好呀" in out
+
+    def test_dm_empty_is_not_error(self, monkeypatch):
+        monkeypatch.setattr(server, "run_bili", lambda *a, **k: {"ok": True, "data": {"messages": []}})
+        out = server.bili_dm_read("x")
+        assert "没有" in out

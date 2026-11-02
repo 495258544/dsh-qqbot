@@ -1,6 +1,6 @@
 # bili-mcp · B 站薄壳 MCP server
 
-给 DSH 用的 B 站接入。**14 个工具，只读 12 个 + 写 2 个（关注/取关）。**
+给 DSH 用的 B 站接入。**18 个工具，只读 16 个 + 写 2 个（关注/取关）。**
 
 ## 为什么自己写，不用 `bili mcp serve`
 
@@ -17,14 +17,14 @@
 
 | | 官方 | 这个 |
 |---|---|---|
-| 工具数 | 17 | 14 |
-| schema | 5861 tokens | **3934 tokens** |
+| 工具数 | 17 | 18 |
+| schema | 5861 tokens | **5069 tokens** |
 | 任意命令后门 | 有（`run_bili`） | **没有** |
 | 写操作 | 6 个 | **2 个**（关注/取关） |
 
 ## 工具清单
 
-**只读（12）**
+**只读（16）**
 - `bili_status` 账号状态
 - `bili_following` 关注列表
 - `bili_inbox` 消息
@@ -37,6 +37,10 @@
 - `bili_up_videos` 某 UP 的投稿
 - `bili_up_timeline` 关注动态
 - `bili_comments` 评论
+- `bili_stats` 播放/点赞/投币数
+- `bili_relation` 我赞过吗/收藏过吗（**操作前先查**）
+- `bili_dm_list` 谁私信过我（带自动回复标记）
+- `bili_dm_read` 读私信内容
 
 **写（2）**
 - `bili_follow` 关注（幂等，已关注返回"没重复操作"）
