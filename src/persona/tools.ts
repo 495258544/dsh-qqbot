@@ -16,6 +16,63 @@ interface ToolsRegistryLike {
   register(definition: unknown): unknown;
 }
 
+/** mm:ss */
+function mmss(sec: number): string {
+  const s = Math.max(0, Math.floor(sec));
+  return `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`;
+}
+
+/**
+ * 把逐句字幕压成「每分钟一条」，保留时间轴（M35）。
+ *
+ * ## 为什么按分钟
+ *
+ * 用户要的是「哪几分钟真正讲到东西」——分钟是人的导航单位：
+ * 他说"第 15 分钟在讲 ACL"，能直接跳过去；给秒级时间轴反而没法扫。
+ *
+ * ## 为什么每分钟取最长的两三句
+ *
+ * 字幕是口语，信息密度极不均匀。实测一个 27 分钟的教学视频：
+ * 全文 8925 字，每句平均 12 字，直接给全文 ≈ 6000 tokens。
+ * 每分钟只留最长的 2 句 → 1295 字（压缩 6.9 倍）≈ 863 tokens，
+ * 而这两句通常就是这一分钟里"信息量最大"的话。
+ *
+ * **这只是压缩，不是判断"值不值得看"。**
+ * 中文口语里"所以/但是/这个"全是填充词，纯统计找不到干货
+ * （我试过按论述标记词打分，抽出来的是「默认路由啊策略路由是吧AACL路由」——
+ * 标记词密但看不出在讲什么）。要判断值不值得看，必须再过一次语义。
+ */
+export function condenseSubtitlesByMinute(
+  items: Array<{ from?: number; to?: number; content?: string }>,
+  opts: { perMinute?: number } = {},
+): Array<{ t: string; text: string }> {
+  const per = Math.max(1, opts.perMinute ?? 2);
+  const buckets = new Map<number, Array<{ at: number; text: string }>>();
+  for (const it of items) {
+    const text = String(it.content ?? '').replace(/\s+/g, ' ').trim();
+    if (!text) continue;
+    const at = Math.max(0, Number(it.from) || 0);
+    const m = Math.floor(at / 60);
+    const arr = buckets.get(m) ?? [];
+    arr.push({ at, text });
+    buckets.set(m, arr);
+  }
+  const out: Array<{ t: string; text: string }> = [];
+  for (const m of [...buckets.keys()].sort((a, b) => a - b)) {
+    const arr = buckets.get(m) ?? [];
+    // 这一分钟里最长的几句 —— 长句通常承载更多信息（短句多是"啊""对吧"）
+    const picked = [...arr].sort((a, b) => b.text.length - a.text.length).slice(0, per);
+    // 按时间顺序还原，读起来才是连贯的
+    picked.sort((a, b) => a.at - b.at);
+    // 时间戳用这一分钟**第一句**的真实时间，而不是 m*60。
+    // 否则 62 分 5 秒会被写成 62:00 —— 分钟内的秒位信息白丢了，
+    // 而用户正是要按这个时间点去跳。
+    const firstAt = arr.reduce((a, b) => Math.min(a, b.at), Number.POSITIVE_INFINITY);
+    out.push({ t: mmss(Number.isFinite(firstAt) ? firstAt : m * 60), text: picked.map((x) => x.text).join(' ') });
+  }
+  return out;
+}
+
 export function registerPersonaTools(
   ctx: Context,
   persona: PersonaService,
@@ -775,7 +832,39 @@ export function registerPersonaTools(
           ok: { type: 'boolean' },
           title: { type: 'string' },
           summary: { type: 'string' },
+          // M35：官方分章提纲（带秒级时间点），有就直接用
+          outline: {
+            type: 'array',
+            items: {
+              type: 'object',
+              properties: {
+                title: { type: 'string' },
+                start: { type: 'string' },
+                points: {
+                  type: 'array',
+                  items: {
+                    type: 'object',
+                    properties: { t: { type: 'string' }, text: { type: 'string' } },
+                    required: ['t', 'text'],
+                    additionalProperties: false,
+                  },
+                },
+              },
+              required: ['title', 'start', 'points'],
+              additionalProperties: false,
+            },
+          },
           subtitle: { type: 'string' },
+          // M35：按分钟压缩的字幕（带 [mm:ss]），用来回答"哪几分钟有干货"
+          subtitleOutline: {
+            type: 'array',
+            items: {
+              type: 'object',
+              properties: { t: { type: 'string' }, text: { type: 'string' } },
+              required: ['t', 'text'],
+              additionalProperties: false,
+            },
+          },
           danmaku: {
             type: 'array',
             items: {
@@ -811,6 +900,8 @@ export function registerPersonaTools(
       render: (_a: unknown, v: unknown): ContentBlock[] => {
         const r = v as {
           ok: boolean; title?: string; summary?: string; subtitle?: string;
+          outline?: Array<{ title: string; start: string; points: Array<{ t: string; text: string }> }>;
+          subtitleOutline?: Array<{ t: string; text: string }>;
           danmaku?: Array<{ t: string; text: string }>;
           frames?: Array<{ t: string; path: string }>;
           items?: { bvid: string; title: string }[]; error?: string;
@@ -819,7 +910,17 @@ export function registerPersonaTools(
         const parts: string[] = [];
         if (r.title) parts.push(`《${r.title}》`);
         if (r.summary) parts.push(`AI 总结：${r.summary}`);
-        if (r.subtitle) parts.push(`字幕节选：${r.subtitle}`);
+        // 分章提纲（官方给的，带时间点）—— 这是回答"哪几分钟有干货"的最好材料
+        if (r.outline?.length) {
+          parts.push('分段提纲（可直接按时间跳）：\n' + r.outline.map((sec) =>
+            `  [${sec.start}] ${sec.title}\n`
+            + sec.points.map((pt) => `      ${pt.t} ${pt.text}`).join('\n')).join('\n'));
+        }
+        // 按分钟压缩的字幕（官方没给提纲时的兜底）
+        if (r.subtitleOutline?.length) {
+          parts.push('字幕·按分钟（[时间] 这一分钟主要在讲）：\n'
+            + r.subtitleOutline.map((x) => `  [${x.t}] ${x.text}`).join('\n'));
+        }
         if (r.danmaku?.length) {
           parts.push('弹幕（观众当时在说什么）：\n'
             + r.danmaku.slice(0, 15).map((x) => `  ${x.t} ${x.text}`).join('\n'));
@@ -862,18 +963,58 @@ export function registerPersonaTools(
       const info = run(['video', 'info', bvid]);
       const title = ((info?.data ?? {}) as { title?: string }).title ?? '';
 
+      // AI 总结 + **分段提纲**（M35）。
+      //
+      // 重大发现：`bili video summary` 返回的 `outline` 本身就是
+      // 用户要的那个东西 —— 带秒级时间点的分章提纲：
+      //   [{title:"分享自研养鱼插件", start:1, points:[{time:18,content:"..."}, ...]}]
+      // 我们原来只取了 `summary` 字符串字段，**把 outline 整段丢了**。
+      //
+      // 注意覆盖率：不是所有视频都有 AI 总结。
+      // 实测一个 10.5 小时的教学合集会返回 not_found，
+      // 所以它是**优先源**，不是唯一源。
       let summary = '';
+      let outline: Array<{ title: string; start: string; points: Array<{ t: string; text: string }> }> = [];
       if (mode === 'summary' || mode === 'all') {
         const r = run(['video', 'summary', bvid]);
-        summary = ((r?.data ?? {}) as { summary?: string }).summary ?? '';
+        const data = (r?.data ?? {}) as {
+          summary?: string;
+          outline?: Array<{ title?: string; start?: number; points?: Array<{ time?: number; content?: string }> }>;
+        };
+        summary = data.summary ?? '';
+        outline = (data.outline ?? [])
+          .filter((sec) => (sec.points?.length ?? 0) > 0)
+          .map((sec) => ({
+            title: String(sec.title ?? ''),
+            start: mmss(Number(sec.start) || 0),
+            points: (sec.points ?? []).map((pt) => ({
+              t: mmss(Number(pt.time) || 0),
+              text: String(pt.content ?? ''),
+            })),
+          }));
       }
 
+      // 字幕（M35 修：原来把时间轴丢了）。
+      //
+      // 用户原话：「现在给我字幕是整段倒出来，四十集的合集看不过来。
+      //            要是能先标出哪几分钟是真正讲到东西的地方，我就能挑着看。」
+      //
+      // 旧实现 slice(0,40) + join + 截断 1200 字 —— 三个问题：
+      //   ① `bili video subtitle` 本来就返回 {from,to,content} 逐句时间轴，
+      //      被 join 掉了。**不是没能力，是我们把能力丢了。**
+      //   ② 只保留前 40 句 ≈ 前 90 秒（实测 27 分钟的视频有 755 句）
+      //   ③ 长视频/合集永远只剩开场白
+      //
+      // 现在：按分钟聚桶，每分钟取信息量最大的两三句，带 [mm:ss] 时间戳。
+      // 这样她能说"第 15 分钟在讲 xxx"，用户能跳着看。
       let subtitle = '';
+      let subtitleOutline: Array<{ t: string; text: string }> = [];
       if (mode === 'subtitle' || mode === 'all') {
         const r = run(['video', 'subtitle', bvid]);
-        const items = ((r?.data ?? {}) as { items?: Array<{ content?: string }> }).items ?? [];
-        // 只取前若干条并压成一段 —— 全文太占上下文
-        subtitle = items.slice(0, 40).map((x) => x.content ?? '').filter(Boolean).join(' ').slice(0, 1200);
+        const items = ((r?.data ?? {}) as { items?: Array<{ from?: number; to?: number; content?: string }> }).items
+          ?? [];
+        subtitleOutline = condenseSubtitlesByMinute(items);
+        subtitle = subtitleOutline.map((x) => `[${x.t}] ${x.text}`).join('\n');
       }
 
       // 弹幕（M29）：观众看到画面后的真实反应，比 AI 总结有人味，且纯文本零成本
@@ -912,7 +1053,9 @@ export function registerPersonaTools(
         ok: true,
         ...(title ? { title } : {}),
         ...(summary ? { summary } : {}),
+        ...(outline.length ? { outline } : {}),
         ...(subtitle ? { subtitle } : {}),
+        ...(subtitleOutline.length ? { subtitleOutline } : {}),
         ...(danmaku.length ? { danmaku } : {}),
         ...(frames.length ? { frames } : {}),
       };
