@@ -574,3 +574,112 @@ describe('写入点必须真的被调用（防"接上又被改掉"）', () => {
     expect(svc.emotion.current().energy).toBeGreaterThan(low);
   });
 });
+
+describe('M33 · 生产链路上 onIgnored 必须真的扣分', () => {
+  // 复核 8a94319 时发现：调用点在、测试绿，但**生产路径上条件恒假**。
+  // bootstrap 原先把 `record.lastActivity` 传给 observePeer，而
+  // ensureForProactive 新建会话时刚写过 `lastActivity = Date.now()`，
+  // 于是 `lastActivityAt > lastProactiveAt` 恒真 → onIgnored 永不执行，
+  // 连带 unansweredStreak 永不增长（ProactiveBudget 整套退避一起失效）。
+  //
+  // 修法：bootstrap 在 ensureForProactive **之前**取活跃时间，
+  // 会话已被回收就用 0 表示"这轮肯定没理"。
+
+  const mkSvc2 = async (dir: string) => {
+    const { PersonaService } = await import('./service.ts');
+    return new PersonaService({
+      config: {
+        enabled: true, dataDir: dir, roleCardPath: '', roleMaxChars: 12000,
+        wakeEnabled: true, names: [], keywords: [], ownerOpenids: [], groupProbability: 0,
+        humanizeEnabled: true, msPerChar: 110, burstMax: 2, gapMinMs: 700, gapMaxMs: 2600,
+        ownLifeEnabled: false, ownLifeIntervalMs: 9000000, ownLifeMaxPerDay: 6,
+        maxProactivePerDay: 2, proactiveMinGapMs: 7200000,
+      } as never,
+      dataDir: dir,
+      logger: { info: () => {}, warn: () => {}, error: () => {}, debug: () => {} } as never,
+    });
+  };
+
+  it('会话已被回收（活跃时间=0）→ 确实扣分，且 streak 增长', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'emotion-m33-'));
+    const svc = await mkSvc2(dir);
+    svc.budget.recordProactive('owner');
+    const p = svc.budget.peerSnapshot('owner')!;
+    p.lastProactiveAt = Date.now() - 4 * 3600_000; // 4 小时前推送过
+
+    const before = svc.emotion.current().valence;
+    svc.observePeer('owner', 0); // 修复后 bootstrap 传的就是这个
+    expect(svc.emotion.current().valence).toBeLessThan(before);
+    expect(svc.budget.peerSnapshot('owner')!.unansweredStreak).toBeGreaterThan(0);
+  });
+
+  it('连续没理 → 退避机制逐级生效（曾因同一 bug 整体失效）', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'emotion-m33b-'));
+    const svc = await mkSvc2(dir);
+    svc.budget.recordProactive('owner');
+    const seen: number[] = [];
+    for (let i = 1; i <= 5; i++) {
+      svc.observePeer('owner', 0);
+      const p = svc.budget.peerSnapshot('owner')!;
+      seen.push(p.unansweredStreak);
+      svc.budget.recordProactive('owner');
+      p.lastProactiveAt = Date.now() - 4 * 3600_000;
+    }
+    expect(seen).toEqual([1, 2, 3, 4, 5]);
+    // streak>=5 → 永久静默
+    expect(svc.budget.peerSnapshot('owner')!.mutedUntil).toBe(-1);
+  });
+
+  it('会话还活着且对方确实回过 → 不扣分', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'emotion-m33c-'));
+    const svc = await mkSvc2(dir);
+    svc.budget.recordProactive('owner');
+    const p = svc.budget.peerSnapshot('owner')!;
+    const before = svc.emotion.current().valence;
+    // 活跃时间晚于推送时刻 = 对方理过她
+    svc.observePeer('owner', p.lastProactiveAt + 60_000);
+    expect(svc.emotion.current().valence).toBeGreaterThanOrEqual(before);
+    expect(p.unansweredStreak).toBe(0);
+  });
+});
+
+describe('M33 · lastTurnAt 必须落盘（onRest 的唯一正向来源）', () => {
+  // 原实现是纯内存字段，进程重启归零 → "睡了一觉"的时间维度整个丢失。
+  // 而 onRest 是 energy 的唯一正向来源，压在易失字段上等于"重启越频繁她越累"。
+
+  it('重启后仍能判断"中间睡了一觉"', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'emotion-lastturn-'));
+    const mk = async () => {
+      const { PersonaService } = await import('./service.ts');
+      return new PersonaService({
+        config: {
+          enabled: true, dataDir: dir, roleCardPath: '', roleMaxChars: 12000,
+          wakeEnabled: false, names: [], keywords: [], ownerOpenids: [], groupProbability: 0,
+          humanizeEnabled: true, msPerChar: 110, burstMax: 2, gapMinMs: 700, gapMaxMs: 2600,
+          ownLifeEnabled: false, ownLifeIntervalMs: 9000000, ownLifeMaxPerDay: 6,
+          maxProactivePerDay: 2, proactiveMinGapMs: 7200000,
+        } as never,
+        dataDir: dir,
+        logger: { info: () => {}, warn: () => {}, error: () => {}, debug: () => {} } as never,
+      });
+    };
+    // 进程 A：聊一轮，落盘
+    const a = await mk();
+    a.noteUserTurn('s', '早', 'u1');
+    a.noteReplyChunk('s', '早呀');
+    a.flushTurn('s', 'c2c:u1', 'u1');
+    const persisted = JSON.parse(fs.readFileSync(path.join(dir, 'state', 'last-turn.json'), 'utf8')) as { at: number };
+    expect(persisted.at).toBeGreaterThan(0);
+
+    // 模拟 7 小时后重启
+    fs.writeFileSync(path.join(dir, 'state', 'last-turn.json'), JSON.stringify({ at: Date.now() - 7 * 3600_000 }));
+    const b = await mk();
+    for (let i = 0; i < 6; i++) b.emotion.onNightChat(2);
+    const low = b.emotion.current().energy;
+
+    b.noteUserTurn('s2', '早', 'u1');
+    b.noteReplyChunk('s2', '早呀');
+    b.flushTurn('s2', 'c2c:u1', 'u1');
+    expect(b.emotion.current().energy).toBeGreaterThan(low);
+  });
+});

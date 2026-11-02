@@ -1,7 +1,7 @@
 # 小羽 · 人设动态化 + 自主活动 设计方案
 
-> 最后更新：2026-10-31
-> 状态：设计稿（待用户确认后实施）
+> 最后更新：2026-11-02（新增 §十六 M33 复核）
+> 状态：M1~M32 已实施；M33 为复核后的修订（779 tests passing）
 
 ---
 
@@ -1088,3 +1088,179 @@ energy 12h（累了要睡）。
 
 > 可复用的教训：在 TypeScript 里校验 JSON 数值，不要用 `Number()` 强转 +
 > `isFinite`，要判 `typeof`。`Number()` 的隐式转换是语义陷阱不是类型检查。
+
+---
+
+## 十六、M33 复核 8a94319：接线通了不等于跑通了（2026-11-02）
+
+### 16.1 触发原因
+
+`DEAD-CODE-AUDIT.md` 声称 A 类 6 条已全部修复。做了一次**只读复核**，
+逐条 grep 调用点 + 用线上真实状态文件复跑，结论是：
+
+> **接线 6/6 都真接上了，生效只有 3/6。**
+
+审计用的唯一指标是"非定义行 grep 命中数"，它只能回答"有没有人调"，
+**回答不了"调的时候条件成不成立"**。这次三条翻车的（#1/#5/#6）全都落在那个盲区里。
+其中 #1 恰恰是审计自己最看重、还专门写了一段"我把它改没了"的那条。
+
+### 16.2 三条翻车的，各自死在哪
+
+| # | 声称 | 实际情况 |
+|---|---|---|
+| 1 `onIgnored` | 接进 `observePeer`，分支正确 | 分支**恒假**：传进来的是 `lastActivity`，而会话刚被新建过 |
+| 5 `recoverIfCalm` | 挂进 `pruneStale` | 链路真，但 `lastComplainedAt=0` 且 `chattiness=1` → 每次立刻 return |
+| 6 `recordNameCall` | 新增 `extractVocatives` + `notePossibleName` | 只修了**写端**，候选名没有任何消费者 |
+
+#### #1 的完整死因（最值得记的一条）
+
+```ts
+// bootstrap.ts（8a94319 时）
+const existing  = manager.peek('c2c', ownerOpenid);
+const record    = await manager.ensureForProactive(...);   // ← 新建时会写 lastActivity=now
+svc.observePeer(ownerOpenid, record.lastActivity);          // ← 拿"刚刚"去比"4 小时前"
+```
+
+`ensureForProactive` → `getOrCreate` → 新建会话写 `lastActivity: Date.now()`（`session-manager.ts:705`）。
+而私聊 `sessionIdleTimeout` 默认 **30 分钟**，own-life 间隔 **4 小时** ——
+**每次投递时会话必然已被回收**，`lastActivity` 必然等于"现在"。
+
+于是：
+
+    上次主动推送 4 小时前  <  刚写进去的 lastActivity=now
+    → wasAnswered 恒 true
+    → `if (wasProactive && !wasAnswered)` 永不进
+    → onIgnored 永不执行
+
+**连带踩塌（审计没发现）**：`budget.observe()` 的 `markUnanswered` 分支也走同一个
+`wasAnswered` 判断 → `unansweredStreak` 永不增长 → `ProactiveBudget` 的
+「3 天冷却 / 14 天冷却 / 永久静默」**整套冷退避一起是死的**。
+
+测试为什么绿：`emotion.test.ts` 喂的是 `Date.now() - 60_000`，
+生产喂的是刚创建的 `lastActivity` —— **测的是函数内逻辑，不是生产链路**。
+这正是审计自己警告过的那个失败模式的反面：
+
+> 它说"删了调用点测试照样绿"；它没意识到**调用点留着、条件恒假，测试也一样绿**。
+
+#### #6 缺的到底是什么
+
+写端（`extractVocatives` → `notePossibleName` → `recordNameCall`）全通，
+候选名也确实写进了 `self.json.names`。但读端全缺：
+
+- `activeNames()` 过滤掉 `accepted=false` → 候选被排除
+- `buildSections()` 没有任何一段注入 names
+- `self.renderSection()` 只渲染 likes/hates
+- `qq_decide_name` 的 `name` 参数要模型自己填 —— **模型不知道存在哪些候选**
+
+所以 `wake-gate.ts` 那行
+`logger.info('称呼「X」被叫够了，等她表态（qq_decide_name）')`
+成了一句**永远等不到回应的日志**。
+
+### 16.3 五处修法
+
+**① `onIgnored`：把观察点移到投递之前**
+
+```ts
+const prevActivity = existing?.lastActivity ?? 0;   // ← 在 ensureForProactive 之前
+const record = await manager.ensureForProactive(...);
+...
+svc.observePeer(ownerOpenid, prevActivity);         // ← 传"投递前的活跃时间"
+```
+
+语义修正：会话还活着 → 用它真实的 `lastActivity`；
+已被回收 → 说明对方至少空闲了 `sessionIdleTimeout`，用 `0` 表示"这轮肯定没理"。
+
+实测（6 轮 own-life 周期）：
+
+    修复前：streak 恒 0，mutedUntil 恒 0，valence 恒 0.0000
+    修复后：第1轮 streak=1；第2轮 streak=2 且进入 3 天冷却；
+            第5轮 streak=5 → 永久静默。valence 每次 -0.12
+
+**② 口癖管线：加表达性闸门 + 让转正门槛真的存在**
+
+线上 48 条正样本实跑，修复前抽出来并 **100% 转正**的是：
+
+    「的。」「多。」「完了。」「一样。」「行,」
+    → 原样注入 prompt：「当"想收尾时"时，可以用"的。"来表达。」
+
+两个结构性缺陷：
+
+1. `consider()` 写死 `count: n`（入口已要求 n>=2）与 `evidence: samples.slice(0,2)`
+   （写死 2 条且 turnId 必然不同）→ 转正判据 `count>=2 && distinctEvidence>=2`
+   **对任何候选恒成立**。门槛不是"把关"，是"盖章"。
+2. 抽取粒度是字符 n-gram，没有词边界，标点尾巴天然高频。
+
+修法三件：
+
+- `isExpressive()`：去掉尾部标点后必须 >=2 字、且以汉字开头
+- 中间类 n-gram 从 **2 字提到 3~4 字**（中文里任何 2 字组合都高频）
+- `count`/`evidence` 改由**真含该词**的样本推出；`PROMOTE_MIN_COUNT = 3`
+
+修复后同一份 48 条样本：
+
+    抽取 5 条，转正 0 条，注入段为空 —— 宁可不注入，也不污染 prompt
+
+而构造出的真口癖（"说实话"跨 4 个会话出现）仍然正常转正并注入 —— 护栏没把功能拦死。
+
+**③ 称呼读端：`pendingNames()` + `renderNameCandidates()`**
+
+- 新增 `pendingNames()`：`!accepted && weight===0 && rejectedAt===0 && calledCount>=阈值`
+- 新增 `renderNameCandidates()`，挂进 `buildSections()` order=67（紧跟口味段）
+- `qq_decide_name` 的返回值补 `pendingNames`，她表态完还能看到剩下在等的
+- 新增 `SelfName.rejectedAt`：**拒绝过的不再进候选**，否则每次被叫都重新"等她表态"，
+  她会反复被问同一个已经回答过的问题
+
+**④ `extractVocatives` 的光杆 `你`**
+
+原交替项 `(?:在吗|你在|你|在不在|干嘛|几点)` 里那个 `你` 把门槛全废了。
+用编译产物实测：
+
+    "停一下，你先忙" → ["停一下"]      "好的，你说吧" → ["好的"]
+    "是啊，你说得对" → ["是啊"]        "不知道，你问我" → ["不知道"]
+    "太吵了，你闭嘴" → ["太吵了"]
+
+而它自己的测试用的是「，就像」「，等一下」，恰好绕开这条分支 ——
+**"零误判"是数据选得好，不是规则严。**
+
+修法：只保留真正的呼叫语（`在吗/在不在/你在/你在干嘛/在干嘛/干嘛呢/几点了`），
+再加一道 `NOT_A_NAME` 应答词前缀黑名单。修复后上述 7 条全部返回 `[]`，
+正例（`小羽，在吗` / `小羽，几点了，你在干嘛` / `小鲸鱼，在不在`）仍然工作，
+真实 100 轮语料仍只命中正确的那 1 条。
+
+**⑤ `lastTurnAt` 落盘**
+
+原来纯内存，进程重启归零 → 重启后第二次 `flushTurn` 就 `now-last` 很小 →
+"睡了一觉"的时间维度丢失。而 `onRest` 是 energy 的**唯一正向来源**，
+压在易失字段上等于「重启越频繁她越累」。改存 `state/last-turn.json`。
+
+### 16.4 仍未解决 / 已知偏差
+
+- **修复未上线**：进程启动 11:08:41，修复提交 11:54~12:13。硬证据：线上
+  `voice.json` 有 48 条正样本（≥ 抽取门槛 4）而 `habits` 为 0 ——
+  新管线若在跑早该抽过。**"779 passing" 是源码绿，线上仍跑旧代码。**
+- **`valence` 仍然贴顶**：实测 130 轮真实语料，中位数 1.000、>0.85 占 95.4%，
+  正负写入比 **45.4:1**（feiyu-mood 是 6.7:1）。#1 修好只是让负向**能触发**，
+  但 own-life 上限 4 次/天、每次 -0.12，抵不过 onAddressed(130次)+onReplied(100次)。
+  → **要真的解决"永远开心"，得调正负幅度比，不是再修一条链。**
+- **闸门③动态范围≈0**：`burstLimit` 阈值 `arousal >= 0.3` 恰与 `BASELINE.arousal=0.3`
+  重合，正向写入又占绝对多数 → 恒真、恒发 2 条，"激动时连发"区分不出来。
+- **`recoverIfCalm` 仍未被验证**：线上 `chattiness=1`、`lastComplainedAt=0`，
+  真实 130 轮抱怨命中 0/130。接线对，但至今零次生效。
+- **`maybeResetRoute` 回主通道要等会话重建**：`clearOverride` 只清持久化偏好，
+  活着的 agent 不重建。
+
+### 16.5 可复用的教训
+
+> **复审死代码，不能只数调用行，要问"那行的条件在真实数据下会不会成立"。**
+
+具体三步（这次就是这么做的，三次都当场抓出问题）：
+
+1. `grep` 剥注释、排测试、排定义行 —— 只能得到"有没有人调"
+2. **拿生产真实值去跑那条分支** —— 才能知道"调的时候进不进得去"
+3. 用线上状态文件复跑整条管线 —— `voice.json` / `turns.jsonl` 是免费的真语料
+
+另一条与之配套的：
+
+> **测试喂的输入，必须是生产真的会传的那个形状。**
+> 喂 `Date.now() - 60_000` 而生产传 `lastActivity=now`，
+> 测试就是在给自己发合格证。

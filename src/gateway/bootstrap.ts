@@ -296,6 +296,21 @@ export async function bootstrapGateway(
         // peek 只查内存 → 永远 undefined → 她一次自由时间也跑不起来。
         // 这里会话不在就拉起一个（只在真要投递时才付这个开销）。
         const existing = manager.peek('c2c', ownerOpenid);
+        // M33：活跃时间必须在 ensureForProactive **之前**取。
+        //
+        // 踩过的坑（复核 8a94319 时发现，这条链当时是死的）：
+        // ensureForProactive 新建会话时写 `lastActivity = Date.now()`
+        // （session-manager.ts:705），而私聊 30min 就被回收、own-life 间隔 4h，
+        // 于是每次投递时 lastActivity 都"刚刚"更新过 →
+        // observePeer 里 `lastActivityAt > lastProactiveAt` 恒真 →
+        // `wasAnswered` 恒 true → onIgnored **永不执行**；
+        // 连带 unansweredStreak 永不增长，ProactiveBudget 的
+        // 3天/14天冷却与永久静默**一起失效**。
+        //
+        // 正确语义是"投递那一刻**之前**对方最后活跃是什么时候"：
+        // 会话还活着 → 用它的 lastActivity；已被回收 → 对方至少空闲了
+        // sessionIdleTimeout，用 0 表示"这轮肯定没理"。
+        const prevActivity = existing?.lastActivity ?? 0;
         const record = await manager.ensureForProactive('c2c', ownerOpenid, ownerOpenid);
         if (!record) return { ok: false, reason: 'no-live-session' }; // 审查 M5：跳过非失败，推进 lastFiredAt
 
@@ -312,7 +327,7 @@ export async function bootstrapGateway(
         // 投递前结算上次主动消息是否被理了
         // 走 PersonaService 的包装而不是 budget.observe 直调 ——
         // 它会在结算的同时写一次情绪（"主动说了话没人接 → 失落"）
-        svc.observePeer(ownerOpenid, record.lastActivity);
+        svc.observePeer(ownerOpenid, prevActivity);
         const gate = svc.budget.allow(ownerOpenid);
         if (!gate.ok) return { ok: false, reason: `budget:${gate.reason}` };
         svc.budget.recordProactive(ownerOpenid);

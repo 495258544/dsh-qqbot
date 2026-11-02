@@ -20,6 +20,8 @@
 | 5 | `recoverIfCalm` | 接进 `decaySelf`（6h 一次） | e731f74 |
 | 6 | `recordNameCall` | 新增 `extractVocatives()` + `notePossibleName()` | e731f74 / a50bc2f |
 
+> ⚠ **以上"已修复"仅指接线层面。复核结论见下节与 DESIGN-PERSONA §十六（M33）。**
+
 其中 **#1（onIgnored）的报告结论直接命中了一次真实的回归**：
 它是我在一次重构里改没的，编译过、测试绿、日志正常，什么都没发现。
 
@@ -30,11 +32,35 @@
 
 B 类 10 条、D 类 2 条未处理（多为"仅测试使用"或"有写无读"的低危项）。
 
+## 复核更正（2026-11-02，M33）
+
+对上表 6 条做了一次只读复核（`git grep` 剥注释/排测试/排定义行 + 拿线上真实状态文件复跑）。
+**接线 6/6 都真接上了，生效只有 3/6。** 本报告原文有 4 处需要更正：
+
+| 位置 | 原文 | 更正 |
+|---|---|---|
+| #1 | "`onIgnored` 是**唯一**负向来源" | **错**。`onComplained`（−0.2）在 `ec1e298` 就存在且有活调用（`wake-gate.ts:72`） |
+| #1 | "已修复" | **半截**。分支恒假：`bootstrap` 传 `record.lastActivity`，而 `ensureForProactive` 新建会话时刚写 `Date.now()`；私聊 30min 回收、own-life 4h 一次 → `wasAnswered` 恒真。**连 `ProactiveBudget` 的 3天/14天/永久静默整套退避也一起失效**（原文未发现） |
+| #6 | "新增 `extractVocatives` + `notePossibleName`" | **半截**。只修了写端；候选名没有任何消费者（`activeNames` 过滤、`buildSections` 不注入、`qq_decide_name` 要模型自己填）→ 仍是"点不动的按钮" |
+| #6 | "收紧到零误判"（`a50bc2f`） | **不成立**。第三段规则的交替项有光杆 `你`，实测抽出「停一下」「好的」「是啊」「不知道」「太吵了」；测试恰好用「，就像」「，等一下」绕开了该分支 |
+| — | `emotion.ts` 是"新文件" | **不成立**。`git log --follow` 显示首现于 `b9ed065`(11:54:25)，审计基线 `ec1e298`(11:56:15) 时已存在 |
+
+另有两条"接线正确但至今零次生效"：`recoverIfCalm`（线上 `chattiness=1`、`lastComplainedAt=0`、
+真实 130 轮抱怨命中 0/130）、口癖管线（线上 48 条正样本抽出「的。」「完了。」等，且 100% 转正）。
+
+**方法论更正（最重要的一条）**：
+
+> 本报告全程只用「非定义行 grep 命中数」作指标。它能抓"没接上"，
+> **抓不到"接上了但条件恒假"** —— 复核里三条翻车的（#1/#5/#6）全落在盲区。
+> 复审必须加一步：**拿生产真实值跑那条分支，看它到底进不进得去。**
+
+上述问题已在 M33 修订（见 `DESIGN-PERSONA.md` §十六）。
+
 ## 清单
 
 | # | 符号 | 文件:行 | 类 | 说明 | 严重度 |
 |---|---|---|---|---|---|
-| 1 | `onIgnored` | emotion.ts:264 | **A** | 唯一负向来源，调用点消失 | **高** |
+| 1 | `onIgnored` | emotion.ts:264 | **A** | 主要负向来源（非唯一，`onComplained` 仍在），调用点消失 | **高** |
 | 2 | `extractCandidates`/`promoteHabits`/`retireStale`/`markUsed` | voice.ts:230/321/346/380 | **A** | 管线断开 | 高 |
 | 3 | `maybeResetRoute` | session-manager.ts:309 | **A** | 声称每轮调，实无 | 高 |
 | 4 | `onRest` | emotion.ts:282 | **A** | energy 唯一正向写入 | 中 |

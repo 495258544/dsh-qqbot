@@ -197,20 +197,30 @@ export function registerPersonaTools(
         properties: {
           ok: { type: 'boolean' },
           activeNames: { type: 'array', items: { type: 'string' } },
+          // M33：把"还在等她表态的候选"一并回给模型 ——
+          // 否则她拒绝/接受完这个名字之后，依然不知道还有哪些在等
+          pendingNames: { type: 'array', items: { type: 'string' } },
         },
-        required: ['ok', 'activeNames'],
+        required: ['ok', 'activeNames', 'pendingNames'],
         additionalProperties: false,
       },
       render: (_a: unknown, v: unknown): ContentBlock[] => {
-        const r = v as { ok: boolean; activeNames: string[] };
-        return [{ type: 'text', text: r.ok ? `能叫醒你的称呼：${r.activeNames.join('、') || '（无）'}` : '表态失败' }];
+        const r = v as { ok: boolean; activeNames: string[]; pendingNames?: string[] };
+        if (!r.ok) return [{ type: 'text', text: '表态失败' }];
+        const pend = (r.pendingNames ?? []).filter(Boolean);
+        const tail = pend.length ? `\n还在等你表态：${pend.join('、')}` : '';
+        return [{ type: 'text', text: `能叫醒你的称呼：${r.activeNames.join('、') || '（无）'}${tail}` }];
       },
     },
     async execute(args: unknown): Promise<Record<string, unknown>> {
       const a = args as { name: string; accept: boolean; reason?: string };
       const ok = a.accept ? persona.self.acceptName(a.name, 0.6) : persona.self.rejectName(a.name);
       if (ok) logger.info(`persona: 称呼「${a.name}」→ ${a.accept ? '接受' : '拒绝'}`);
-      return { ok, activeNames: persona.self.activeNames() };
+      return {
+        ok,
+        activeNames: persona.self.activeNames(),
+        pendingNames: persona.self.pendingNames().map((p) => p.name),
+      };
     },
   });
 

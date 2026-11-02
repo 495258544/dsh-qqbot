@@ -410,3 +410,56 @@ describe('recoverIfCalm · 被嫌之后要能慢慢恢复（M32）', () => {
     expect(svc.chattiness()).toBe(1.0);
   });
 });
+
+describe('M33 · 称呼候选的读端（recordNameCall 曾经只修了写端）', () => {
+  // 复核 8a94319 时发现：写端接了、读端没接 ——
+  // 候选名写进 self.json 之后没有任何消费者：
+  // activeNames() 把它们过滤掉、buildSections() 不注入、
+  // qq_decide_name 要模型自己填名字（模型不知道有哪些候选，就永远不填）。
+  // 结果 recordNameCall 的日志开始打印"等她表态"，而她永远不知道
+  // 该对哪个名字表态 —— 仍然是"点不动的按钮"。
+
+  it('被叫够阈值才进候选（喊一次的不算）', () => {
+    const { svc } = mkSelf();
+    svc.recordNameCall('阿羽');
+    expect(svc.pendingNames()).toEqual([]); // 只喊了 1 次
+    svc.recordNameCall('阿羽');
+    expect(svc.pendingNames()).toEqual([]); // 2 次还不到 3
+    svc.recordNameCall('阿羽');
+    expect(svc.pendingNames().map((p) => p.name)).toEqual(['阿羽']);
+  });
+
+  it('候选名会被渲染进上下文（否则工具永远收不到调用）', () => {
+    const { svc } = mkSelf();
+    for (let i = 0; i < 3; i++) svc.recordNameCall('阿羽');
+    const sec = svc.renderNameCandidates();
+    expect(sec).toContain('阿羽');
+    expect(sec).toContain('qq_decide_name');
+  });
+
+  it('没到阈值不渲染（避免她过早表态）', () => {
+    const { svc } = mkSelf();
+    svc.recordNameCall('阿羽');
+    svc.recordNameCall('阿羽');
+    expect(svc.renderNameCandidates()).toBe('');
+  });
+
+  it('拒绝过的不再进候选，也不再被反复追问', () => {
+    const { svc } = mkSelf();
+    for (let i = 0; i < 3; i++) svc.recordNameCall('阿羽');
+    expect(svc.rejectName('阿羽')).toBe(true);
+    expect(svc.pendingNames()).toEqual([]);
+    // 再被叫 5 次也不复活（已经表态过了）
+    for (let i = 0; i < 5; i++) svc.recordNameCall('阿羽');
+    expect(svc.pendingNames()).toEqual([]);
+    expect(svc.renderNameCandidates()).toBe('');
+  });
+
+  it('接受后进 activeNames，不再算候选', () => {
+    const { svc } = mkSelf();
+    for (let i = 0; i < 3; i++) svc.recordNameCall('阿羽');
+    expect(svc.acceptName('阿羽')).toBe(true);
+    expect(svc.activeNames()).toContain('阿羽');
+    expect(svc.pendingNames()).toEqual([]);
+  });
+});
