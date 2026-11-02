@@ -93,7 +93,7 @@ export class Humanizer {
     // 抖动
     ms *= 1 + (Math.random() * 2 - 1) * this.jitter;
     // 深夜慢一点（半睡半醒）
-    // 用显式时区：容器无 tzdata，getHours() 是 UTC —— 会让"深夜"完全错位
+    // 用显式时区：启动时未设 TZ 环境变量，getHours() 返回 UTC —— 会让"深夜"完全错位
     // （实测：北京 10:35 会被当成凌晨 2:35，误触发 1.6 倍慢速）。
     const h = hourInTz(new Date());
     if (h >= NIGHT.from && h < NIGHT.to) ms *= 1.6;

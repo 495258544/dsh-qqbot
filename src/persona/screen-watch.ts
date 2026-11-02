@@ -54,6 +54,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import http from 'node:http';
 import { execFile } from 'node:child_process';
+import { hourInTz, dayInTz } from './clock.ts';
 
 // ─────────────────────────── 隐私规则（硬编码） ───────────────────────────
 
@@ -376,7 +377,9 @@ export function matchInterests(
 
 /** 观察时段：默认 [9,23)，支持跨零点区间 */
 export function inActiveHours(now: Date, hours: readonly [number, number]): boolean {
-  const h = now.getHours();
+  // 必须用显式时区：启动时未设 TZ，getHours() 返回 UTC。
+  // 配了 [9,23) 会变成「北京 17:00 → 次日 07:00」，白天不看、半夜乱看。
+  const h = hourInTz(now);
   const [from, to] = hours;
   return from <= to ? h >= from && h < to : h >= from || h < to;
 }
@@ -477,8 +480,8 @@ const TICK_MS = 60 * 1000;
 const SAME_CONTENT_WINDOW_MS = 10 * 60 * 1000;
 
 function dayKey(ts: number): string {
-  const d = new Date(ts);
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  // 同样用北京时区，否则"今天是否已观察过"的边界会偏 8 小时
+  return dayInTz(new Date(ts));
 }
 
 /**

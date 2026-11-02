@@ -56,7 +56,11 @@ export function formatToolResult(
   //   - 其他执行失败：给出人话提示，不暴露内部错误码
   if (data.error) {
     const code = String(data.error.code ?? '');
-    const isToolMissing = /UNKNOWN_TOOL|NOT_FOUND|ToolNotFound|not found/i.test(code)
+    // 只认「工具真的不存在」这两个码。
+    // 原来还匹配了 NOT_FOUND / not found —— 那是通用码，会把 COMMAND_NOT_FOUND /
+    // FILE_NOT_FOUND / `bash: not found` / ENOENT 全判成"工具没注册"然后 return null，
+    // 结果是消息凭空消失：连「（这个操作没成功：bash）」都不发一句。
+    const isToolMissing = /UNKNOWN_TOOL|ToolNotFound/i.test(code)
       || /ToolNotFound|UNKNOWN_TOOL/i.test(String(data.error.name ?? ''));
     if (isToolMissing) {
       // 工具不存在：不展示。她自己会从"工具调用失败"里学到没有这个能力。

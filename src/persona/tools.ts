@@ -16,6 +16,104 @@ interface ToolsRegistryLike {
   register(definition: unknown): unknown;
 }
 
+/**
+ * 调 `bili` CLI 的唯一入口（薄壳）。
+ *
+ * ## 为什么只有这一层
+ *
+ * 我们对 `bili` 的输出字段有依赖，字段一改就静默坏掉。
+ * 与其到处写 `execFileSync` + `JSON.parse` + 字段访问，
+ * 不如把"调用"收敛到一处，这样：
+ *   · 超时/解析/异常的处理只写一遍
+ *   · 字段依赖集中在少数几个 probe 里，好审计
+ *   · 自检模块（bili-health.ts）能拿同一套参数去验证
+ *
+ * ## 为什么 `--max-chars` 交给 bili 而不是自己 slice
+ *
+ * `slice()` 是我们的逻辑，`bili` 的 `--max-chars` 是它的逻辑。
+ * 自己切会切掉结构（比如 JSON 截断），而且升级后行为不一致。
+ * 让上游做截断，我们只管取字段。
+ */
+function runBili(
+  argv: string[],
+  timeoutMs = 60_000,
+): { ok?: boolean; data?: unknown; error?: { code?: string; message?: string }; items?: unknown } | undefined {
+  try {
+    const out = execFileSync('bili', argv, {
+      encoding: 'utf8',
+      timeout: timeoutMs,
+      maxBuffer: 16 * 1024 * 1024,
+    });
+    return JSON.parse(out) as { ok?: boolean; data?: unknown };
+  } catch (err) {
+    // 命令不存在 / 超时 / 非零退出：都不抛，让调用方走"拿不到内容"分支。
+    // bili 失败时也会输出 JSON（{ok:false,error}），但 execFileSync 对非零退出抛异常，
+    // 所以这里要把 stdout 再捞一次。
+    const e = err as { stdout?: string; message?: string };
+    if (e?.stdout) {
+      try { return JSON.parse(e.stdout) as { ok?: boolean; data?: unknown }; } catch { /* 不是 JSON */ }
+    }
+    return undefined;
+  }
+}
+
+/** mm:ss */
+function mmss(sec: number): string {
+  const s = Math.max(0, Math.floor(sec));
+  return `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`;
+}
+
+/**
+ * 把逐句字幕压成「每分钟一条」，保留时间轴（M35）。
+ *
+ * ## 为什么按分钟
+ *
+ * 用户要的是「哪几分钟真正讲到东西」——分钟是人的导航单位：
+ * 他说"第 15 分钟在讲 ACL"，能直接跳过去；给秒级时间轴反而没法扫。
+ *
+ * ## 为什么每分钟取最长的两三句
+ *
+ * 字幕是口语，信息密度极不均匀。实测一个 27 分钟的教学视频：
+ * 全文 8925 字，每句平均 12 字，直接给全文 ≈ 6000 tokens。
+ * 每分钟只留最长的 2 句 → 1295 字（压缩 6.9 倍）≈ 863 tokens，
+ * 而这两句通常就是这一分钟里"信息量最大"的话。
+ *
+ * **这只是压缩，不是判断"值不值得看"。**
+ * 中文口语里"所以/但是/这个"全是填充词，纯统计找不到干货
+ * （我试过按论述标记词打分，抽出来的是「默认路由啊策略路由是吧AACL路由」——
+ * 标记词密但看不出在讲什么）。要判断值不值得看，必须再过一次语义。
+ */
+export function condenseSubtitlesByMinute(
+  items: Array<{ from?: number; to?: number; content?: string }>,
+  opts: { perMinute?: number } = {},
+): Array<{ t: string; text: string }> {
+  const per = Math.max(1, opts.perMinute ?? 2);
+  const buckets = new Map<number, Array<{ at: number; text: string }>>();
+  for (const it of items) {
+    const text = String(it.content ?? '').replace(/\s+/g, ' ').trim();
+    if (!text) continue;
+    const at = Math.max(0, Number(it.from) || 0);
+    const m = Math.floor(at / 60);
+    const arr = buckets.get(m) ?? [];
+    arr.push({ at, text });
+    buckets.set(m, arr);
+  }
+  const out: Array<{ t: string; text: string }> = [];
+  for (const m of [...buckets.keys()].sort((a, b) => a - b)) {
+    const arr = buckets.get(m) ?? [];
+    // 这一分钟里最长的几句 —— 长句通常承载更多信息（短句多是"啊""对吧"）
+    const picked = [...arr].sort((a, b) => b.text.length - a.text.length).slice(0, per);
+    // 按时间顺序还原，读起来才是连贯的
+    picked.sort((a, b) => a.at - b.at);
+    // 时间戳用这一分钟**第一句**的真实时间，而不是 m*60。
+    // 否则 62 分 5 秒会被写成 62:00 —— 分钟内的秒位信息白丢了，
+    // 而用户正是要按这个时间点去跳。
+    const firstAt = arr.reduce((a, b) => Math.min(a, b.at), Number.POSITIVE_INFINITY);
+    out.push({ t: mmss(Number.isFinite(firstAt) ? firstAt : m * 60), text: picked.map((x) => x.text).join(' ') });
+  }
+  return out;
+}
+
 export function registerPersonaTools(
   ctx: Context,
   persona: PersonaService,
@@ -751,19 +849,21 @@ export function registerPersonaTools(
    */
   reg({
     name: 'qq_bili_check',
-    description: '查一个 B 站视频：拿标题、简介、AI 总结、字幕、弹幕、画面帧。'
-      + '想聊某个 B 站视频的内容时用它，别凭印象编。没给 BV 号也可以按关键词搜。',
+    description:
+      '查一个 B 站视频：标题、AI 总结、分章提纲、字幕（带时间轴）、弹幕、画面帧。'
+      + '想聊某个视频的内容时用它，别凭印象编。没给 BV 号也可以按关键词搜。'
+      + '**如果是长视频或合集，先看返回的 pages（分 P 目录），再指定 page 看具体某一集。**',
     parameters: {
       type: 'object',
       properties: {
         bvid: { type: 'string', description: 'BV 号，如 BV1ednc6jE3j' },
         query: { type: 'string', description: '想搜的关键词（没有 BV 号时用）' },
+        page: { type: 'number', description: '合集看到第几 P（默认 1）' },
         want: {
           type: 'string',
           enum: ['summary', 'subtitle', 'danmaku', 'frames', 'all'],
-          description: '要什么：summary=AI总结（默认）、subtitle=字幕、'
-            + 'danmaku=观众弹幕（能反映笑点槽点，比总结有人味）、'
-            + 'frames=抽画面帧（返回图片路径，要能看图的模型才能读懂）、all=全都拿',
+          description: '要什么：summary=AI总结+分章提纲（默认）、subtitle=字幕（按分钟压缩、带时间戳）、'
+            + 'danmaku=观众弹幕、frames=抽画面帧、all=全都拿',
         },
       },
       additionalProperties: false,
@@ -774,8 +874,65 @@ export function registerPersonaTools(
         properties: {
           ok: { type: 'boolean' },
           title: { type: 'string' },
+          page: { type: 'number' },
+          // 合集目录：四十集看不过来时的第一层答案
+          pages: {
+            type: 'array',
+            items: {
+              type: 'object',
+              properties: {
+                page: { type: 'number' },
+                title: { type: 'string' },
+                length: { type: 'string' },
+              },
+              required: ['page', 'title', 'length'],
+              additionalProperties: false,
+            },
+          },
           summary: { type: 'string' },
-          subtitle: { type: 'string' },
+          outline: {
+            type: 'array',
+            items: {
+              type: 'object',
+              properties: {
+                title: { type: 'string' },
+                start: { type: 'string' },
+                points: {
+                  type: 'array',
+                  items: {
+                    type: 'object',
+                    properties: { t: { type: 'string' }, text: { type: 'string' } },
+                    required: ['t', 'text'],
+                    additionalProperties: false,
+                  },
+                },
+              },
+              required: ['title', 'start', 'points'],
+              additionalProperties: false,
+            },
+          },
+          subtitleOutline: {
+            type: 'array',
+            items: {
+              type: 'object',
+              properties: { t: { type: 'string' }, text: { type: 'string' } },
+              required: ['t', 'text'],
+              additionalProperties: false,
+            },
+          },
+          danmakuPeaks: {
+            type: 'array',
+            items: {
+              type: 'object',
+              properties: {
+                t: { type: 'string' },
+                count: { type: 'number' },
+                top: { type: 'array', items: { type: 'string' } },
+              },
+              required: ['t', 'count', 'top'],
+              additionalProperties: false,
+            },
+          },
           danmaku: {
             type: 'array',
             items: {
@@ -810,19 +967,59 @@ export function registerPersonaTools(
       },
       render: (_a: unknown, v: unknown): ContentBlock[] => {
         const r = v as {
-          ok: boolean; title?: string; summary?: string; subtitle?: string;
+          ok: boolean; title?: string; page?: number;
+          pages?: Array<{ page: number; title: string; length: string }>;
+          summary?: string;
+          outline?: Array<{ title: string; start: string; points: Array<{ t: string; text: string }> }>;
+          subtitleOutline?: Array<{ t: string; text: string }>;
+          danmakuPeaks?: Array<{ t: string; count: number; top: string[] }>;
           danmaku?: Array<{ t: string; text: string }>;
           frames?: Array<{ t: string; path: string }>;
-          items?: { bvid: string; title: string }[]; error?: string;
+          items?: { bvid: string; title: string }[];
+          error?: string;
         };
         if (!r.ok) return [{ type: 'text', text: `没查到（${r.error ?? '未知原因'}）` }];
         const parts: string[] = [];
-        if (r.title) parts.push(`《${r.title}》`);
+        if (r.title) parts.push(`《${r.title}》${r.page && r.page > 1 ? ` 第 ${r.page} P` : ''}`);
+        // 合集先给目录 —— 用户要挑着看，先得知道有哪些集
+        if (r.pages?.length) {
+          // 目录同样要"先筛再说"。
+          // 16 行全念一遍等于让他读目录，而他要的是"哪几集值得看"。
+          parts.push(`这是个合集（共 ${r.pages.length} P）：\n`
+            + r.pages.map((p) => `  P${p.page}（${p.length}）${p.title}`).join('\n')
+            + '\n\n↑ 别把 16 行全念给他。按他问的东西**挑相关的 2–3 集**说，'
+            + '或者问他想要哪个方向。\n'
+            + '（要看某一 P 的具体内容，带 page 参数再查一次）');
+        }
         if (r.summary) parts.push(`AI 总结：${r.summary}`);
-        if (r.subtitle) parts.push(`字幕节选：${r.subtitle}`);
+        if (r.outline?.length) {
+          parts.push('分段提纲（可直接按时间跳）：\n' + r.outline.map((sec) =>
+            `  [${sec.start}] ${sec.title}\n`
+            + sec.points.map((pt) => `      ${pt.t} ${pt.text}`).join('\n')).join('\n'));
+        }
+        if (r.subtitleOutline?.length) {
+          // 这不是"给你看的资料"，是"给你挑的原料"。
+          //
+          // 原来的措辞是「字幕·按分钟（这一分钟主要在讲）」——
+          // 那是在暗示"这就是结论"，她很可能直接整段转给用户。
+          // 结果就是从"四十集看不过来"变成"32 分钟看不完"，问题只是换了个尺度。
+          //
+          // 用户要的是**你先筛过**。所以这里明确要求她挑，并给出挑的标准。
+          parts.push(
+            '字幕·按分钟（**这是原料，不是结论**）：\n'
+            + r.subtitleOutline.map((x) => `  [${x.t}] ${x.text}`).join('\n')
+            + '\n\n↑ 别整段转给他。你要做的是**从中挑出真正讲到东西的 3–5 段**，'
+            + '每段用一句话说清"这讲了什么"，带上时间点。\n'
+            + '挑的标准：有具体命令/参数/结论/易错点的才算"讲到东西"；'
+            + '铺垫、寒暄、"我们后面再讲"这类跳过。'
+          );
+        }
+        if (r.danmakuPeaks?.length) {
+          parts.push('观众反应最强的时刻：\n'
+            + r.danmakuPeaks.map((x) => `  ${x.t}（${x.count} 条）${x.top.join(' / ')}`).join('\n'));
+        }
         if (r.danmaku?.length) {
-          parts.push('弹幕（观众当时在说什么）：\n'
-            + r.danmaku.slice(0, 15).map((x) => `  ${x.t} ${x.text}`).join('\n'));
+          parts.push('弹幕：\n' + r.danmaku.slice(0, 15).map((x) => `  ${x.t} ${x.text}`).join('\n'));
         }
         if (r.frames?.length) {
           parts.push('画面帧（图片路径）：\n' + r.frames.map((x) => `  ${x.t} ${x.path}`).join('\n'));
@@ -834,19 +1031,13 @@ export function registerPersonaTools(
       },
     },
     async execute(args: unknown): Promise<Record<string, unknown>> {
-      const { bvid, query, want } = args as { bvid?: string; query?: string; want?: string };
-      const run = (a: string[]): Record<string, unknown> | undefined => {
-        try {
-          const out = execFileSync('bili', a, { encoding: 'utf8', timeout: 30_000 });
-          return JSON.parse(out) as Record<string, unknown>;
-        } catch {
-          return undefined;
-        }
-      };
+      const a = args as { bvid?: string; query?: string; page?: number; want?: string };
+      const run = (argv: string[]): { ok?: boolean; data?: unknown; error?: { message?: string } } | undefined =>
+        runBili(argv);
 
       // 没给 BV → 搜索
-      if (!bvid) {
-        const q = String(query ?? '').trim();
+      if (!a.bvid) {
+        const q = String(a.query ?? '').trim();
         if (!q) return { ok: false, error: '需要 bvid 或 query' };
         const r = run(['search', 'video', q]);
         const d = (r?.data ?? {}) as { items?: Array<{ bvid?: string; title?: string }> };
@@ -857,65 +1048,101 @@ export function registerPersonaTools(
         return { ok: true, items };
       }
 
-      const mode = (['subtitle', 'danmaku', 'frames', 'all'].includes(String(want)) ? String(want) : 'summary') as
-        | 'subtitle' | 'danmaku' | 'frames' | 'all' | 'summary';
+      const bvid = String(a.bvid).trim();
+      const page = Math.max(1, Number(a.page) || 1);
+      const mode = (['subtitle', 'danmaku', 'frames', 'all'].includes(String(a.want))
+        ? String(a.want) : 'summary') as 'subtitle' | 'danmaku' | 'frames' | 'all' | 'summary';
+
       const info = run(['video', 'info', bvid]);
-      const title = ((info?.data ?? {}) as { title?: string }).title ?? '';
+      const idata = (info?.data ?? {}) as {
+        title?: string;
+        duration?: number;
+        pages?: Array<{ page?: number; title?: string; duration?: number }>;
+      };
+      const title = idata.title ?? '';
+      const pages = (idata.pages ?? [])
+        .filter((p) => (p.page ?? 0) > 0)
+        .map((p) => ({
+          page: Number(p.page) || 0,
+          title: String(p.title ?? '').trim() || `P${p.page}`,
+          length: mmss(Number(p.duration) || 0),
+        }));
+      const isCollection = pages.length > 1;
 
+      const out: Record<string, unknown> = { ok: true };
+      if (title) out.title = title;
+      if (isCollection) { out.pages = pages; out.page = page; }
+
+      // AI 总结 + 分段提纲
       let summary = '';
+      let outline: Array<{ title: string; start: string; points: Array<{ t: string; text: string }> }> = [];
       if (mode === 'summary' || mode === 'all') {
-        const r = run(['video', 'summary', bvid]);
-        summary = ((r?.data ?? {}) as { summary?: string }).summary ?? '';
+        const r = run(['video', 'summary', bvid, '--page', String(page)]);
+        const data = (r?.data ?? {}) as {
+          summary?: string;
+          outline?: Array<{ title?: string; start?: number; points?: Array<{ time?: number; content?: string }> }>;
+        };
+        summary = data.summary ?? '';
+        outline = (data.outline ?? [])
+          .filter((sec) => (sec.points?.length ?? 0) > 0)
+          .map((sec) => ({
+            title: String(sec.title ?? ''),
+            start: mmss(Number(sec.start) || 0),
+            points: (sec.points ?? []).map((pt) => ({
+              t: mmss(Number(pt.time) || 0),
+              text: String(pt.content ?? ''),
+            })),
+          }));
+        if (summary) out.summary = summary;
+        if (outline.length) out.outline = outline;
       }
 
-      let subtitle = '';
+      // 字幕：**必须用 subtitle 而不是 watch**
+      // watch 的 transcript 是 {source, text} —— 时间轴被压平了，
+      // 正是用户抱怨的"整段倒出来"。带时间轴的只有 subtitle（不带 --text）。
       if (mode === 'subtitle' || mode === 'all') {
-        const r = run(['video', 'subtitle', bvid]);
-        const items = ((r?.data ?? {}) as { items?: Array<{ content?: string }> }).items ?? [];
-        // 只取前若干条并压成一段 —— 全文太占上下文
-        subtitle = items.slice(0, 40).map((x) => x.content ?? '').filter(Boolean).join(' ').slice(0, 1200);
+        const r = run(['video', 'subtitle', bvid, '-p', String(page)]);
+        const items = ((r?.data ?? {}) as { items?: Array<{ from?: number; to?: number; content?: string }> }).items ?? [];
+        const packed = condenseSubtitlesByMinute(items);
+        if (packed.length) out.subtitleOutline = packed;
       }
 
-      // 弹幕（M29）：观众看到画面后的真实反应，比 AI 总结有人味，且纯文本零成本
-      let danmaku: Array<{ t: string; text: string }> = [];
       if (mode === 'danmaku' || mode === 'all') {
-        const r = run(['video', 'danmaku', bvid]);
+        try {
+          const pk = run(['video', 'danmaku', bvid, '--peaks', '5', '-p', String(page)]);
+          const pdata = (pk?.data ?? {}) as { peaks?: Array<{ time?: number; count?: number; top?: string[] }> };
+          const peaks = (pdata.peaks ?? [])
+            .filter((x) => (x.count ?? 0) > 0)
+            .slice(0, 5)
+            .map((x) => ({
+              t: mmss(Number(x.time) || 0),
+              count: Number(x.count) || 0,
+              top: (x.top ?? []).slice(0, 3).map(String),
+            }));
+          if (peaks.length) out.danmakuPeaks = peaks;
+        } catch { /* peaks 拿不到不影响主流程 */ }
+        const r = run(['video', 'danmaku', bvid, '-p', String(page)]);
         const items = ((r?.data ?? {}) as { items?: Array<{ time?: number; text?: string }> }).items ?? [];
-        danmaku = items
-          .filter((x) => x.text)
-          // 弹幕很多，只留前 30 条，时间转成 mm:ss 便于她引用
-          .slice(0, 30)
-          .map((x) => {
-            const sec = Math.max(0, Math.floor(Number(x.time) || 0));
-            return { t: `${String(Math.floor(sec / 60)).padStart(2, '0')}:${String(sec % 60).padStart(2, '0')}`, text: String(x.text) };
-          });
+        const dm = items.filter((x) => x.text).slice(0, 30)
+          .map((x) => ({ t: mmss(Number(x.time) || 0), text: String(x.text) }));
+        if (dm.length) out.danmaku = dm;
       }
 
-      // 画面帧（M29）：抽图返回路径。她如果没有视觉能力，拿到的是路径而非内容；
-      // 但配合弹幕能间接理解画面（弹幕是"人看了画面之后的反应"）。
-      let frames: Array<{ t: string; path: string }> = [];
       if (mode === 'frames' || mode === 'all') {
-        const r = run(['video', 'frames', bvid, '-n', '6']);
+        const r = run(['video', 'frames', bvid, '-n', '6', '-p', String(page)]);
         const items = ((r?.data ?? {}) as { frames?: Array<{ time?: number; path?: string }> }).frames ?? [];
-        frames = items
-          .filter((x) => x.path)
-          .map((x) => {
-            const sec = Math.max(0, Math.floor(Number(x.time) || 0));
-            return { t: `${String(Math.floor(sec / 60)).padStart(2, '0')}:${String(sec % 60).padStart(2, '0')}`, path: String(x.path) };
-          });
+        const fr = items.filter((x) => x.path)
+          .map((x) => ({ t: mmss(Number(x.time) || 0), path: String(x.path) }));
+        if (fr.length) out.frames = fr;
       }
 
-      if (!title && !summary && !subtitle && !danmaku.length && !frames.length) {
+      const hasContent = out.summary || out.subtitleOutline || out.danmaku || out.danmakuPeaks || out.frames;
+      if (!hasContent) {
+        // 合集只给目录也算成功（用户接下来要挑 P）
+        if (isCollection) return out;
         return { ok: false, error: '视频信息拿不到' };
       }
-      return {
-        ok: true,
-        ...(title ? { title } : {}),
-        ...(summary ? { summary } : {}),
-        ...(subtitle ? { subtitle } : {}),
-        ...(danmaku.length ? { danmaku } : {}),
-        ...(frames.length ? { frames } : {}),
-      };
+      return out;
     },
   });
 

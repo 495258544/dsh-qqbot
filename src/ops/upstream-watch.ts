@@ -262,7 +262,7 @@ function isOverlapCandidate(file: string): boolean {
 }
 
 /**
- * 北京时间分片。**显式 IANA 时区**，不依赖宿主机时区（容器无 tzdata、TZ 无效）。
+ * 北京时间分片。**显式 IANA 时区**，不依赖宿主机时区（启动时未设 TZ、TZ 无效）。
  * 返回 {hour, minute, dayKey: 'YYYY-MM-DD'}。
  */
 export function beijingParts(nowTs: number): { hour: number; minute: number; dayKey: string } {

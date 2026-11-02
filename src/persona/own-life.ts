@@ -84,7 +84,7 @@ export const DEFAULT_TEXT_MIDNIGHT = [
   '就算真要说话，也是你自己的想法，不是把这几行提示说给别人听。',
 ].join('\n');
 
-// 这两个必须用显式时区（容器无 tzdata，本地方法返回 UTC）：
+// 这两个必须用显式时区（启动时未设 TZ，本地方法返回 UTC）：
 //   - hhmm：日志里显示的时刻会差 8 小时
 //   - dayKey："每天最多 N 次"的日期边界会偏到北京 08:00
 function hhmm(ts: number): string {
@@ -104,7 +104,7 @@ function dayKey(ts: number): string {
 export type OwnLifeDeliverResult = boolean | void | { ok?: boolean; reason?: string };
 
 export interface OwnLifeOptions {
-  /** IANA 时区（容器无 tzdata，必须显式指定，默认 Asia/Shanghai） */
+  /** IANA 时区（启动时未设 TZ，必须显式指定，默认 Asia/Shanghai） */
   tz?: string;
   /** 静默提示投递：注入 agent 上下文，不发消息。见 OwnLifeDeliverResult 三态语义 */
   deliver: (text: string) => Promise<OwnLifeDeliverResult>;
@@ -214,7 +214,7 @@ export function createOwnLife(opts: OwnLifeOptions): OwnLifeHandle {
   }
 
   function inQuiet(now: number): boolean {
-    // 修复：容器无 tzdata，getHours() 返回 UTC → 会用错时段。
+    // 修复：启动时未设 TZ，getHours() 返回 UTC → 会用错时段。
     // 改用显式 IANA 时区换算（Intl 自带 ICU，已实测正确）。
     const h = hourInTz(new Date(now), tz);
     const [from, to] = quiet;

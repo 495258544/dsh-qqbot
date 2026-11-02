@@ -253,7 +253,7 @@ export function surfTopic(topic: string, opts: { deep?: boolean; maxFindings?: n
   }
 }
 
-/** 现在是否在冲浪时段（默认凌晨 3:00–7:00，**按北京时间**，容器无 tzdata） */
+/** 现在是否在冲浪时段（默认凌晨 3:00–7:00，**按北京时间**，启动时未设 TZ） */
 export function inSurfWindow(now = new Date(), from = 3, to = 7, tz = DEFAULT_TZ): boolean {
   return isHourInRange(hourInTz(now, tz), from, to);
 }

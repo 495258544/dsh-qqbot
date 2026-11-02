@@ -37,3 +37,35 @@ describe('工具报错 · 不把技术细节泄露给用户', () => {
     expect(out).toContain('没成功');
   });
 });
+
+describe('工具报错 · 通用 NOT_FOUND 不能被当成"工具不存在"', () => {
+  // 2026-11-03：原来的正则是 /UNKNOWN_TOOL|NOT_FOUND|ToolNotFound|not found/i，
+  // 把 COMMAND_NOT_FOUND / FILE_NOT_FOUND / `bash: not found` / ENOENT 全判成
+  // "工具没注册" → return null → 消息凭空消失，用户连一句"没成功"都收不到。
+  it('COMMAND_NOT_FOUND / FILE_NOT_FOUND / ENOENT 都要给一句人话', () => {
+    for (const code of ['COMMAND_NOT_FOUND', 'FILE_NOT_FOUND', 'ENOENT', 'bash: not found']) {
+      const out = formatToolResult(
+        'qq_bili_check',
+        '{}',
+        { error: { name: 'CommandError', code } } as never,
+        undefined,
+        undefined,
+      );
+      expect(out, `${code} 不该被静默丢弃`).not.toBeNull();
+      expect(out).toContain('没成功');
+    }
+  });
+
+  it('真正的"工具不存在"仍然静默（这条不能被上面的放宽破坏）', () => {
+    for (const code of ['UNKNOWN_TOOL', 'ToolNotFound']) {
+      const out = formatToolResult(
+        'wait_agent',
+        '{}',
+        { error: { name: 'ToolNotFoundError', code } } as never,
+        undefined,
+        undefined,
+      );
+      expect(out, `${code} 应该仍然静默`).toBeNull();
+    }
+  });
+});

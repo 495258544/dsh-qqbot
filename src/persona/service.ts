@@ -556,7 +556,7 @@ export class PersonaService {
   /** P6：时间感上下文——"几点了 / 周几 / 距上次聊了多久"，给人格现实锚点。
    *  距上次由调用方传入 lastActivityAt（ms）；缺省则不拼该句。 */
   static timeSection(now: Date = new Date(), lastActivityAt?: number): { name: string; order: number; text: string } | undefined {
-    // 修复：容器无 tzdata，getHours() 是 UTC → 时间感会差 8 小时
+    // 修复：启动时未设 TZ，getHours() 是 UTC → 时间感会差 8 小时
     const hhmm = clockInTz(now, DEFAULT_TZ);
     const weekdayIdx = weekdayInTz(now, DEFAULT_TZ);
     const week = ['日', '一', '二', '三', '四', '五', '六'][weekdayIdx];
@@ -786,7 +786,7 @@ export class PersonaService {
     // 后者在她没说话时也会触发，等于白送心情。
     if (reply && user) this.emotion.onReplied();
     // ── M31 情绪写入点④：深夜还在聊 → 精力下降 ──
-    // 时间必须用北京时间算（容器无 tzdata，getHours() 是 UTC）
+    // 时间必须用北京时间算（启动时未设 TZ，getHours() 是 UTC）
     if (user || reply) this.emotion.onNightChat(hourInTz(new Date(), DEFAULT_TZ));
 
     // ── M23：事实硬触发 ──
@@ -840,7 +840,7 @@ export class PersonaService {
    */
   private autoDiary(): void {
     try {
-      // 用显式时区算"今天"（容器无 tzdata，getDate() 是 UTC，会差 8 小时）
+      // 用显式时区算"今天"（启动时未设 TZ，getDate() 是 UTC，会差 8 小时）
       const day = dayInTz(new Date(), DEFAULT_TZ);
 
       // 当天已经写过就不重复

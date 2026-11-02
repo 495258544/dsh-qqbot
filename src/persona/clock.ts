@@ -1,5 +1,5 @@
 /**
- * 时区工具（容器无 tzdata 的正确解法）
+ * 时区工具（显式 IANA 时区，不依赖进程环境）
  * ─────────────────────────────────────────────────────────────
  * 问题：这个 Ubuntu proot 容器**没有 /usr/share/zoneinfo**，
  *      `TZ=Asia/Shanghai` 被静默忽略，`new Date().getHours()` 返回的是 **UTC**。
