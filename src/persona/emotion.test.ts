@@ -743,37 +743,48 @@ describe('M34 · 正向事件日上限与边际递减（解决"永远贴顶"）'
   });
 });
 
-describe('renderSection · 她得知道自己是什么心情（M33）', () => {
-  // 同一类错误第三次出现：数据接在闸门上会影响行为，但不注入提示词，
-  // 她本人就不知道为什么。外面看是"她在闹脾气"，里面是"她不知道为什么"。
+describe('renderSection · 只给事实，不给结论（M33）', () => {
+  // 第一版我写的是「【你现在的心情：心情挺好的】」—— 替她下了结论。
+  // 错在解释权的归属：给结论她照着演，而且结论写进提示词就固化了
+  // （今天"低落"，聊得多开心都不好意思转晴）。
+  //
+  // 对照 dsh-bili-whale：「只给事实，情绪留给她自己写」。
 
-  it('平静时不注入（天天说"我心情还行"本身就是 AI 味）', () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'emotion-render-'));
+  it('平静且没有事实时不注入', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'emotion-facts-'));
     expect(new EmotionService(dir).renderSection()).toBe('');
   });
 
-  it('心情好会注入，且措辞不是"请表现出来"', () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'emotion-render2-'));
+  it('久没被理 → 只给天数，不给"所以你难过"', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'emotion-facts2-'));
     const svc = new EmotionService(dir);
-    for (let i = 0; i < 3; i++) svc.onReplied();
-    const t = svc.renderSection();
-    expect(t).toContain('心情');
-    // 不能写成命令式：那会变成表演
-    expect(t).not.toContain('请表现');
-    expect(t).not.toContain('保持');
+    const t = svc.renderSection({ silentDays: 8 });
+    expect(t).toContain('8 天');
+    // 不能出现替她下的情绪结论
+    expect(t).not.toContain('难过');
+    expect(t).not.toContain('失落');
+    expect(t).not.toContain('心情');
   });
 
-  it('很累会注入', () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'emotion-render3-'));
+  it('连续没人接 → 报次数，不下判断', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'emotion-facts3-'));
+    const svc = new EmotionService(dir);
+    const t = svc.renderSection({ unanswered: 3 });
+    expect(t).toContain('3 次');
+    expect(t).not.toContain('心慌');
+  });
+
+  it('精力低用身体感受描述，不用形容词结论', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'emotion-facts4-'));
     const svc = new EmotionService(dir);
     for (let i = 0; i < 6; i++) svc.onNightChat(2);
-    expect(svc.renderSection()).toContain('累');
+    const t = svc.renderSection();
+    expect(t).toContain('困');
   });
 
-  it('注入内容不会泄露给用户（是给她的状态，不是台词）', () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'emotion-render4-'));
+  it('明确写了"怎么想随你"，把解释权留给她', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'emotion-facts5-'));
     const svc = new EmotionService(dir);
-    for (let i = 0; i < 3; i++) svc.onReplied();
-    expect(svc.renderSection()).toContain('不用解释原因');
+    expect(svc.renderSection({ silentDays: 4 })).toContain('随你');
   });
 });

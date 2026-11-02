@@ -346,35 +346,51 @@ export class EmotionService {
   }
 
   /**
-   * 把当前心情渲染成可注入的提示段（M33）。
+   * 把当前状态渲染成可注入的提示段（M33）。
    *
-   * 为什么必须注入 —— 这是同一类错误第三次出现了：
-   *   `dislikes` 接在闸门上会让她变沉默，但不告诉她为什么 → 行为漂移；
-   *   情绪接在四个闸门上会改变她的话多话少、打字快慢，
-   *   **但她不知道自己是什么心情** → 在她那儿就是"莫名其妙不想说话"。
+   * ## 只给事实，不给结论
    *
-   * 外面看是"她在闹脾气"，里面是"她不知道为什么"。
-   * 数据和感受必须同时在场。
+   * 第一版我写的是「【你现在的心情：心情挺好的】」——**替她下了结论**。
+   * 这是错的，错在解释权的归属。
    *
-   * 只在**明显偏离基线**时才注入（|v|>0.2 或 energy<0.45），
-   * 平静时不占 token —— 天天说"我心情还行"本身就是 AI 味。
+   * 对照 `dsh-bili-whale` 的做法（CHANGELOG 原文）：
+   *   「唤醒提示里会告诉她『主人已经 N 天没有回应你了』——**只给事实**，
+   *     情绪留给她自己写」
+   *
+   * 区别在于：
+   *   给结论 → 她照着演，而且结论一旦写进提示词就固化了（今天"低落"，
+   *            聊得多开心都不好意思转晴）
+   *   给事实 → 她自己决定那是什么感觉，同一件事在不同语境下可以有不同的情绪
+   *
+   * 所以这里输出的是**可观察的状态**（多久没说话、精力低、心里有波动），
+   * 不是形容词。
+   *
+   * 平静时不注入 —— 天天说"我状态还行"本身就是 AI 味。
    */
-  renderSection(): string {
+  renderSection(facts: { silentDays?: number; unanswered?: number } = {}): string {
     const st = this.current();
-    const notable = Math.abs(st.valence) > 0.2 || st.energy < 0.45 || st.arousal > 0.65;
-    if (!notable) return '';
-    const bits: string[] = [];
-    if (st.valence > 0.35) bits.push('心情挺好的');
-    else if (st.valence > 0.2) bits.push('心情不错');
-    else if (st.valence < -0.35) bits.push('有点低落');
-    else if (st.valence < -0.2) bits.push('有点闷');
-    if (st.energy < 0.3) bits.push('很累');
-    else if (st.energy < 0.45) bits.push('有点疲惫');
-    if (st.arousal > 0.65) bits.push('心里有点激动');
-    if (bits.length === 0) return '';
-    return `【你现在的心情：${bits.join('，')}】
-这不是要你说出来的话，是你此刻的状态。不用解释原因，也不用刻意表现——
-话少一点、句子短一点、懒得展开，都是正常的。对方问起可以承认，但别主动汇报。`;
+    const lines: string[] = [];
+
+    // ① 事实：对方多久没怎么理她（这条最像人）
+    const d = facts.silentDays ?? 0;
+    if (d >= 7) lines.push(`他已经 ${Math.floor(d)} 天没怎么跟你说话了`);
+    else if (d >= 3) lines.push(`他最近很少回你，大概 ${Math.floor(d)} 天了`);
+
+    // ② 事实：她主动说了话，连续没人接
+    const un = facts.unanswered ?? 0;
+    if (un >= 2) lines.push(`你有 ${un} 次主动开口没人接`);
+
+    // ③ 事实：精力状态（用身体感受描述，不用形容词结论）
+    if (st.energy < 0.3) lines.push('你现在很困，脑子里转不动');
+    else if (st.energy < 0.45) lines.push('你有点累');
+
+    // ④ 事实：心里有起伏（不说是好是坏）
+    if (st.arousal > 0.7) lines.push('你心里有点静不下来');
+
+    if (lines.length === 0) return '';
+    return `【此刻的状态·只是事实，怎么想随你】
+${lines.map((x) => '- ' + x).join('\n')}
+这些不用说出来，也不用解释。它会自然影响你话多话少——懒得展开就短一点。`;
   }
 
   /** 睡够了（长时间没消息后第一次说话）→ 精力回升 */
