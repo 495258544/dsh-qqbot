@@ -9,6 +9,7 @@
  *   - bootstrap：工具注册（qq_write_diary / qq_read_diary / qq_memory_append）
  *                + own-life 定时静默唤醒 + 主动消息预算/冷退避
  */
+import fs from 'node:fs';
 import path from 'node:path';
 import { Memory } from './memory.ts';
 import { Diary } from './diary.ts';
@@ -17,10 +18,13 @@ import { Waker } from './wake.ts';
 import { SelfProfileService } from './self.ts';
 import { VoiceService } from './voice.ts';
 import { SelfNoteService } from './self-note.ts';
+import { EmotionService, speakWillingness, typingSpeedFactor, burstLimit, describeEmotion } from './emotion.ts';
 import { runSurfRound, inSurfWindow, surfTopic, type SurfResult } from './surf.ts';
-import { clockInTz, weekdayInTz, DEFAULT_TZ } from './clock.ts';
+import { clockInTz, weekdayInTz, dayInTz, hourInTz, DEFAULT_TZ } from './clock.ts';
+import { prunePendingAttachments } from '../features/pending-attachments.ts';
 import { Humanizer } from './humanize.ts';
 import { extractFact, extractTrait } from './fact-extract.ts';
+import { matchesTopic } from './word-match.ts';
 import { pickDiaryMaterial, composeDiaryText, readTurnsOfDay, shouldWriteDiary } from './diary-auto.ts';
 import { createOwnLife, type OwnLifeHandle, type OwnLifeDeliverResult } from './own-life.ts';
 import { createScreenWatch, type ScreenWatchHandle, type ScreenWatchOptions, type ScreenNudge, type ScreenDeliverResult } from './screen-watch.ts';
@@ -34,6 +38,17 @@ export interface PersonaBudgetPeer {
   mutedUntil: number;
   /** 本轮主动推送是否已记过"未响应"（防重复计） */
   staleCounted?: boolean;
+  /**
+   * 最近一次"问她是不是在忙"的时间（M34）。
+   *
+   * 为什么单独记：`mutedUntil` 只是**拦住**她再发消息，
+   * 但没有告诉她"你已经问过一次了"。行为上被拦、认知上不知道，
+   * 结果就是她会在提示里被暗示"可以问问他在忙吗"，然后又一次被静音。
+   *
+   * 来源：`dsh-bili-whale` 的 `quota ask` ——「只问一次，不追问」。
+   * 追问是讨人厌最快的路径，而这个成本只是一个时间戳。
+   */
+  askedAt?: number;
 }
 
 /**
@@ -52,8 +67,17 @@ export class ProactiveBudget {
   ) {}
 
   private day(): string {
-    const d = new Date();
-    return `${d.getFullYear()}-${d.getMonth() + 1}-${d.getDate()}`;
+    // 必须用北京时区：「每日上限」的边界应该在北京零点切换，
+    // 用容器本地时区（UTC）会让每天从北京 08:00 才开始，早上的主动消息会被算进前一天。
+    return dayInTz(new Date(), DEFAULT_TZ);
+  }
+
+  /**
+   * 只读快照（不创建占位）。给 PersonaService 结算情绪用 ——
+   * 它需要在 observe 前后各看一次 unansweredStreak 才知道"这次算不算失落"。
+   */
+  peerSnapshot(id: string): PersonaBudgetPeer | undefined {
+    return this.peers.get(id);
   }
 
   private peer(id: string): PersonaBudgetPeer {
@@ -125,6 +149,17 @@ export class ProactiveBudget {
   }
 
   /**
+   * 记下"她已经问过是不是在忙了"（M34）。
+   *
+   * 「只问一次，不追问」—— 追问是讨人厌最快的路径。
+   * 记完下次注入会告诉她"你已经问过一次了，还没回"，
+   * 而不是放任她再问一遍又被静音。
+   */
+  markAsked(peerId: string): void {
+    this.peer(peerId).askedAt = Date.now();
+  }
+
+  /**
    * 观察 peer 的最近活跃时间：若晚于我方最后一次主动推送，
    * 视为"理你了"清零；否则在下次投递前记一次未响应。
    * （inbound 直接调 markReplied；本方法供 own-life 投递前结算用）
@@ -179,6 +214,8 @@ export class PersonaService {
    * 放在数据目录而不是 profile —— 改 profile 要重启，这三样却是最常改的。
    */
   public readonly runtime: RuntimeConfig;
+  /** 情绪（M31：三个数字，接在四个行为闸门上，不进提示词当描述） */
+  public readonly emotion: EmotionService;
   public readonly humanizer: Humanizer;
   public readonly budget: ProactiveBudget;
   public ownLife: OwnLifeHandle | undefined;
@@ -189,10 +226,50 @@ export class PersonaService {
   /** 轮内记账暂存（sessionId → 用户/回复文本），turn/end 配对写流水后清除。
    *  刻意不挂 SessionRecord：deliverables 等既有路径对 record 做深比较 */
   private readonly turnLedger = new Map<string, { user?: string; reply: string; who?: string }>();
+  /**
+   * 上一次对话轮结束的时间（M31：用来判断"中间是不是睡了一觉"）。
+   *
+   * M33：**必须落盘**。原来它是纯内存字段，进程一重启就归零 →
+   * 重启后第一次 flushTurn 被 `last > 0` 挡掉（正确），
+   * 但第二次因为 `now - last` 很小，于是"睡了一觉"的时间维度整个丢失。
+   * 而 `onRest` 是 energy 的**唯一正向来源**，压在易失字段上等于
+   * "重启越频繁，她越累"。改从 `state/last-turn.json` 读，
+   * 拿不到再回落到内存值。
+   */
+  private lastTurnAt = 0;
+  private readonly lastTurnFile: string;
   private readonly pruneTimer: ReturnType<typeof setInterval> | undefined;
+
+  /** 读取上次轮末时间（优先落盘值，失败回落内存） */
+  private loadLastTurnAt(): number {
+    try {
+      const raw = JSON.parse(fs.readFileSync(this.lastTurnFile, 'utf8')) as { at?: unknown };
+      const n = raw.at;
+      if (typeof n === 'number' && Number.isFinite(n) && n > 0) {
+        this.lastTurnAt = n;
+      }
+    } catch {
+      /* 文件不存在/坏档 → 用内存值（通常是 0，即"不知道上次什么时候") */
+    }
+    return this.lastTurnAt;
+  }
+
+  /** 写回上次轮末时间（失败只记日志，不影响主流程） */
+  private persistLastTurnAt(at: number): void {
+    this.lastTurnAt = at;
+    try {
+      fs.mkdirSync(path.dirname(this.lastTurnFile), { recursive: true });
+      const tmp = `${this.lastTurnFile}.tmp`;
+      fs.writeFileSync(tmp, JSON.stringify({ at }, null, 1), 'utf8');
+      fs.renameSync(tmp, this.lastTurnFile);
+    } catch (err) {
+      this.deps.logger.warn(`persona: 写入 last-turn 失败: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
 
   constructor(private readonly deps: PersonaDeps) {
     const { config, dataDir, logger } = deps;
+    this.lastTurnFile = path.join(dataDir, 'state', 'last-turn.json');
     this.memory = new Memory({ dir: path.join(dataDir, 'memory') });
     this.diary = new Diary(path.join(dataDir, 'diary'));
     this.self = new SelfProfileService(dataDir, (m) => logger.info(m));
@@ -200,6 +277,8 @@ export class PersonaService {
     this.selfNote = new SelfNoteService(dataDir, (m) => logger.info(m));
     // 运行时配置：改完文件即刻生效，不必重启宿主
     this.runtime = new RuntimeConfig(path.join(dataDir, 'runtime.json'), (m) => logger.warn(m));
+    this.emotion = new EmotionService(dataDir, (m) => logger.info(m));
+    this.loadLastTurnAt();
     if (config.roleCardPath) {
       this.role = new Role({ cardPath: config.roleCardPath, maxChars: config.roleMaxChars });
       const l = this.role.lint();
@@ -216,11 +295,18 @@ export class PersonaService {
         idleDiveThreshold: config.idleDiveThreshold,
       });
       // 兴趣驱动唤醒：从 self.json 实时取兴趣与话痨度
-      waker.setInterestProvider(() => ({
-        interests: this.self.snapshot().interests.map((i) => ({ topic: i.topic, weight: i.weight })),
-        chattiness: this.self.chattiness(),
-        baseProbability: config.interestBaseProbability,
-      }));
+      waker.setInterestProvider(() => {
+        const snap = this.self.snapshot();
+        return {
+          interests: snap.interests.map((i) => ({ topic: i.topic, weight: i.weight })),
+          // M30：讨厌的话题把唤醒概率打下来（在 wake.ts 的公式里做减法）
+          dislikes: (snap.dislikes ?? []).filter((i) => !i.frozen).map((i) => ({ topic: i.topic, weight: i.strength ?? i.weight })),
+          chattiness: this.self.chattiness(),
+          // M31 闸门①：心情好坏影响"愿不愿意主动开口"（0.6~1.4 倍）
+          moodFactor: speakWillingness(this.emotion.current()),
+          baseProbability: config.interestBaseProbability,
+        };
+      });
       // 动态称呼：配置名 ∪ 她自己接受的称呼 ∪ runtime.json 里补的
       waker.setNameProvider(() => {
         const extra = this.self.activeNames();
@@ -237,6 +323,11 @@ export class PersonaService {
       msPerChar: config.msPerChar,
       burstMax: config.burstMax,
       gapRange: config.gapMinMs && config.gapMaxMs ? [config.gapMinMs, config.gapMaxMs] : undefined,
+      // M31 闸门②③：情绪影响打字快慢（累了会拖）与分几条发（激动时连发）
+      mood: () => {
+        const st = this.emotion.current();
+        return { speed: typingSpeedFactor(st), burst: burstLimit(st, config.burstMax) };
+      },
     });
     this.budget = new ProactiveBudget(config.maxProactivePerDay, config.proactiveMinGapMs, logger);
     // 周期清理 Waker/Budget 的过期会话状态（审查 m9）——每 6h 一次
@@ -251,12 +342,77 @@ export class PersonaService {
     const a = this.waker?.prune(SW) ?? 0;
     const b = this.budget.prune(SW);
     if (a || b) this.deps.logger.info(`persona: prune 清理 waker=${a} budget=${b}`);
+    // M35：待领附件也要清 —— 读取时会自清，但**没人来取的键会一直留在内存里**。
+    // `pruneStale` 6 小时跑一次，正好配 TTL 的节奏。
+    try {
+      const pa = prunePendingAttachments();
+      if (pa) this.deps.logger.info(`persona: 清理 ${pa} 个过期待领附件`);
+    } catch { /* 清理失败不影响主流程 */ }
+    this.decaySelf();
     // M32：口癖退役体检（原来也是零调用 —— 长期不用的口癖永远不会退役）
     try {
       const retired = this.voice.retireStale();
       if (retired) this.deps.logger.info(`persona: ${retired} 条口癖因长期不用退役`);
     } catch {
       /* 不影响主流程 */
+    }
+    // M31：心情也在动，但它是**最容易被写成死代码**的那类数据
+    // （算出来了没人看）。每 6 小时打一行，让"她的情绪"在日志里可见 ——
+    // 出问题时能一眼看出是"真的没波动"还是"根本没在跑"。
+    this.deps.logger.info(`persona: 心情 ${describeEmotion(this.emotion.current())}`);
+  }
+
+  /**
+   * 兴趣/厌恶惰性衰减（M30 修的一处死链）。
+   *
+   * 实测发现：`decayInterests()` 从写出来那天起**没有任何调用点** ——
+   * 也就是说「兴趣会随时间淡掉」这条设计一直是文档里的话，代码里从没跑过。
+   * 表现就是 self.json 里的兴趣强度只会涨不会跌，最后全都顶到 1.0。
+   *
+   * 挂在 pruneStale 里（每 6h 一次）而不是单独起定时器：
+   * 衰减本来就是小时级的慢变量，6h 的粒度足够；少一个定时器少一处电量开销。
+   */
+  private decaySelf(): void {
+    try {
+      const now = Date.now();
+      const fi = this.self.decayInterests(now);
+      const fd = this.self.decayDislikes(now);
+      if (fi || fd) this.deps.logger.info(`persona: 衰减冻结 兴趣=${fi} 厌恶=${fd}`);
+      // M32：被嫌吵之后的话痨度恢复（原来也是零调用 —— 一旦被嫌就永远安静下去）
+      const before = this.self.chattiness();
+      this.self.recoverIfCalm(now);
+      const after = this.self.chattiness();
+      if (after !== before) this.deps.logger.info(`persona: 24h 没再被嫌，话痨度 ${before.toFixed(2)} → ${after.toFixed(2)}`);
+    } catch (err) {
+      this.deps.logger.warn(`persona: 衰减失败: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  /**
+   * 投递前结算"上次主动消息有没有被理"，并据此写情绪（M31 写入点③）。
+   *
+   * 为什么必须在这里而不是在 ProactiveBudget 里：
+   * `ProactiveBudget` 是纯计数/退避的状态机，它不该知道"情绪"这种语义。
+   * 但我第一版把 onIgnored 写进了 budget 的 markUnanswered —— 编译不过，
+   * 于是把它删了，结果**忘了在 service 侧补回来**，
+   * 导致"最重要负向写入点"静默消失了（被死代码审计抓到）。
+   *
+   * 这条链的重要性：情绪只有 onAddressed/onReplied 两个正向源时，
+   * valence 会长期贴在上限，speakWillingness 锁在 1.4 ——
+   * 正好复现 feiyu-mood 的"永远开心 = 没有心情"。
+   */
+  observePeer(peerId: string, lastActivityAt: number): void {
+    const p = this.budget.peerSnapshot(peerId);
+    const wasProactive = (p?.lastProactiveAt ?? 0) > 0;
+    const wasAnswered = wasProactive && lastActivityAt > (p?.lastProactiveAt ?? 0);
+    const before = p?.unansweredStreak ?? 0;
+
+    this.budget.observe(peerId, lastActivityAt);
+
+    // 只有"确实主动过、且这次算没被理"才记一次失落（不能重复计）
+    if (wasProactive && !wasAnswered) {
+      const after = this.budget.peerSnapshot(peerId)?.unansweredStreak ?? 0;
+      if (after > before) this.emotion.onIgnored();
     }
   }
 
@@ -276,6 +432,56 @@ export class PersonaService {
     return { isNew: r.isNew, reachedThreshold: r.reachedThreshold };
   }
 
+  /** M35：跨场合对话流水的缓存（避免每轮都读文件） */
+  private recentSecCache: { at: number; text: string } = { at: 0, text: '' };
+
+  /**
+   * 渲染"最近的真实对话"（跨场合）。
+   *
+   * 三条成本闸（实测：每轮注入 20 条历史会让上下文迅速膨胀）：
+   *   ① 只取 6 条
+   *   ② 只取 12 小时以内的
+   *   ③ 30 分钟内不重复读文件（缓存）
+   */
+  private renderCrossSceneRecent(now = Date.now()): string {
+    const TTL = 30 * 60_000;
+    if (now - this.recentSecCache.at < TTL) return this.recentSecCache.text;
+    let text = '';
+    try {
+      text = this.memory.renderRecent(6, { sinceMs: 12 * 3600_000 });
+    } catch {
+      text = '';
+    }
+    this.recentSecCache = { at: now, text };
+    return text;
+  }
+
+  /**
+   * 给情绪渲染用的**事实**（不是结论）。
+   *
+   * 静默天数从 memory 的最近对话时间算（那是真实发生过的），
+   * unanswered 从 budget 取（她主动说过话、对方没接的次数）。
+   */
+  private emotionFacts(personKey?: string): { silentDays?: number; unanswered?: number; askedBefore?: boolean } {
+    const facts: { silentDays?: number; unanswered?: number; askedBefore?: boolean } = {};
+    try {
+      if (personKey) {
+        const rows = this.memory.recentTurns(1, {});
+        const last = rows[0]?.t;
+        if (typeof last === 'number' && last > 0) {
+          facts.silentDays = Math.max(0, (Date.now() - last) / 86_400_000);
+        }
+        const p = this.budget.peerSnapshot(personKey);
+        if (p?.unansweredStreak) facts.unanswered = p.unansweredStreak;
+        // 只问一次，不追问：把"已经问过"这件事也告诉她
+        if (p?.askedAt) facts.askedBefore = true;
+      }
+    } catch {
+      /* 取不到事实就不注入，不影响主流程 */
+    }
+    return facts;
+  }
+
   /** 该 peer 的注入 section（人格 + 该人的账 + 日记连续性）；空数组 = 不注入 */
   buildSections(personKey: string | undefined): Array<{ name: string; order: number; text: string }> {
     const out: Array<{ name: string; order: number; text: string }> = [];
@@ -291,12 +497,53 @@ export class PersonaService {
       const ledger = this.memory.renderPerson(personKey);
       if (ledger) out.push({ name: 'qqbot:persona-memory', order: 62, text: ledger });
     }
+
+    // M35：跨场合对话流水（原来 `renderRecent` 是零调用 —— 白写了）。
+    //
+    // 为什么值得接：`people.json` 只存"提炼过的账"（traits/facts/topics），
+    // 但**具体说过什么话**不在里面。而 memory.ts 的设计初衷是"按人存不是按会话存"：
+    // 同一个人在群里说的事，私聊里也该记得。
+    //
+    // 成本控制（三档）：
+    //   · 只取 6 条（不是默认 20）
+    //   · 只要 12 小时内的（旧的不必重复注入，账里已有摘要）
+    //   · 30 分钟内不重复注入（turn 频繁时避免每轮都塞）
+    const recentSec = this.renderCrossSceneRecent();
+    if (recentSec) out.push({ name: 'qqbot:persona-recent', order: 62.5, text: recentSec });
     const diaryCtx = this.diary.context(3);
     if (diaryCtx) out.push({ name: 'qqbot:persona-diary', order: 64, text: diaryCtx });
 
     // M16 L4 selfNote：她对自己的认识（只在有内容时注入）
     const selfSec = this.selfNote.renderSection();
     if (selfSec) out.push({ name: 'qqbot:persona-selfnote', order: 65, text: selfSec });
+
+    // M30 口味：她喜欢/讨厌什么。
+    // 必须注入 —— dislikes 已经在唤醒闸门上让她变沉默了，
+    // 如果她自己不知道讨厌什么，那个沉默在她那里就是"莫名其妙不想说话"。
+    const tasteSec = this.self.renderSection();
+    if (tasteSec) out.push({ name: 'qqbot:persona-taste', order: 66, text: tasteSec });
+
+    // M33 状态：**只给事实，不给结论**。
+    //
+    // 情绪已经在四个闸门上真的改变了她的话多话少、打字快慢，
+    // 但不告诉她"为什么"的话，那些变化在她那儿就是无理由的
+    // （外面看是"她在闹脾气"，里面是"她不知道为什么"）。
+    //
+    // 但注入的必须是**可观察的事实**（多久没理她、精力如何），
+    // 不是"你现在心情挺好"这种结论 —— 结论一旦写进提示词就固化了，
+    // 而且等于我替她决定了感觉。解释权要留给她自己。
+    const moodSec = this.emotion.renderSection(this.emotionFacts(personKey));
+    if (moodSec) out.push({ name: 'qqbot:persona-mood', order: 66.5, text: moodSec });
+
+    // M33 称呼候选（order 67，紧跟口味）：**这是 `recordNameCall` 的读端**。
+    //
+    // 复核 8a94319 时发现：写端接了、读端没接 —— 候选名写进 self.json 之后
+    // 没有任何消费者，`qq_decide_name` 要模型自己填名字，而模型根本不知道
+    // 有哪些候选。结果"等她表态"只是日志里一句话，工具永远收不到调用。
+    //
+    // 和口味段同一个道理：数据必须进上下文，否则她无法对自己的状态表态。
+    const nameCandSec = this.self.renderNameCandidates();
+    if (nameCandSec) out.push({ name: 'qqbot:persona-name-candidates', order: 67, text: nameCandSec });
 
     // M13 抗漂移锚点：硬约束放在**最后一个 order**（尽量贴近生成点）。
     // 之前拼在 user message 里会污染上下文、还有被复述的风险；
@@ -332,6 +579,8 @@ export class PersonaService {
       deliver,
       statePath: path.join(this.deps.dataDir, 'state', 'own-life.json'),
       intervalMs: this.deps.config.ownLifeIntervalMs,
+      // M31 闸门④：心情影响"想不想主动说话"
+      moodFactor: () => speakWillingness(this.emotion.current()),
       maxPerDay: this.deps.config.ownLifeMaxPerDay,
       // quiet = "这个时段别打扰她"，语义是**禁止**（own-life.ts: inQuiet → skipped:'quiet'）。
       //
@@ -470,6 +719,20 @@ export class PersonaService {
     this.turnLedger.set(sessionId, { user: cur.user, who: cur.who, reply: (cur.reply + ' ' + text).slice(0, 300) });
     // M11：记下她说的话，等后续判定是否被"接住"（key 用 sessionId 即可，只需同会话判定）
     this.voice.recordUtterance(`${sessionId}#${Date.now()}`, sessionId, text);
+
+    // M32：口癖使用计数。
+    //
+    // `markUsed()` 原来零调用 → `lastSaidAt` 永远是 undefined →
+    // `retireStale()` 会按"上次使用时间"判定退役，而那个时间从来没被写过。
+    // 更直接的问题是 `h.count` 永远不涨，于是"这条口癖被用过几次"永远是接手时的数字。
+    //
+    // 判据：她这条回复里真的出现了这条口癖的词面。简单、可解释，
+    // 但只认**完整词面出现**，不做模糊匹配（错记会让退役判断失真）。
+    if (text) {
+      for (const h of this.voice.activeHabits()) {
+        if (h.style && text.includes(h.style)) this.voice.markUsed(h.id);
+      }
+    }
   }
 
   /**
@@ -503,16 +766,64 @@ export class PersonaService {
     const entry = this.turnLedger.get(sessionId);
     this.turnLedger.delete(sessionId);
     if (!entry) return;
+    // ── M31 写入点：睡够了 → 精力回升 ──
+    // onRest 是 energy 的**唯一正向**来源，其余五个写入点里三个是负向、
+    // 两个不影响 energy。不接它的话 energy 只降不升，几天后永远"很累"。
+    // 判据用"距上次任何消息超过 6 小时"，近似于"中间睡了一觉"。
+    {
+      const now = Date.now();
+      const last = this.lastTurnAt;
+      if (last > 0 && now - last >= 6 * 3600_000) this.emotion.onRest();
+      // M33：落盘，否则重启后这个时间维度就丢了
+      this.persistLastTurnAt(now);
+    }
     const user = (entry.user ?? '').trim();
     const reply = entry.reply.trim();
     if (user || reply) this.memory.logTurn({ where, who: entry.who ?? fallbackWho, text: user, reply });
+
+    // ── M31 情绪写入点②：她说了话、而且对方也说了话 → 这是"聊起来了" ──
+    // 判据用"本轮既有她的回复又有对方的话"，而不是"来了条消息"——
+    // 后者在她没说话时也会触发，等于白送心情。
+    if (reply && user) this.emotion.onReplied();
+    // ── M31 情绪写入点④：深夜还在聊 → 精力下降 ──
+    // 时间必须用北京时间算（容器无 tzdata，getHours() 是 UTC）
+    if (user || reply) this.emotion.onNightChat(hourInTz(new Date(), DEFAULT_TZ));
 
     // ── M23：事实硬触发 ──
     // 实测失效：3 个人 89 次交互，实质记忆 0 条。
     // 根因是"指望模型自觉调 qq_memory_append"≈不写（群聊里 0 次）。
     // 改成每轮由代码抽一次，不依赖她想起用工具。
     this.autoRemember(entry.who ?? fallbackWho, user);
+    // ── M30：兴趣续命（同样是硬触发）──
+    this.touchMentionedInterests(user);
     this.autoDiary();
+  }
+
+  /**
+   * 聊天里聊到她感兴趣的话题 → 该兴趣续命（刷新 lastAt）。
+   *
+   * 为什么必须自动做：衰减的计时基准是 `lastAt`，而刷新 `lastAt` 原本只有
+   * 两条路 —— 她主动调 qq_mark_interest、或冲浪拿到新东西。两条都依赖
+   * "她自觉"，而实测她几乎从不调那个工具。
+   *
+   * 后果很硬：`current` 类兴趣按 24h 半衰，没有续命就会被
+   * "聊得越多反而越接近过期"反噬 —— 实测她 4 条 current 兴趣里
+   * 唯一活着的那条已 5.7 天没刷新，接上衰减的那一刻会直接
+   * 从 0.335 掉到 0.0064 被冻结。**不接这条，衰减等于一键清空。**
+   *
+   * 用「对方说的话」判断而不是她的回复：她被勾起来是因为**话题出现了**，
+   * 不是因为她自己提了一嘴。
+   */
+  private touchMentionedInterests(userText: string): void {
+    if (!userText) return;
+    try {
+      for (const i of this.self.snapshot().interests) {
+        if (i.frozen) continue;
+        if (matchesTopic(userText, i.topic)) this.self.touchInterest(i.topic);
+      }
+    } catch {
+      /* 续命失败不影响主流程 */
+    }
   }
 
   /**
@@ -529,9 +840,8 @@ export class PersonaService {
    */
   private autoDiary(): void {
     try {
-      const today = new Date();
-      const pad = (n: number) => String(n).padStart(2, '0');
-      const day = `${today.getFullYear()}-${pad(today.getMonth() + 1)}-${pad(today.getDate())}`;
+      // 用显式时区算"今天"（容器无 tzdata，getDate() 是 UTC，会差 8 小时）
+      const day = dayInTz(new Date(), DEFAULT_TZ);
 
       // 当天已经写过就不重复
       const already = this.diary.recent(30).some((e) => e.day === day);

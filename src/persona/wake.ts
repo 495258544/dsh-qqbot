@@ -11,6 +11,7 @@
  */
 
 import { detectQuestion, detectAddressee } from './question-detect.ts';
+import { matchesTopic } from './word-match.ts';
 
 
 /** 单个"提到过她的人"的活跃窗口与无关计数 */
@@ -89,8 +90,12 @@ export interface WakeMessage {
 export interface InterestContext {
   /** 兴趣词 -> 权重(0~1) */
   interests: Array<{ topic: string; weight: number }>;
+  /** 讨厌的话题 -> 强度(0~1)：命中会把唤醒概率打下来（最多 4 折，不归零） */
+  dislikes?: Array<{ topic: string; weight: number }>;
   /** 话痨度 0~1，被嫌吵会降低 */
   chattiness: number;
+  /** 心情乘数（M31 闸门①，0.6~1.4）：心情好更愿意开口 */
+  moodFactor?: number;
   /** 兴趣命中时的基础唤醒概率（默认 0.5） */
   baseProbability?: number;
 }
@@ -312,12 +317,21 @@ export class Waker {
   matchInterest(text: string): { hit: boolean; topics: string[]; probability: number } {
     const ctx = this.interestProvider?.();
     if (!ctx || ctx.interests.length === 0) return { hit: false, topics: [], probability: 0 };
-    const hits = ctx.interests.filter((i) => i.weight > 0 && text.includes(i.topic));
+    // 用边界感知匹配，而不是 text.includes ——
+    // 否则兴趣是「车」时，「车站」「车厘子」也会唤醒她（实测过，很容易误触发）。
+    const hits = ctx.interests.filter((i) => i.weight > 0 && matchesTopic(text, i.topic));
     if (hits.length === 0) return { hit: false, topics: [], probability: 0 };
     const sumWeight = Math.min(1, hits.reduce((a, b) => a + b.weight, 0));
     const base = ctx.baseProbability ?? 0.5;
     // 被嫌吵后 chattiness 降低，接话概率同步下降
-    const probability = Math.max(0, Math.min(1, ctx.chattiness * sumWeight * base));
+    const raw = ctx.chattiness * sumWeight * base;
+    // 厌恶惩罚：最多打到 4 折（不归零 —— 讨厌的话题也可能正是她想吐槽的）
+    const aversion = Math.min(1, (ctx.dislikes ?? [])
+      .filter((d) => d.weight > 0 && matchesTopic(text, d.topic))
+      .reduce((a, b) => a + b.weight, 0));
+    // 心情乘数（M31 闸门①）：心情好更愿意开口，蔫了懒得多话
+    const mood = ctx.moodFactor ?? 1;
+    const probability = Math.max(0, Math.min(1, raw * (1 - 0.6 * aversion) * mood));
     return { hit: true, topics: hits.map((h) => h.topic), probability };
   }
 

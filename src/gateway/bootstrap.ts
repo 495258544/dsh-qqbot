@@ -309,8 +309,11 @@ export async function bootstrapGateway(
         if (existing && Date.now() - (existing.lastActivity ?? 0) < activeGapMs) {
           return { ok: false, reason: 'peer-active' };
         }
-        // 投递前结算上次主动消息是否被理了
-        svc.budget.observe(ownerOpenid, record.lastActivity);
+        // 投递前结算"上次主动消息是否被理了"。
+        // 必须用**投递之前**的活跃时间：record.lastActivity 是 ensureForProactive
+        // 刚写进去的 Date.now()，拿它比会恒判为"被理了" → unansweredStreak 永不增长
+        // → 整套「3天/14天/永久静默」退避一起失效（8c6cde0 的核心教训）。
+        svc.observePeer(ownerOpenid, existing?.lastActivity ?? 0);
         const gate = svc.budget.allow(ownerOpenid);
         if (!gate.ok) return { ok: false, reason: `budget:${gate.reason}` };
         svc.budget.recordProactive(ownerOpenid);

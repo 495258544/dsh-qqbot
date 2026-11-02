@@ -101,6 +101,8 @@ export function personaWakeGate(
     const content = String(msg.content ?? '');
     if (content && COMPLAINT_RE.test(content)) {
       const now = persona.self.registerComplaint();
+      // 被嫌吵 → 心情也要掉（原来只降 chattiness，情绪那边完全不知道）
+      persona.emotion.onComplained();
       logger.info(`persona: 被嫌吵「${content.slice(0, 20)}」→ chattiness=${now.toFixed(2)}`);
     } else if (content && msg.senderId !== peerId && /在吗|小羽|hi|hello/i.test(content)) {
       // 对方主动找她说话 → 稍微回暖
@@ -205,6 +207,9 @@ export function personaWakeGate(
       // M32：记下"她可能被叫成什么"（只认称呼句式，不记正文里碰巧出现的词）。
       // 不记的话 recordNameCall 永远零调用，qq_decide_name 就是个点不动的按钮。
       if ((ctx.state as Record<string, unknown>).collectOnly !== true) {
+        // 有人冲她说话 → 心情回暖（和称呼候选共用同一个 collectOnly 判据：
+        // 群里刷图那种 collectOnly 消息不算"跟她说话"）
+        persona.emotion.onAddressed();
         for (const n of extractVocatives(content)) {
           const r = persona.notePossibleName(n);
           if (r.reachedThreshold) logger.info(`persona: 称呼「${n}」被叫够了，等她表态（qq_decide_name）`);

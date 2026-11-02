@@ -393,6 +393,7 @@ describe('own-life · 静默唤醒约束', () => {
       intervalMs: 3600_000,
       quiet: [0, 0],
       midnightAt: '23:59',
+      rollProbability: 1, // 关掉掷骰：这个用例测的是重启不补发，不是概率
       statePath,
       log: () => {},
     });
@@ -403,6 +404,7 @@ describe('own-life · 静默唤醒约束', () => {
       intervalMs: 3600_000,
       quiet: [0, 0],
       midnightAt: '23:59',
+      rollProbability: 1, // 关掉掷骰：这个用例测的是重启不补发，不是概率
       statePath,
       log: () => {},
     });
