@@ -62,31 +62,52 @@ describe('dislikes · 结构（不能是负权重）', () => {
   });
 });
 
-describe('dislikes · 衰减（比喜好慢）', () => {
-  it('72h 后强度减半，24h 后只减一点', () => {
+describe('dislikes · 衰减（比喜好慢 3 倍）', () => {
+  it('90 天掉一半；30 天只掉一点', () => {
     const { svc } = mkSelf();
     svc.recordDislike('短视频');
     const s0 = svc.topDislikes(1)[0]!.strength ?? 0;
 
-    // 24h：兴趣半衰期是 24h（降一半），厌恶是 72h（只降到约 0.79）
-    svc.decayDislikes(Date.now() + 24 * 3600_000);
-    const s24 = svc.topDislikes(1)[0]?.strength ?? 0;
-    expect(s24).toBeGreaterThan(s0 * 0.5);
+    // 30 天 ≈ 1/3 个半衰期 → 还剩八成多
+    svc.decayDislikes(Date.now() + 30 * 24 * 3600_000);
+    const s30 = svc.topDislikes(1)[0]?.strength ?? 0;
+    expect(s30).toBeGreaterThan(s0 * 0.7);
 
-    // 再走 48h（累计 72h）：约剩一半
-    svc.decayDislikes(Date.now() + 72 * 3600_000);
-    const s72 = svc.topDislikes(1)[0]?.strength ?? 0;
-    expect(s72).toBeLessThan(s0 * 0.6);
+    // 累计 90 天 = 1 个半衰期 → 约剩一半
+    // （注意：s0 本身是"刚记下"的强度，30 天后已降过一次，
+    //  这里的参照是 s30 而不是 s0，所以用区间断言而不是精确值）
+    svc.decayDislikes(Date.now() + 90 * 24 * 3600_000);
+    const s90 = svc.topDislikes(1)[0]?.strength ?? 0;
+    expect(s90).toBeLessThan(s30 * 0.75);
+    expect(s90).toBeGreaterThan(0.05);
   });
 
   it('衰减到冻结线以下只是淡忘（frozen），不会消失', () => {
     const { svc } = mkSelf();
     svc.recordDislike('短视频');
-    svc.decayDislikes(Date.now() + 90 * 24 * 3600_000); // 90 天
+    // 90 天半衰期 → 要 300 天左右才跌破 0.1
+    svc.decayDislikes(Date.now() + 400 * 24 * 3600_000);
     // 还在数组里，可追溯
     expect(svc.snapshot().dislikes).toHaveLength(1);
     // 但不再出现在 top 里
     expect(svc.topDislikes(5)).toHaveLength(0);
+  });
+
+  it('厌恶比兴趣活得久（3 倍半衰期这件事在数值上必须成立）', () => {
+    const { svc } = mkSelf();
+    svc.touchInterest('猫');
+    svc.recordDislike('短视频');
+    const i0 = svc.snapshot().interests[0]!.strength ?? 0;
+    const d0 = svc.snapshot().dislikes[0]!.strength ?? 0;
+
+    const later = Date.now() + 30 * 24 * 3600_000;
+    svc.decayInterests(later);
+    svc.decayDislikes(later);
+
+    // 同样 30 天：兴趣掉到一半，厌恶还剩八成多
+    const iRatio = (svc.snapshot().interests[0]!.strength ?? 0) / i0;
+    const dRatio = (svc.snapshot().dislikes[0]!.strength ?? 0) / d0;
+    expect(dRatio).toBeGreaterThan(iRatio);
   });
 });
 
@@ -295,5 +316,67 @@ describe('addFinding · 查资料必须续命（越研究越接近过期的 bug�
     svc.addFinding('咖啡', '一篇关于手冲的文章');
 
     expect(svc.snapshot().interests[0]!.lastAt).toBeGreaterThan(before);
+  });
+});
+
+describe('衰减参数 · 必须"活得下来"（M30 重标定的回归测试）', () => {
+  // 这一组防的是一个**数学上就活不了**的参数组合。
+  //
+  // 原参数：HALF_LIFE=24h、ALPHA_ACCESS=0.05。稳态公式
+  //   s_eq = d·α / (1 - d + d·α),  d = 2^(-Δt/HL)
+  // 代入"每天聊到一次"(d=0.5)：s_eq = 0.048，而冻结线是 0.1。
+  // 结论：这套参数下兴趣**不可能存活**，必然被冻结。
+  // 实测吻合：她 6 条兴趣里 2 条已冻结在 0.04375（0.35 走 3 个半衰期）。
+  //
+  // 这些断言不测"算得对"，测的是"这套数字在语义上成立"：
+  // 常聊的要活着，久不聊的要淡掉。
+
+  /** 按"每 T 天碰一次"推演稳态（先衰减后强化，与代码顺序一致） */
+  function steadyState(T: number, halfLifeDays = 30, alpha = 0.15, days = 3000): number {
+    let s = 0.5;
+    let since = 0;
+    for (let t = T; t <= days; t += T) {
+      s *= Math.pow(2, -((t - since) * 24) / (halfLifeDays * 24));
+      since = t;
+      s += alpha * (1 - s);
+    }
+    return s;
+  }
+
+  it('每天聊到 → 稳稳活着（不是贴着冻结线挣扎）', () => {
+    expect(steadyState(1)).toBeGreaterThan(0.6);
+  });
+
+  it('每周聊到 → 还喜欢，但已经淡了一些', () => {
+    const v = steadyState(7);
+    expect(v).toBeGreaterThan(0.35);
+    expect(v).toBeLessThan(0.75);
+  });
+
+  it('一个月不理 → 淡到接近冻结（这才叫"那阵子喜欢过"）', () => {
+    expect(steadyState(30)).toBeLessThan(0.4);
+  });
+
+  it('原参数（24h/0.05）在数学上活不下来 —— 这是重标定的依据', () => {
+    // 每天聊到一次，稳态也只有 0.048，低于冻结线 0.1
+    expect(steadyState(1, 1, 0.05)).toBeLessThan(0.1);
+  });
+
+  it('衰减是单调的：越常碰强度越高', () => {
+    const a = steadyState(1), b = steadyState(7), c = steadyState(30);
+    expect(a).toBeGreaterThan(b);
+    expect(b).toBeGreaterThan(c);
+  });
+
+  it('真类的衰减幅度与公式一致（不会因为实现细节跑偏）', () => {
+    const { svc } = mkSelf();
+    svc.touchInterest('咖啡');
+    const e = svc.snapshot().interests[0]!;
+    e.strength = 0.8;
+    e.weight = 0.8;
+    e.lastAt = Date.now() - 30 * 24 * 3600_000; // 30 天没碰
+    svc.decayInterests();
+    // 半衰期 30 天 → 掉一半左右
+    expect(svc.snapshot().interests[0]!.strength).toBeCloseTo(0.4, 1);
   });
 });
