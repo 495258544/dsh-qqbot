@@ -268,6 +268,13 @@ export class PersonaService {
     const b = this.budget.prune(SW);
     if (a || b) this.deps.logger.info(`persona: prune 清理 waker=${a} budget=${b}`);
     this.decaySelf();
+    // M32：口癖退役体检（原来也是零调用 —— 长期不用的口癖永远不会退役）
+    try {
+      const retired = this.voice.retireStale();
+      if (retired) this.deps.logger.info(`persona: ${retired} 条口癖因长期不用退役`);
+    } catch {
+      /* 不影响主流程 */
+    }
     // M31：心情也在动，但它是**最容易被写成死代码**的那类数据
     // （算出来了没人看）。每 6 小时打一行，让"她的情绪"在日志里可见 ——
     // 出问题时能一眼看出是"真的没波动"还是"根本没在跑"。
@@ -529,9 +536,29 @@ export class PersonaService {
   }
 
   /** inbound：判定她之前的发言是否被接住（M11） */
+  /**
+   * 她说的话被接住了吗（口癖学习的正样本来源）。
+   *
+   * M32：这条链原来只做了第一步 —— `judgeIncoming` 攒正样本，
+   * 但下游 `extractCandidates`（抽候选）和 `promoteHabits`（转正）
+   * **零调用**。结果是：
+   *   · 样本攒到 60 条被 shift() 丢掉
+   *   · habits 永远是空数组
+   *   · 而 persona-health 按"正样本 N 条"报进度，看起来一切正常
+   * —— 不只是没功能，是**谎报健康**。
+   *
+   * 现在：攒够 4 条就抽一次候选；每次抽完尝试转正。
+   */
   judgeVoice(sessionId: string, humanText: string): void {
     if (!humanText) return;
-    this.voice.judgeIncoming(sessionId, humanText);
+    const caught = this.voice.judgeIncoming(sessionId, humanText);
+    if (!caught.length) return;
+    // 攒够就抽（extractCandidates 内部还有 <4 条直接返回的保护）
+    if (this.voice.caughtSampleCount() >= 4) {
+      const cands = this.voice.extractCandidates();
+      if (cands.length) this.deps.logger.info(`persona: 口癖候选 +${cands.length}`);
+    }
+    this.voice.promoteHabits();
   }
 
   /** outbound turn/end：配对写入跨场合流水并清暂存。
