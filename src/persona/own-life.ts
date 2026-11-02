@@ -110,6 +110,19 @@ export interface OwnLifeOptions {
   deliver: (text: string) => Promise<OwnLifeDeliverResult>;
   statePath?: string;
   intervalMs?: number;
+  /**
+   * 到点后掷一次本地骰子，通过才真的开口（M25）。
+   *
+   * 借鉴 dsh-speak-up（Yuuyuko-uu，207 star）的做法：掷骰子在本地算，
+   * **不花 token**。没掷中什么都不做，只记一笔。
+   *
+   * 与我们原来的区别：原来"到点必投"，每 4 小时必然产生一次提示（占 token）；
+   * 现在是"到点先掷骰"，掷不中就不打扰，成本为零。
+   * 掷不中时不推进 lastFiredAt —— 下一个 tick（30 分钟后）会再掷，概率自然累积。
+   *
+   * 默认 0.7：配合 4h 间隔 + 日限 4，实际每天约 2-3 次。
+   */
+  rollProbability?: number;
   /** [from, to) 小时，不叫 */
   quiet?: [number, number];
   midnightAt?: string;
@@ -163,6 +176,7 @@ export function createOwnLife(opts: OwnLifeOptions): OwnLifeHandle {
     tz = DEFAULT_TZ,
     midnightAt = '23:30',
     maxPerDay = 6,
+    rollProbability = 0.7,
     enabled = true,
     textDay = DEFAULT_TEXT_DAY,
     textMidnight = DEFAULT_TEXT_MIDNIGHT,
@@ -289,6 +303,15 @@ export function createOwnLife(opts: OwnLifeOptions): OwnLifeHandle {
     }
 
     if (nowTs - Number(state.lastFiredAt || 0) >= intervalMs) {
+      // 到点了先掷骰子（本地 Math.random，零 token）
+      // intervalMs=0 是"每次 tick 都算到点"的测试/调试配置，这种情况不掷骰
+      // （否则测试结果会随机化，且调试时无法稳定复现）
+      if (intervalMs > 0 && rollProbability < 1 && Math.random() >= rollProbability) {
+        // 没掷中：什么都不做，也不推进 lastFiredAt
+        // —— 下一个 tick 会再掷，概率随之累积（不会因为一次没中就永远错过）
+        log(`掷骰未中（${(rollProbability * 100).toFixed(0)}%），这次不打扰`);
+        return { ok: false, skipped: 'roll-missed' };
+      }
       return fire('day', nowTs);
     }
     return { ok: false, skipped: 'not-yet' };

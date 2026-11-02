@@ -341,6 +341,7 @@ describe('own-life · 静默唤醒约束', () => {
   it('投递失败不计次数', async () => {
     let fired = 0;
     const life = createOwnLife({
+      rollProbability: 1,
       deliver: async () => { throw new Error('boom'); },
       intervalMs: 0,
       statePath: path.join(dir, 'st.json'),
@@ -356,6 +357,7 @@ describe('own-life · 静默唤醒约束', () => {
   it('日上限后跳过', async () => {
     let count = 0;
     const life = createOwnLife({
+      rollProbability: 1,
       deliver: async () => { count += 1; },
       intervalMs: 0,
       maxPerDay: 2,
@@ -373,6 +375,7 @@ describe('own-life · 静默唤醒约束', () => {
 
   it('安静时段不叫（按北京时间判定，容器无 tzdata）', async () => {
     const life = createOwnLife({
+      rollProbability: 1,
       deliver: async () => {},
       quiet: [3, 8],           // 北京 3:00-8:00 安静
       tz: 'Asia/Shanghai',
@@ -389,6 +392,7 @@ describe('own-life · 静默唤醒约束', () => {
     const statePath = path.join(dir, 'st4.json');
     let count = 0;
     const life1 = createOwnLife({
+      rollProbability: 1,
       deliver: async () => { count += 1; },
       intervalMs: 3600_000,
       quiet: [0, 0],
@@ -399,6 +403,7 @@ describe('own-life · 静默唤醒约束', () => {
     await life1.tick(Date.now());
     expect(count).toBe(1);
     const life2 = createOwnLife({
+      rollProbability: 1,
       deliver: async () => { count += 1; },
       intervalMs: 3600_000,
       quiet: [0, 0],
@@ -415,6 +420,7 @@ describe('own-life · 静默唤醒约束', () => {
     const statePath = path.join(dir, 'm5.json');
     let count = 0;
     const life = createOwnLife({
+      rollProbability: 1,
       deliver: async () => { count += 1; return { ok: false, reason: 'no-live-session' }; },
       intervalMs: 0, quiet: [0, 0], midnightAt: '00:00',
       statePath, log: () => {},
@@ -431,6 +437,7 @@ describe('own-life · 静默唤醒约束', () => {
 
   it('deliver 返回 true/void = 成功，正常计次', async () => {
     const life = createOwnLife({
+      rollProbability: 1,
       deliver: async () => {}, intervalMs: 0, quiet: [0, 0], midnightAt: '00:00',
       statePath: path.join(dir, 'm5b.json'), log: () => {},
     });

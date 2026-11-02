@@ -146,3 +146,39 @@ describe('fact-extract · 对真实语料的克制（宁可少抽）', () => {
     expect(hits.length).toBeLessThanOrEqual(1);
   });
 });
+
+describe('extractFact · 补的三类（正在做的事/观点/对"你"的评价）', () => {
+  it('正在做的事 —— 这本来抽不到，但正是聊天的实际内容', () => {
+    const r = extractFact('我在看赛博英雄传，里面对AI与灵魂的思考挺有意思的');
+    expect(r?.fact).toContain('赛博英雄传');
+  });
+
+  it('观点/态度 —— 允许中间夹虚词（也/太/很）', () => {
+    expect(extractFact('我也不希望直接粗暴的修改你的参数')?.fact).toBeTruthy();
+    expect(extractFact('我更想让它自己长')?.fact).toBeTruthy();
+    expect(extractFact('我不太喜欢这种方式')?.fact).toBeTruthy();
+    expect(extractFact('我觉得那个新番挺好看的')?.fact).toBeTruthy();
+  });
+
+  it('对"你"的评价也算值得记的', () => {
+    const r = extractFact('你刚才那个回答挺有意思');
+    expect(r?.fact).toBeTruthy();
+  });
+});
+
+describe('extractFact · 真实语料的现实（这才是 facts 为空的真因）', () => {
+  it('用户 119 轮里只有 6 句以"我"开头，且多是观点而非履历', () => {
+    // 实测真实原话，这些**不该**被当成"关于他的硬事实"
+    const philosophical = [
+      '我是谁',
+      '我上面问你话你怎么没反应',
+      '我耳朵一直开着呢 你以为我潜水就听不见了',
+    ];
+    // 这些是哲学提问/寒暄，不该抽出"工作/住址"这类事实
+    for (const t of philosophical) {
+      const r = extractFact(t);
+      // 允许抽出观点，但不能抽出编造的生活细节
+      if (r?.fact) expect(r.fact).not.toContain('住在');
+    }
+  });
+});

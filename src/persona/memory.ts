@@ -10,7 +10,34 @@
  */
 import fs from 'node:fs';
 import { clockInTz } from './clock.ts';
+import {
+  type Importance,
+  freshness,
+  rankScore,
+  inferImportance,
+  isStableFact,
+} from './memory-decay.ts';
 import path from 'node:path';
+
+/**
+ * 每条记忆的衰减状态（M27，借鉴 dsh-fish-memory）。
+ *
+ * 存在独立的 `decay` 里，**不塞进 traits/facts/topics 数组本身**——
+ * 那些是纯字符串数组，改结构会破坏现有数据和工具。
+ * key 是那条记忆的原文，value 是它的状态。
+ */
+export interface DecayMap {
+  [text: string]: {
+    /** 时间锚（毫秒）。被强化时重置 */
+    a: number;
+    /** 重要度 0 / 0.5 / 1 */
+    i: Importance;
+    /** 初始鲜活度 */
+    a0: number;
+    /** 是否长期事实（不过期） */
+    st?: 1;
+  };
+}
 
 export interface PersonLedger {
   name: string;
@@ -21,6 +48,8 @@ export interface PersonLedger {
   interactions: number;
   firstSeenAt: number;
   lastSeenAt: number;
+  /** 衰减状态（M27）。老数据没有这个字段，读到时自动补 */
+  decay?: DecayMap;
 }
 
 export interface TurnRecord {
@@ -136,6 +165,36 @@ export class Memory {
     if (topic) put(p.topics, topic);
     if (pending) put(p.pending, pending);
 
+    // ── M27：给每条记忆写上衰减状态 ──
+    // 没有这一步，衰减就是死代码（和源码里 emotion 字段的毛病一样）。
+    // 重要度由**规则**判定（不是模型），稳定事实（工作/住址/家人/宠物/喜好/约定）
+    // 会拿到 importance=1 → 有效半衰期 90 天，且标记为不过期。
+    const now = Date.now();
+    const note = (text: string | undefined): void => {
+      if (!text) return;
+      const imp = inferImportance(text);
+      const prev = p.decay?.[text];
+      p.decay ??= {};
+      p.decay[text] = prev
+        // 已经记过 → 强化（A' = A + 0.2(1−A)，锚点重置到现在）
+        ? {
+            a: now,
+            a0: Math.min(1, freshness({ activation0: prev.a0, anchor: prev.a, importance: prev.i, stable: prev.st === 1 }, now) + 0.2),
+            i: Math.max(prev.i, imp) as Importance,
+            ...(isStableFact(text) ? { st: 1 as const } : {}),
+          }
+        : {
+            a: now,
+            a0: 1,
+            i: imp,
+            ...(isStableFact(text) ? { st: 1 as const } : {}),
+          };
+    };
+    note(trait);
+    note(fact);
+    note(topic);
+    note(pending);
+
     while (p.topics.length > this.maxTopics) p.topics.shift();
     while (p.traits.length > 40) p.traits.shift();
     while (p.facts.length > 60) p.facts.shift();
@@ -222,13 +281,47 @@ export class Memory {
     const p = this.readAll()[key];
     if (!p) return '';
     const L: string[] = [];
-    if (p.traits?.length) L.push('你了解他：' + p.traits.slice(-12).join('；'));
-    if (p.facts?.length) L.push('他告诉过你：' + p.facts.slice(-12).join('；'));
-    if (p.topics?.length) L.push('你们聊过：' + p.topics.slice(-8).join('；'));
+
+    // M27：按「鲜活度 × 重要度」排序，而不是简单的 slice(-12) 取最近 12 条。
+    // 原因：一条"他养了只橘猫"（稳定事实）和一条"他今天说好累"（随口一提）
+    // 分量完全不同，但先进先出会把它们一视同仁，重要的被闲聊挤掉。
+    const pick = (arr: string[], limit: number, base: number): string[] =>
+      this.rankByDecay(p, arr, limit, base);
+
+    if (p.traits?.length) L.push('你了解他：' + pick(p.traits ?? [], 12, 1).join('；'));
+    if (p.facts?.length) L.push('他告诉过你：' + pick(p.facts ?? [], 12, 0.8).join('；'));
+    if (p.topics?.length) L.push('你们聊过：' + pick(p.topics ?? [], 8, 0.5).join('；'));
     if (p.pending?.length) L.push('⚠️ 你心里还记着没说出口的事：' + p.pending.slice(-4).join('；'));
     if (p.interactions) L.push('你们互动过 ' + p.interactions + ' 次');
     if (!L.length) return '';
     return '【关于 ' + (p.name || id) + '（' + id + '）的一本账】\n' + L.join('\n') + '\n';
+  }
+
+  /**
+   * 按「鲜活度 × 重要度」排序取前 N 条（M27）。
+   *
+   * 没有 decay 记录的老数据按"刚记录的、重要度中等"处理，
+   * 这样升级后老记忆不会突然全部消失。
+   */
+  private rankByDecay(p: PersonLedger, arr: string[], limit: number, baseEvidence: number): string[] {
+    if (arr.length <= limit) return arr;
+    const now = Date.now();
+    const scored = arr.map((text, idx) => {
+      const d = p.decay?.[text];
+      const st = d
+        ? { activation0: d.a0, anchor: d.a, importance: d.i, stable: d.st === 1 }
+        : { activation0: 1, anchor: p.lastSeenAt || now, importance: 0.5 as Importance, stable: false };
+      // 数组越靠后越新 → 给一点点"新近"加分，避免完全打平
+      const recencyBump = idx / Math.max(1, arr.length);
+      return {
+        text,
+        score: rankScore(baseEvidence * (1 + recencyBump * 0.1), st, now),
+      };
+    });
+    return scored
+      .sort((a, b) => b.score - a.score)
+      .slice(0, limit)
+      .map((x) => x.text);
   }
 
   /** 把最近对话渲染成一段可注入的文字 */

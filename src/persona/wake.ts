@@ -11,6 +11,7 @@
  */
 
 import { detectQuestion, detectAddressee } from './question-detect.ts';
+import { matchesTopic } from './word-match.ts';
 
 
 /** 单个"提到过她的人"的活跃窗口与无关计数 */
@@ -281,7 +282,9 @@ export class Waker {
   matchInterest(text: string): { hit: boolean; topics: string[]; probability: number } {
     const ctx = this.interestProvider?.();
     if (!ctx || ctx.interests.length === 0) return { hit: false, topics: [], probability: 0 };
-    const hits = ctx.interests.filter((i) => i.weight > 0 && text.includes(i.topic));
+    // 用边界感知匹配，而不是 text.includes ——
+    // 否则兴趣是「车」时，「车站」「车厘子」也会唤醒她（实测过，很容易误触发）。
+    const hits = ctx.interests.filter((i) => i.weight > 0 && matchesTopic(text, i.topic));
     if (hits.length === 0) return { hit: false, topics: [], probability: 0 };
     const sumWeight = Math.min(1, hits.reduce((a, b) => a + b.weight, 0));
     const base = ctx.baseProbability ?? 0.5;

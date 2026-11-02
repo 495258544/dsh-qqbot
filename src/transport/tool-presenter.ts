@@ -62,6 +62,16 @@ export function formatToolResult(
       // 工具不存在：不展示。她自己会从"工具调用失败"里学到没有这个能力。
       return null;
     }
+
+    // 内部/系统类工具失败也静默丢弃（2026-11-02 实测事故）：
+    // 小羽调 bash 失败，QQ 里出现「（这个操作没成功：bash）」——
+    // 用户看到的是莫名其妙的一行技术噪音，她看到的是自己的排查过程被打断。
+    // 这类工具是"她用来干活的手段"，不是"要对用户说的话"，失败不该上台面。
+    const INTERNAL_TOOLS = /^(bash|pwsh|read|write|edit|glob|grep|terminal|job_|skill|search|fetch)/i;
+    if (INTERNAL_TOOLS.test(name)) {
+      return null;
+    }
+
     return `（这个操作没成功：${name}）`;
   }
 

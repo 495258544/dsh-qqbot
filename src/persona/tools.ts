@@ -4,6 +4,7 @@
  * 对应 ai-companion 的 qq_write_diary / qq_read_diary / qq_memory_append。
  * 注册形态对齐 media/send-file-tool.ts：tools 服务缺失时优雅降级。
  */
+import { execFileSync } from 'node:child_process';
 import type { Context } from '@deepseek-ai/cordis';
 import type { ContentBlock } from '@deepseek-ai/dsh-llm';
 import type { PersonaService } from './service.ts';
@@ -651,5 +652,188 @@ export function registerPersonaTools(
     },
   });
 
-  logger.info('im-qqbot: persona 工具已注册（日记/记忆/称呼/兴趣/需求/口癖/自我/浏览/活动，共 14 个）');
+  /**
+   * qq_bili_check —— 让她真的能查 B 站视频。
+   *
+   * 背景（2026-11-02 实测事故）：
+   *   用户说「我给你装了插件，你可以去 b 站逛逛了」、
+   *   「qq_bili_check 我给了你这个工具」——**但那时工具根本不存在**，
+   *   她翻遍工具清单没找到，只好如实报告"我这儿没有"，然后开始汇报
+   *   "python 部分留在 ~/.dsh/bili-duty…node 那个包没进 node_modules…"
+   *   一大串内部排查过程泄露给用户。
+   *
+   * 现在真的给它接上：复用本机已装好的 `bili` CLI（bili-agent 1.2.1，已登录）。
+   * 只暴露**只读**能力（info / summary / subtitle / search），不做写操作。
+   */
+  tools.register({
+    name: 'qq_bili_check',
+    description: '查一个 B 站视频：拿标题、简介、AI 总结、字幕、弹幕、画面帧。'
+      + '想聊某个 B 站视频的内容时用它，别凭印象编。没给 BV 号也可以按关键词搜。',
+    parameters: {
+      type: 'object',
+      properties: {
+        bvid: { type: 'string', description: 'BV 号，如 BV1ednc6jE3j' },
+        query: { type: 'string', description: '想搜的关键词（没有 BV 号时用）' },
+        want: {
+          type: 'string',
+          enum: ['summary', 'subtitle', 'danmaku', 'frames', 'all'],
+          description: '要什么：summary=AI总结（默认）、subtitle=字幕、'
+            + 'danmaku=观众弹幕（能反映笑点槽点，比总结有人味）、'
+            + 'frames=抽画面帧（返回图片路径，要能看图的模型才能读懂）、all=全都拿',
+        },
+      },
+      additionalProperties: false,
+    },
+    output: {
+      schema: {
+        type: 'object',
+        properties: {
+          ok: { type: 'boolean' },
+          title: { type: 'string' },
+          summary: { type: 'string' },
+          subtitle: { type: 'string' },
+          danmaku: {
+            type: 'array',
+            items: {
+              type: 'object',
+              properties: { t: { type: 'string' }, text: { type: 'string' } },
+              required: ['t', 'text'],
+              additionalProperties: false,
+            },
+          },
+          frames: {
+            type: 'array',
+            items: {
+              type: 'object',
+              properties: { t: { type: 'string' }, path: { type: 'string' } },
+              required: ['t', 'path'],
+              additionalProperties: false,
+            },
+          },
+          items: {
+            type: 'array',
+            items: {
+              type: 'object',
+              properties: { bvid: { type: 'string' }, title: { type: 'string' } },
+              required: ['bvid', 'title'],
+              additionalProperties: false,
+            },
+          },
+          error: { type: 'string' },
+        },
+        required: ['ok'],
+        additionalProperties: false,
+      },
+      render: (_a: unknown, v: unknown): ContentBlock[] => {
+        const r = v as {
+          ok: boolean; title?: string; summary?: string; subtitle?: string;
+          danmaku?: Array<{ t: string; text: string }>;
+          frames?: Array<{ t: string; path: string }>;
+          items?: { bvid: string; title: string }[]; error?: string;
+        };
+        if (!r.ok) return [{ type: 'text', text: `没查到（${r.error ?? '未知原因'}）` }];
+        const parts: string[] = [];
+        if (r.title) parts.push(`《${r.title}》`);
+        if (r.summary) parts.push(`AI 总结：${r.summary}`);
+        if (r.subtitle) parts.push(`字幕节选：${r.subtitle}`);
+        if (r.danmaku?.length) {
+          parts.push('弹幕（观众当时在说什么）：\n'
+            + r.danmaku.slice(0, 15).map((x) => `  ${x.t} ${x.text}`).join('\n'));
+        }
+        if (r.frames?.length) {
+          parts.push('画面帧（图片路径）：\n' + r.frames.map((x) => `  ${x.t} ${x.path}`).join('\n'));
+        }
+        if (r.items?.length) {
+          parts.push('搜到这些：\n' + r.items.map((x, i) => `${i + 1}. ${x.title}（${x.bvid}）`).join('\n'));
+        }
+        return [{ type: 'text', text: parts.join('\n\n') || '（空）' }];
+      },
+    },
+    async execute(args: unknown): Promise<Record<string, unknown>> {
+      const { bvid, query, want } = args as { bvid?: string; query?: string; want?: string };
+      const run = (a: string[]): Record<string, unknown> | undefined => {
+        try {
+          const out = execFileSync('bili', a, { encoding: 'utf8', timeout: 30_000 });
+          return JSON.parse(out) as Record<string, unknown>;
+        } catch {
+          return undefined;
+        }
+      };
+
+      // 没给 BV → 搜索
+      if (!bvid) {
+        const q = String(query ?? '').trim();
+        if (!q) return { ok: false, error: '需要 bvid 或 query' };
+        const r = run(['search', 'video', q]);
+        const d = (r?.data ?? {}) as { items?: Array<{ bvid?: string; title?: string }> };
+        const items = (d.items ?? []).slice(0, 5)
+          .filter((x) => x.bvid && x.title)
+          .map((x) => ({ bvid: x.bvid as string, title: x.title as string }));
+        if (!items.length) return { ok: false, error: '没搜到' };
+        return { ok: true, items };
+      }
+
+      const mode = (['subtitle', 'danmaku', 'frames', 'all'].includes(String(want)) ? String(want) : 'summary') as
+        | 'subtitle' | 'danmaku' | 'frames' | 'all' | 'summary';
+      const info = run(['video', 'info', bvid]);
+      const title = ((info?.data ?? {}) as { title?: string }).title ?? '';
+
+      let summary = '';
+      if (mode === 'summary' || mode === 'all') {
+        const r = run(['video', 'summary', bvid]);
+        summary = ((r?.data ?? {}) as { summary?: string }).summary ?? '';
+      }
+
+      let subtitle = '';
+      if (mode === 'subtitle' || mode === 'all') {
+        const r = run(['video', 'subtitle', bvid]);
+        const items = ((r?.data ?? {}) as { items?: Array<{ content?: string }> }).items ?? [];
+        // 只取前若干条并压成一段 —— 全文太占上下文
+        subtitle = items.slice(0, 40).map((x) => x.content ?? '').filter(Boolean).join(' ').slice(0, 1200);
+      }
+
+      // 弹幕（M29）：观众看到画面后的真实反应，比 AI 总结有人味，且纯文本零成本
+      let danmaku: Array<{ t: string; text: string }> = [];
+      if (mode === 'danmaku' || mode === 'all') {
+        const r = run(['video', 'danmaku', bvid]);
+        const items = ((r?.data ?? {}) as { items?: Array<{ time?: number; text?: string }> }).items ?? [];
+        danmaku = items
+          .filter((x) => x.text)
+          // 弹幕很多，只留前 30 条，时间转成 mm:ss 便于她引用
+          .slice(0, 30)
+          .map((x) => {
+            const sec = Math.max(0, Math.floor(Number(x.time) || 0));
+            return { t: `${String(Math.floor(sec / 60)).padStart(2, '0')}:${String(sec % 60).padStart(2, '0')}`, text: String(x.text) };
+          });
+      }
+
+      // 画面帧（M29）：抽图返回路径。她如果没有视觉能力，拿到的是路径而非内容；
+      // 但配合弹幕能间接理解画面（弹幕是"人看了画面之后的反应"）。
+      let frames: Array<{ t: string; path: string }> = [];
+      if (mode === 'frames' || mode === 'all') {
+        const r = run(['video', 'frames', bvid, '-n', '6']);
+        const items = ((r?.data ?? {}) as { frames?: Array<{ time?: number; path?: string }> }).frames ?? [];
+        frames = items
+          .filter((x) => x.path)
+          .map((x) => {
+            const sec = Math.max(0, Math.floor(Number(x.time) || 0));
+            return { t: `${String(Math.floor(sec / 60)).padStart(2, '0')}:${String(sec % 60).padStart(2, '0')}`, path: String(x.path) };
+          });
+      }
+
+      if (!title && !summary && !subtitle && !danmaku.length && !frames.length) {
+        return { ok: false, error: '视频信息拿不到' };
+      }
+      return {
+        ok: true,
+        ...(title ? { title } : {}),
+        ...(summary ? { summary } : {}),
+        ...(subtitle ? { subtitle } : {}),
+        ...(danmaku.length ? { danmaku } : {}),
+        ...(frames.length ? { frames } : {}),
+      };
+    },
+  });
+
+  logger.info('im-qqbot: persona 工具已注册（日记/记忆/称呼/兴趣/需求/口癖/自我/浏览/活动/B站，共 15 个）');
 }
