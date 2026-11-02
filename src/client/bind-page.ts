@@ -413,6 +413,8 @@ function BoundView({ appId, recheck }: { appId: string; recheck: () => void }): 
 function UnboundView({ state }: { state: Extract<BindStateWire, { phase: 'waiting' }> }): ReactNode {
   const [mode, setMode] = useState<'qr' | 'manual'>('qr');
   const refresh = useCallback(() => { void fetch(BIND_REFRESH_PATH, { method: 'POST' }).catch(() => {}); }, []);
+  const [imgFailed, setImgFailed] = useState(false);
+  useEffect(() => { setImgFailed(false); }, [state.qrSvg]);
 
   if (mode === 'manual') {
     return createElement('div', { className: 'imqb-panel' },
@@ -422,10 +424,23 @@ function UnboundView({ state }: { state: Extract<BindStateWire, { phase: 'waitin
     );
   }
 
+  if (state.qrSvg === undefined || imgFailed) {
+    return createElement('div', { className: 'imqb-panel' },
+      createElement('div', { className: 'imqb-icon' }, '⚠️'),
+      createElement('p', { className: 'imqb-title' }, '二维码暂时无法显示'),
+      createElement('p', { className: 'imqb-hint' }, '可重启应用后重试，或任选下面一种方式继续'),
+      createElement('a', { href: state.url, target: '_blank', rel: 'noreferrer noopener', className: 'imqb-link' }, '在浏览器中打开链接扫码'),
+      createElement('div', { className: 'imqb-row' },
+        createElement('button', { className: 'imqb-pill', onClick: () => { setMode('manual'); } }, '手动填写凭据'),
+      ),
+    );
+  }
+
   return createElement('div', { className: 'imqb-panel' },
-    state.qrSvg === undefined
-      ? null
-      : createElement('img', { src: state.qrSvg, alt: 'QQ 扫码二维码', width: 220, height: 220, className: 'imqb-qr' }),
+    createElement('img', {
+      src: state.qrSvg, alt: 'QQ 扫码二维码', width: 220, height: 220, className: 'imqb-qr',
+      onError: () => { setImgFailed(true); },
+    }),
     createElement('p', { className: 'imqb-title' }, '扫码绑定 QQ 机器人'),
     createElement('p', { className: 'imqb-hint' }, '使用手机 QQ 扫描二维码完成绑定'),
     createElement('a', { href: state.url, target: '_blank', rel: 'noreferrer noopener', className: 'imqb-link' }, '二维码显示异常？在浏览器中打开'),

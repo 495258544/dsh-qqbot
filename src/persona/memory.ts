@@ -9,6 +9,7 @@
  * 这里所有记忆都挂在人身上（官方 API 用 user openid 当 key）。
  */
 import fs from 'node:fs';
+import { clockInTz } from './clock.ts';
 import path from 'node:path';
 
 export interface PersonLedger {
@@ -235,7 +236,11 @@ export class Memory {
     const rows = this.recentTurns(n, opts);
     if (!rows.length) return '';
     const lines = rows.map((r) => {
-      const when = new Date(r.t).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
+      // 时间戳必须按北京时区渲染。
+      // 踩过的坑（2026-11-02）：toLocaleTimeString 走容器本地时区（UTC），
+      // 于是注入给她看的"你昨天 20:00 说过…"实际是北京次日 04:00 ——
+      // 这不只是显示问题，它**污染她自己的时间认知**（她会以为自己在深夜聊天）。
+      const when = clockInTz(new Date(r.t));
       const place = r.where.startsWith('group') ? '群里' : '私聊';
       const parts: string[] = [];
       if (r.text) parts.push(`${r.who}（${place}）：${r.text}`);

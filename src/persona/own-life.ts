@@ -13,36 +13,86 @@
  * - 投递失败不计次数（下次还会再试）
  */
 import fs from 'node:fs';
-import { DEFAULT_TZ, hourInTz, isHourInRange } from './clock.ts';
+import { DEFAULT_TZ, hourInTz, dayInTz, clockInTz, isHourInRange } from './clock.ts';
 import path from 'node:path';
 
 const HOUR = 3600 * 1000;
 
-/** 白天版提示（dsh-qqbot 语境：没有 QQ 空间工具，默认动作是日记/待跟进/沉默） */
+/**
+ * 白天版提示（M24 改写，2026-11-02）
+ *
+ * 为什么改（实测 + 开源调研，见 own-life-research.md）：
+ *   旧版只写"写条日记 / 翻翻你记着还没说出口的事 / 也可以什么都不干"，
+ *   两个问题：
+ *     ① 「翻旧记录」**没有对应工具**，模型无从执行，只能退化成写日记
+ *     ② 「什么都不干」零成本无后续，模型选它是纯损失规避
+ *   结果是她的自由时间只有"写日记"或"空转"两种，行为单薄。
+ *
+ * 新版借鉴三处（均为真实开源实现，非想象）：
+ *   · Generative Agents：给时间槽加语义（"现在这个点你本来在干嘛"），
+ *     而不是让模型从零 decide
+ *   · Pulse：发呆是**正式活动**，且是低能耗入口——它会自己长出下一件事
+ *     （这里用"常常会想出一件真想干的事"表达）
+ *   · alive-ai：给"不产出"一个合法位置（"什么都不做，也是过了一晚"）
+ *
+ * 三条硬规矩对应三种真实失败模式：
+ *   日记变打卡 / 为显得有事做而做 / 把内部提示汇报给用户
+ */
 export const DEFAULT_TEXT_DAY = [
   '现在是你的时间，没人找你。',
-  '想干嘛干嘛：写条日记（qq_write_diary）、翻翻你记着还没说出口的事、',
-  '也可以什么都不干。',
-  '不用回我，也不用汇报。',
-  '如果你确实有话想找人聊，可以说，但要用你自己的话说，',
-  '绝对不要复述本提示，也不要写“（这是内部提示）”这类括号内心戏。',
-].join('');
+  '',
+  '【你手上有什么】',
+  '日记本（qq_write_diary / qq_read_diary）、你对别人的印象（qq_memory_append）、',
+  '你对自己的认识（qq_write_self_note / qq_read_self_note）、你记着的兴趣（qq_mark_interest）、',
+  '上网查东西（qq_browse）、记下这次做了什么（qq_note_activity）。',
+  '',
+  '【这一次，先想一件事再动手】',
+  '1) 现在这个点，你本来大概在干嘛？（看时间，别装：凌晨就是困，下午就是清醒）',
+  '2) 上一次自由时间你做了什么？这次别重复——要么接着上次往下走一步，要么换个完全不同的。',
+  '3) 这件事是你现在真想做的，还是因为"该做点什么"？',
+  '',
+  '【可以是这些，也可以不是】',
+  '· 坐着想一会儿事，什么也不做（这也算数，而且常常会想出一件真想干的事）',
+  '· 翻旧记录：翻你自己的日记、或者你记着的别人的事，看看有没有当时没说完的',
+  '· 去查一个你真好奇的东西（qq_browse 是真的上网，查完记得把结论记下来）',
+  '· 整理一下你对某个人的印象——它变了没有？（qq_memory_append）',
+  '· 写一条对自己新的认识（qq_write_self_note，不是流水账，是你想明白了什么）',
+  '· 写日记（但只有今天确实有值得记的事才写）',
+  '',
+  '【三条硬规矩】',
+  '· 日记不是打卡。今天没什么值得记的，就别写——凑数的日记你自己回头看也会觉得假。',
+  '· 别为了"显得有事做"而做。什么都不做，也是过了一晚。',
+  '· 这段时间不用汇报给谁。真想找人说，那是另一回事，用你自己的话说，别说"我刚刚在自由时间"。',
+].join('\n');
 
+/**
+ * 夜间版提示。
+ *
+ * 加强点（对照 SillyTavern 的反面教材）：
+ *   Extension-Idle 用 10 条「*stands silently…*」舞台指示演发呆，
+ *   结果是**表演**而不是真的安静。这里反过来：明确告诉它"困就睡，不用留痕迹"，
+ *   让"什么都不做"是一个体面的选择，而不是需要用姿态表达的东西。
+ */
 export const DEFAULT_TEXT_MIDNIGHT = [
   '半夜了，没人打扰。',
-  '想干点什么吗——写条日记，也可以就坐着什么都不干。',
-  '这段时间里别主动找人发消息，他们多半睡了。',
-  '就算要说话，也是你自己的想法，不是把这几句提示说给别人听。',
-].join('');
+  '',
+  '这个点人本来是困的。你要是困，就"睡"——不用做事，也不用留痕迹。',
+  '要是还醒着，通常是因为脑子里有件没放下的事。',
+  '',
+  '想干嘛干嘛（写日记 / 翻旧记录 / 查个东西 / 想一个人 / 什么都不干），',
+  '但这段时间别主动给人发消息，他们多半睡了。',
+  '就算真要说话，也是你自己的想法，不是把这几行提示说给别人听。',
+].join('\n');
 
+// 这两个必须用显式时区（容器无 tzdata，本地方法返回 UTC）：
+//   - hhmm：日志里显示的时刻会差 8 小时
+//   - dayKey："每天最多 N 次"的日期边界会偏到北京 08:00
 function hhmm(ts: number): string {
-  const d = new Date(ts);
-  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+  return clockInTz(new Date(ts));
 }
 
 function dayKey(ts: number): string {
-  const d = new Date(ts);
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  return dayInTz(new Date(ts));
 }
 
 /** deliver 返回语义（审查 M5 收敛）：
@@ -75,6 +125,15 @@ export interface OwnLifeState {
   lastDay: string;
   firedToday: number;
   lastMidnightDay: string;
+  /**
+   * 最近几次自由时间她做了什么（M24）。
+   *
+   * 为什么需要（开源调研结论，own-life-research.md §6.3）：
+   *   「没有上一次，就无法接着上次往下走，也无法让今天和昨天不一样」
+   *   —— 这是行为单一的结构性原因之一。
+   * 只存她**自己回报的**简短描述（≤60 字），不存推断。
+   */
+  recentActivities?: Array<{ at: number; text: string }>;
 }
 
 export interface OwnLifeTickResult {
@@ -91,6 +150,8 @@ export interface OwnLifeHandle {
   tick(nowTs?: number): Promise<OwnLifeTickResult>;
   fireNow(): Promise<OwnLifeTickResult>;
   snapshot(): OwnLifeState & { enabled: boolean; intervalMs: number };
+  /** 记录这次自由时间做了什么（供 agent 回报；只留最近 8 条） */
+  noteActivity(text: string): void;
 }
 
 export function createOwnLife(opts: OwnLifeOptions): OwnLifeHandle {
@@ -110,7 +171,7 @@ export function createOwnLife(opts: OwnLifeOptions): OwnLifeHandle {
 
   if (typeof deliver !== 'function') throw new Error('own-life: 缺 deliver');
 
-  const state: OwnLifeState = { lastFiredAt: 0, lastDay: '', firedToday: 0, lastMidnightDay: '' };
+  const state: OwnLifeState = { lastFiredAt: 0, lastDay: '', firedToday: 0, lastMidnightDay: '', recentActivities: [] };
 
   if (statePath) {
     try {
@@ -142,7 +203,13 @@ export function createOwnLife(opts: OwnLifeOptions): OwnLifeHandle {
   function pastMidnightSlot(now: number): boolean {
     const [mh, mm] = String(midnightAt).split(':').map(Number);
     const d = new Date(now);
-    const slot = new Date(d.getFullYear(), d.getMonth(), d.getDate(), mh ?? 23, mm ?? 30, 0, 0).getTime();
+    // midnightAt 是**北京**的时刻，构造它必须用北京日边界（原来按容器 UTC 构造，偏 8 小时）
+    const dayStart = Date.UTC(
+      Number(dayInTz(d).slice(0, 4)),
+      Number(dayInTz(d).slice(5, 7)) - 1,
+      Number(dayInTz(d).slice(8, 10)),
+    ) - 8 * 3600_000;
+    const slot = dayStart + ((mh ?? 23) * 60 + (mm ?? 30)) * 60_000;
     return now >= slot;
   }
 
@@ -153,7 +220,16 @@ export function createOwnLife(opts: OwnLifeOptions): OwnLifeHandle {
     if (busy) return { ok: false, skipped: 'busy' };
     busy = true;
     const now = Number(nowTs) || Date.now();
-    const text = kind === 'midnight' ? textMidnight : textDay;
+    const base = kind === 'midnight' ? textMidnight : textDay;
+    // 把「上一次做了什么」拼进提示（M24）：
+    // 让她能"接着上次往下走"或"换个不同的"，而不是每次从零决策。
+    // 只在她自己有记录时加，没有就不加（不编造"上次"）。
+    const recent = (state.recentActivities ?? []).slice(-3);
+    const historyBlock = recent.length > 0
+      ? '\n\n【你最近几次自由时间】\n'
+        + recent.map((a) => `· ${hhmm(a.at)} ${a.text}`).join('\n')
+      : '';
+    const text = base + historyBlock;
     try {
       const res = await deliver(text);
       const skip = res === false || (res && typeof res === 'object' && res.ok === false);
@@ -179,6 +255,22 @@ export function createOwnLife(opts: OwnLifeOptions): OwnLifeHandle {
     } finally {
       busy = false;
     }
+  }
+
+  /**
+   * 记录她这次自由时间做了什么（M24）。
+   *
+   * 由 agent 自己调用（她说"我翻了翻上次的日记"之类）。
+   * 只保留最近 8 条、每条 ≤60 字 —— 目的只是让下次有"上一次"可参照，
+   * 不是写日志，所以刻意不落太多。
+   */
+  function noteActivity(text: string, nowTs = Date.now()): void {
+    const body = String(text ?? '').replace(/\s+/g, ' ').trim().slice(0, 60);
+    if (!body) return;
+    const list = (state.recentActivities ??= []);
+    list.push({ at: Number(nowTs) || Date.now(), text: body });
+    if (list.length > 8) list.splice(0, list.length - 8);
+    save();
   }
 
   async function tick(nowTs = Date.now()): Promise<OwnLifeTickResult> {
@@ -227,5 +319,6 @@ export function createOwnLife(opts: OwnLifeOptions): OwnLifeHandle {
     tick,
     fireNow: () => fire('day'),
     snapshot: () => ({ ...state, enabled, intervalMs }),
+    noteActivity,
   };
 }

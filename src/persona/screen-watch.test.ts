@@ -100,6 +100,18 @@ function watch(probe: ScreenProbe, extra: Partial<Parameters<typeof createScreen
 }
 
 /** 固定时间：2026-10-30 是周五，本地 12:00 —— 落在默认 [9,23) 时段内 */
+
+/**
+ * 按**北京时刻**构造 Date。
+ *
+ * 容器无 tzdata，new Date(y, m, d, h) 是按 UTC 构造的。
+ * inActiveHours 已改成用显式时区（北京），所以测试也必须按北京时刻构造，
+ * 否则 UTC 12:00 会被当成北京 20:00，断言自然对不上。
+ */
+function beijing(y: number, m: number, d: number, h: number, min = 0): Date {
+  return new Date(Date.UTC(y, m - 1, d, h, min) - 8 * 3600_000);
+}
+
 const FIXED_NOW = new Date(2026, 9, 30, 12, 0, 0).getTime();
 
 // ─────────────────────── 隐私规则：包名/Activity 黑名单 ───────────────────────
@@ -357,16 +369,16 @@ describe('兴趣匹配', () => {
 
 describe('观察时段', () => {
   it('默认 [9,23) 不碰半夜', () => {
-    expect(inActiveHours(new Date(2026, 9, 30, 12, 0), [9, 23])).toBe(true);
-    expect(inActiveHours(new Date(2026, 9, 30, 8, 59), [9, 23])).toBe(false);
-    expect(inActiveHours(new Date(2026, 9, 30, 23, 0), [9, 23])).toBe(false);
-    expect(inActiveHours(new Date(2026, 9, 30, 2, 0), [9, 23])).toBe(false);
+    expect(inActiveHours(beijing(2026, 10, 30, 12), [9, 23])).toBe(true);
+    expect(inActiveHours(beijing(2026, 10, 30, 8, 59), [9, 23])).toBe(false);
+    expect(inActiveHours(beijing(2026, 10, 30, 23, 0), [9, 23])).toBe(false);
+    expect(inActiveHours(beijing(2026, 10, 30, 2, 0), [9, 23])).toBe(false);
   });
 
   it('跨零点区间', () => {
-    expect(inActiveHours(new Date(2026, 9, 30, 23, 30), [22, 6])).toBe(true);
-    expect(inActiveHours(new Date(2026, 9, 30, 3, 0), [22, 6])).toBe(true);
-    expect(inActiveHours(new Date(2026, 9, 30, 12, 0), [22, 6])).toBe(false);
+    expect(inActiveHours(beijing(2026, 10, 30, 23, 30), [22, 6])).toBe(true);
+    expect(inActiveHours(beijing(2026, 10, 30, 3, 0), [22, 6])).toBe(true);
+    expect(inActiveHours(beijing(2026, 10, 30, 12), [22, 6])).toBe(false);
   });
 });
 
@@ -476,7 +488,7 @@ describe('整轮 · 该跳过的必须跳过（且不继续往下读）', () => 
   it('半夜不看', async () => {
     const probe = healthyProbe();
     const { handle } = watch(probe, { activeHours: [9, 23] });
-    expect((await handle.tick(new Date(2026, 9, 31, 3, 0).getTime())).skipped).toBe('quiet-hours');
+    expect((await handle.tick(beijing(2026, 10, 31, 3).getTime())).skipped).toBe('quiet-hours');
     expect(probe.calls).toHaveLength(0);
   });
 

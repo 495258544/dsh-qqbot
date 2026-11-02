@@ -89,9 +89,15 @@ export function composeDiaryText(m: ReturnType<typeof pickDiaryMaterial>): strin
 export function readTurnsOfDay(turnsFile: string, day: string): TurnRecordLike[] {
   if (!fs.existsSync(turnsFile)) return [];
   const out: TurnRecordLike[] = [];
-  // 按日期前缀粗筛：t 是毫秒时间戳，这里用时间范围比较
+  // 日期边界必须用**北京时区**算。
+  //
+  // 踩过的坑（2026-11-02）：原来写 new Date(y, m, d) 是按容器本地时区（UTC）构造零点，
+  // 于是"当天"实际是北京 08:00 → 次日 08:00。早上 8 点前发生的事会被算进前一天，
+  // 早上 8 点后算进当天 —— 和 diary 的 day 字段（已是北京时区）对不上，
+  // 会导致"当天明明聊过却判断成没聊"或反过来的情况。
   const [y, m, d] = day.split('-').map(Number);
-  const start = new Date(y!, (m ?? 1) - 1, d ?? 1, 0, 0, 0, 0).getTime();
+  // 北京 = UTC+8，所以北京当天 00:00 对应 UTC 前一天 16:00
+  const start = Date.UTC(y!, (m ?? 1) - 1, d ?? 1, 0, 0, 0, 0) - 8 * 3600_000;
   const end = start + 24 * 3600_000;
   try {
     const lines = fs.readFileSync(turnsFile, 'utf8').split('\n');

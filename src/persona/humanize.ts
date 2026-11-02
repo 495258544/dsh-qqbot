@@ -14,7 +14,9 @@
  * - typing 由官方 sendTyping 承担（仅 c2c），失败忽略
  */
 
-/** 睡觉时段（本地时间），这段时间回复会明显变慢 */
+import { hourInTz } from './clock.ts';
+
+/** 睡觉时段（**北京时区**），这段时间回复会明显变慢 */
 const NIGHT = { from: 2, to: 7 };
 /** 打字速度：每字毫秒。中文手打大概 80~140ms/字 */
 const DEFAULT_MS_PER_CHAR = 110;
@@ -80,7 +82,9 @@ export class Humanizer {
     // 抖动
     ms *= 1 + (Math.random() * 2 - 1) * this.jitter;
     // 深夜慢一点（半睡半醒）
-    const h = new Date().getHours();
+    // 用显式时区：容器无 tzdata，getHours() 是 UTC —— 会让"深夜"完全错位
+    // （实测：北京 10:35 会被当成凌晨 2:35，误触发 1.6 倍慢速）。
+    const h = hourInTz(new Date());
     if (h >= NIGHT.from && h < NIGHT.to) ms *= 1.6;
     return Math.round(ms);
   }

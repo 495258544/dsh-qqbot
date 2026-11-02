@@ -334,7 +334,7 @@ export function ConfigPanel(props?: { bindPhase?: string }): ReactNode {
   }
 
   const dirty = (Object.keys(form) as Array<keyof ConfigWire>).some((key) => !shallowEqual(form[key], initial[key]));
-  const access: AccessControlWire = form.access ?? { c2cMode: 'allowlist', c2cAllow: [], groupMode: 'open', groupAllow: [] };
+  const access: AccessControlWire = form.access ?? { c2cMode: 'open', c2cAllow: [], groupMode: 'open', groupAllow: [] };
 
   return createElement('form', { className: 'imqb2-form', onSubmit: submit },
     createElement('div', { className: 'imqb2-group-title' }, '服务范围'),

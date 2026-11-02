@@ -298,7 +298,10 @@ function activeHoursOf(v: number[] | undefined): [number, number] {
 
 /** 访问控制子 Schema（独立导出：config 路由的服务端校验复用） */
 export const AccessControlSchema: Schema<AccessControlConfig> = Schema.object({
-  c2cMode: Schema.union(['open', 'allowlist', 'disabled']).default('allowlist').description('C2C访问模式（默认白名单，空名单拒绝所有人）'),
+  // 默认值取上游的 'open'（上游 d11acd3 明确把默认改回 open；
+  // 'allowlist' + 空名单会把所有人挡死，是危险的默认值）。
+  // 描述保留我们的版本：那段 openid「按 bot+会话类型隔离」的说明是实测踩坑总结。
+  c2cMode: Schema.union(['open', 'allowlist', 'disabled']).default('open').description('C2C访问模式（默认开放）'),
   c2cAllow: Schema.array(Schema.string()).default([]).description('私聊(C2C)白名单：填你的 QQ OpenID。⚠️ QQ 机器人给同一人分配的 openid 是「按 bot/appid + 会话类型(群/私聊) 隔离」的——你在群里和私聊里的 openid 不一样，不同 bot 之间也不一样。这里填「私聊里」你的 openid（qq_steam_owner「改主人账号」的权限也以此判断）。不知道 openid？在私聊里和 bot 说句话，看日志或会话存档；详见仓库 SETUP.md。'),
   groupMode: Schema.union(['open', 'allowlist', 'disabled']).default('open').description('群聊访问模式（默认开放：群自带进群门槛 + @bot 触发）'),
   groupAllow: Schema.array(Schema.string()).default([]).description('群聊白名单（群 OpenID）'),

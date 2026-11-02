@@ -42,6 +42,7 @@ export class ModelResolver {
     this.logger = logger;
     this.prefs = new PrefsStore(
       config.debug ? (msg) => this.logger?.debug(msg) : undefined,
+      { onError: (msg) => this.logger?.warn(`im-qqbot: ${msg}`) },
     );
     this.settings = new SettingsReader();
   }

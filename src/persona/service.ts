@@ -51,8 +51,9 @@ export class ProactiveBudget {
   ) {}
 
   private day(): string {
-    const d = new Date();
-    return `${d.getFullYear()}-${d.getMonth() + 1}-${d.getDate()}`;
+    // 必须用北京时区：「每日上限」的边界应该在北京零点切换，
+    // 用容器本地时区（UTC）会让每天从北京 08:00 才开始，早上的主动消息会被算进前一天。
+    return dayInTz(new Date(), DEFAULT_TZ);
   }
 
   private peer(id: string): PersonaBudgetPeer {
