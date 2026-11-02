@@ -494,3 +494,83 @@ describe('跨天连续性 · 心情必须扛得过一夜睡眠', () => {
     expect(d2).toBeGreaterThan(0.15);
   });
 });
+
+describe('写入点必须真的被调用（防"接上又被改掉"）', () => {
+  // 这三条防的是一个真实发生的退化：
+  // onIgnored 曾经接在 ProactiveBudget.markUnanswered 里，
+  // 后来因为那个类没有 emotion 字段被删掉，**忘了在 service 侧补回**
+  // 导致"最重要的负向写入点"静默消失，情绪只剩正向源
+  // → 长期贴在上限 → 正好是 feiyu-mood 的"永远开心 = 没有心情"。
+  //
+  // 靠代码审查抓不住这类问题：删一行编译一样过，测试一样绿。
+
+  const mkSvc = async (dir: string) => {
+    const { PersonaService } = await import('./service.ts');
+    return new PersonaService({
+      config: {
+        enabled: true, dataDir: dir, roleCardPath: '', roleMaxChars: 12000,
+        wakeEnabled: true, names: [], keywords: [], ownerOpenids: [], groupProbability: 0,
+        humanizeEnabled: true, msPerChar: 110, burstMax: 2, gapMinMs: 700, gapMaxMs: 2600,
+        ownLifeEnabled: false, ownLifeIntervalMs: 9000000, ownLifeMaxPerDay: 6,
+        maxProactivePerDay: 2, proactiveMinGapMs: 7200000,
+      } as never,
+      dataDir: dir,
+      logger: { info: () => {}, warn: () => {}, error: () => {}, debug: () => {} } as never,
+    });
+  };
+
+  it('主动说话没人理 → valence 下降（onIgnored 真的被调）', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'emotion-wire-'));
+    const svc = await mkSvc(dir);
+    // 先制造一次"主动推送"
+    svc.budget.recordProactive('u1');
+    const before = svc.emotion.current().valence;
+
+    // 对方没有回应（lastActivityAt 早于 lastProactiveAt）
+    svc.observePeer('u1', Date.now() - 60_000);
+
+    expect(svc.emotion.current().valence).toBeLessThan(before);
+  });
+
+  it('主动说话后对方回了 → 不扣，反而算被接住', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'emotion-wire2-'));
+    const svc = await mkSvc(dir);
+    svc.budget.recordProactive('u1');
+    const before = svc.emotion.current().valence;
+
+    // 对方在推送之后说话了
+    svc.observePeer('u1', Date.now() + 60_000);
+
+    expect(svc.emotion.current().valence).toBeGreaterThanOrEqual(before);
+  });
+
+  it('从没主动过 → 不碰情绪（不能白扣）', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'emotion-wire3-'));
+    const svc = await mkSvc(dir);
+    const before = svc.emotion.current().valence;
+    svc.observePeer('nobody', Date.now());
+    expect(svc.emotion.current().valence).toBeCloseTo(before, 6);
+  });
+
+  it('隔了 6 小时以上再说话 → 精力回升（onRest 真的被调）', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'emotion-rest-'));
+    const svc = await mkSvc(dir);
+    // 先把精力压低
+    for (let i = 0; i < 4; i++) svc.emotion.onNightChat(2);
+    const low = svc.emotion.current().energy;
+
+    // 第一次轮次：lastTurnAt 是 0，不触发
+    svc.noteUserTurn('s0', '先来一句', 'u1');
+    svc.noteReplyChunk('s0', '在');
+    svc.flushTurn('s0', 'c2c:u1', 'u1');
+
+    // 手动把"上次对话时间"推到 7 小时前，模拟睡了一觉
+    (svc as unknown as { lastTurnAt: number }).lastTurnAt = Date.now() - 7 * 3600_000;
+
+    svc.noteUserTurn('s1', '早', 'u1');
+    svc.noteReplyChunk('s1', '早呀');
+    svc.flushTurn('s1', 'c2c:u1', 'u1');
+
+    expect(svc.emotion.current().energy).toBeGreaterThan(low);
+  });
+});

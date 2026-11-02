@@ -58,6 +58,14 @@ export class ProactiveBudget {
     return dayInTz(new Date(), DEFAULT_TZ);
   }
 
+  /**
+   * 只读快照（不创建占位）。给 PersonaService 结算情绪用 ——
+   * 它需要在 observe 前后各看一次 unansweredStreak 才知道"这次算不算失落"。
+   */
+  peerSnapshot(id: string): PersonaBudgetPeer | undefined {
+    return this.peers.get(id);
+  }
+
   private peer(id: string): PersonaBudgetPeer {
     let p = this.peers.get(id);
     if (!p) {
@@ -188,6 +196,8 @@ export class PersonaService {
   /** 轮内记账暂存（sessionId → 用户/回复文本），turn/end 配对写流水后清除。
    *  刻意不挂 SessionRecord：deliverables 等既有路径对 record 做深比较 */
   private readonly turnLedger = new Map<string, { user?: string; reply: string; who?: string }>();
+  /** 上一次对话轮结束的时间（M31：用来判断"中间是不是睡了一觉"） */
+  private lastTurnAt = 0;
   private readonly pruneTimer: ReturnType<typeof setInterval> | undefined;
 
   constructor(private readonly deps: PersonaDeps) {
@@ -282,6 +292,34 @@ export class PersonaService {
       if (fi || fd) this.deps.logger.info(`persona: 衰减冻结 兴趣=${fi} 厌恶=${fd}`);
     } catch (err) {
       this.deps.logger.warn(`persona: 衰减失败: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  /**
+   * 投递前结算"上次主动消息有没有被理"，并据此写情绪（M31 写入点③）。
+   *
+   * 为什么必须在这里而不是在 ProactiveBudget 里：
+   * `ProactiveBudget` 是纯计数/退避的状态机，它不该知道"情绪"这种语义。
+   * 但我第一版把 onIgnored 写进了 budget 的 markUnanswered —— 编译不过，
+   * 于是把它删了，结果**忘了在 service 侧补回来**，
+   * 导致"最重要负向写入点"静默消失了（被死代码审计抓到）。
+   *
+   * 这条链的重要性：情绪只有 onAddressed/onReplied 两个正向源时，
+   * valence 会长期贴在上限，speakWillingness 锁在 1.4 ——
+   * 正好复现 feiyu-mood 的"永远开心 = 没有心情"。
+   */
+  observePeer(peerId: string, lastActivityAt: number): void {
+    const p = this.budget.peerSnapshot(peerId);
+    const wasProactive = (p?.lastProactiveAt ?? 0) > 0;
+    const wasAnswered = wasProactive && lastActivityAt > (p?.lastProactiveAt ?? 0);
+    const before = p?.unansweredStreak ?? 0;
+
+    this.budget.observe(peerId, lastActivityAt);
+
+    // 只有"确实主动过、且这次算没被理"才记一次失落（不能重复计）
+    if (wasProactive && !wasAnswered) {
+      const after = this.budget.peerSnapshot(peerId)?.unansweredStreak ?? 0;
+      if (after > before) this.emotion.onIgnored();
     }
   }
 
@@ -502,6 +540,16 @@ export class PersonaService {
     const entry = this.turnLedger.get(sessionId);
     this.turnLedger.delete(sessionId);
     if (!entry) return;
+    // ── M31 写入点：睡够了 → 精力回升 ──
+    // onRest 是 energy 的**唯一正向**来源，其余五个写入点里三个是负向、
+    // 两个不影响 energy。不接它的话 energy 只降不升，几天后永远"很累"。
+    // 判据用"距上次任何消息超过 6 小时"，近似于"中间睡了一觉"。
+    {
+      const now = Date.now();
+      const last = this.lastTurnAt;
+      if (last > 0 && now - last >= 6 * 3600_000) this.emotion.onRest();
+      this.lastTurnAt = now;
+    }
     const user = (entry.user ?? '').trim();
     const reply = entry.reply.trim();
     if (user || reply) this.memory.logTurn({ where, who: entry.who ?? fallbackWho, text: user, reply });
