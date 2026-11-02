@@ -367,7 +367,7 @@ export class EmotionService {
    *
    * 平静时不注入 —— 天天说"我状态还行"本身就是 AI 味。
    */
-  renderSection(facts: { silentDays?: number; unanswered?: number } = {}): string {
+  renderSection(facts: { silentDays?: number; unanswered?: number; askedBefore?: boolean } = {}): string {
     const st = this.current();
     const lines: string[] = [];
 
@@ -379,6 +379,11 @@ export class EmotionService {
     // ② 事实：她主动说了话，连续没人接
     const un = facts.unanswered ?? 0;
     if (un >= 2) lines.push(`你有 ${un} 次主动开口没人接`);
+
+    // ②.5 事实：已经问过"你在忙吗"了，还没回。
+    // 「只问一次，不追问」—— 追问是讨人厌最快的路径。
+    // 来源：dsh-bili-whale 的 quota ask。
+    if (facts.askedBefore && un >= 2) lines.push('你已经问过一次「是不是在忙」了，还没回');
 
     // ③ 事实：精力状态（用身体感受描述，不用形容词结论）
     if (st.energy < 0.3) lines.push('你现在很困，脑子里转不动');

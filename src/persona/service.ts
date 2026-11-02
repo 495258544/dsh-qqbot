@@ -37,6 +37,17 @@ export interface PersonaBudgetPeer {
   mutedUntil: number;
   /** 本轮主动推送是否已记过"未响应"（防重复计） */
   staleCounted?: boolean;
+  /**
+   * 最近一次"问她是不是在忙"的时间（M34）。
+   *
+   * 为什么单独记：`mutedUntil` 只是**拦住**她再发消息，
+   * 但没有告诉她"你已经问过一次了"。行为上被拦、认知上不知道，
+   * 结果就是她会在提示里被暗示"可以问问他在忙吗"，然后又一次被静音。
+   *
+   * 来源：`dsh-bili-whale` 的 `quota ask` ——「只问一次，不追问」。
+   * 追问是讨人厌最快的路径，而这个成本只是一个时间戳。
+   */
+  askedAt?: number;
 }
 
 /**
@@ -134,6 +145,17 @@ export class ProactiveBudget {
       p.unansweredStreak = 0;
       p.mutedUntil = 0;
     }
+  }
+
+  /**
+   * 记下"她已经问过是不是在忙了"（M34）。
+   *
+   * 「只问一次，不追问」—— 追问是讨人厌最快的路径。
+   * 记完下次注入会告诉她"你已经问过一次了，还没回"，
+   * 而不是放任她再问一遍又被静音。
+   */
+  markAsked(peerId: string): void {
+    this.peer(peerId).askedAt = Date.now();
   }
 
   /**
@@ -428,8 +450,8 @@ export class PersonaService {
    * 静默天数从 memory 的最近对话时间算（那是真实发生过的），
    * unanswered 从 budget 取（她主动说过话、对方没接的次数）。
    */
-  private emotionFacts(personKey?: string): { silentDays?: number; unanswered?: number } {
-    const facts: { silentDays?: number; unanswered?: number } = {};
+  private emotionFacts(personKey?: string): { silentDays?: number; unanswered?: number; askedBefore?: boolean } {
+    const facts: { silentDays?: number; unanswered?: number; askedBefore?: boolean } = {};
     try {
       if (personKey) {
         const rows = this.memory.recentTurns(1, {});
@@ -439,6 +461,8 @@ export class PersonaService {
         }
         const p = this.budget.peerSnapshot(personKey);
         if (p?.unansweredStreak) facts.unanswered = p.unansweredStreak;
+        // 只问一次，不追问：把"已经问过"这件事也告诉她
+        if (p?.askedAt) facts.askedBefore = true;
       }
     } catch {
       /* 取不到事实就不注入，不影响主流程 */

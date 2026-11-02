@@ -788,3 +788,26 @@ describe('renderSection · 只给事实，不给结论（M33）', () => {
     expect(svc.renderSection({ silentDays: 4 })).toContain('随你');
   });
 });
+
+describe('只问一次，不追问（M34）', () => {
+  // 来源：dsh-bili-whale 的 `quota ask` ——「只问一次，不追问」。
+  // 追问是讨人厌最快的路径，而这个机制的成本只是一个时间戳。
+  //
+  // 小羽原来只有 mutedUntil（拦），没有"已经问过"（知）。
+  // 行为被拦、认知不知道 → 她会在提示里被暗示可以问问，然后又被静音。
+
+  it('已经问过 → 注入会提醒她别再问', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'asked-'));
+    const svc = new EmotionService(dir);
+    const t = svc.renderSection({ unanswered: 3, askedBefore: true });
+    expect(t).toContain('问过一次');
+    expect(t).toContain('还没回');
+  });
+
+  it('没问过时不提这句（别凭空造记忆）', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'asked2-'));
+    const svc = new EmotionService(dir);
+    const t = svc.renderSection({ unanswered: 3, askedBefore: false });
+    expect(t).not.toContain('问过一次');
+  });
+});
