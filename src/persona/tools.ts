@@ -983,9 +983,13 @@ export function registerPersonaTools(
         if (r.title) parts.push(`《${r.title}》${r.page && r.page > 1 ? ` 第 ${r.page} P` : ''}`);
         // 合集先给目录 —— 用户要挑着看，先得知道有哪些集
         if (r.pages?.length) {
+          // 目录同样要"先筛再说"。
+          // 16 行全念一遍等于让他读目录，而他要的是"哪几集值得看"。
           parts.push(`这是个合集（共 ${r.pages.length} P）：\n`
             + r.pages.map((p) => `  P${p.page}（${p.length}）${p.title}`).join('\n')
-            + '\n（想看某一 P，带 page 参数再查一次）');
+            + '\n\n↑ 别把 16 行全念给他。按他问的东西**挑相关的 2–3 集**说，'
+            + '或者问他想要哪个方向。\n'
+            + '（要看某一 P 的具体内容，带 page 参数再查一次）');
         }
         if (r.summary) parts.push(`AI 总结：${r.summary}`);
         if (r.outline?.length) {
@@ -994,8 +998,21 @@ export function registerPersonaTools(
             + sec.points.map((pt) => `      ${pt.t} ${pt.text}`).join('\n')).join('\n'));
         }
         if (r.subtitleOutline?.length) {
-          parts.push('字幕·按分钟（[时间] 这一分钟主要在讲）：\n'
-            + r.subtitleOutline.map((x) => `  [${x.t}] ${x.text}`).join('\n'));
+          // 这不是"给你看的资料"，是"给你挑的原料"。
+          //
+          // 原来的措辞是「字幕·按分钟（这一分钟主要在讲）」——
+          // 那是在暗示"这就是结论"，她很可能直接整段转给用户。
+          // 结果就是从"四十集看不过来"变成"32 分钟看不完"，问题只是换了个尺度。
+          //
+          // 用户要的是**你先筛过**。所以这里明确要求她挑，并给出挑的标准。
+          parts.push(
+            '字幕·按分钟（**这是原料，不是结论**）：\n'
+            + r.subtitleOutline.map((x) => `  [${x.t}] ${x.text}`).join('\n')
+            + '\n\n↑ 别整段转给他。你要做的是**从中挑出真正讲到东西的 3–5 段**，'
+            + '每段用一句话说清"这讲了什么"，带上时间点。\n'
+            + '挑的标准：有具体命令/参数/结论/易错点的才算"讲到东西"；'
+            + '铺垫、寒暄、"我们后面再讲"这类跳过。'
+          );
         }
         if (r.danmakuPeaks?.length) {
           parts.push('观众反应最强的时刻：\n'
