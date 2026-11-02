@@ -32,6 +32,7 @@ import { registerStickerTool, registerArchiveTool } from '../media/sticker-tool.
 import { DeliverablesDeliverer } from '../transport/deliverables.ts';
 import { PersonaService } from '../persona/service.ts';
 import { registerPersonaTools } from '../persona/tools.ts';
+import { checkBiliHealth, formatHealthIssues } from '../persona/bili-health.ts';
 import { SteamService, registerSteamTools } from '../steam/index.ts';
 import { createDotaService, registerDotaTools, type DotaService } from '../dota/index.ts';
 import { createBridgeProbe, renderScreenNudge } from '../persona/screen-watch.ts';
@@ -268,6 +269,28 @@ export async function bootstrapGateway(
   // ── persona 工具（qq_write_diary / qq_read_diary / qq_memory_append）──
   if (persona) {
     registerPersonaTools(ctx, persona, (agent) => manager.findByAgent(agent as Parameters<SessionManager['findByAgent']>[0]), logger);
+
+    // M36：bili 输出字段自检。
+    //
+    // 我们对 bili 的输出字段有依赖（字幕的 from、pages 的 title…），
+    // 升级改了字段我们会静默拿到 undefined，功能悄悄坏掉。
+    // 这里启动时验一次，坏了大喊一声 —— **不阻塞启动**，
+    // 因为聊天/日记/记忆都不依赖 bili，它挂了不该让她整个不能用。
+    //
+    // 异步跑：自检要起 4 个 Python 进程，别拖慢启动。
+    setTimeout(() => {
+      try {
+        const issues = checkBiliHealth();
+        if (issues.length) {
+          logger.warn(`im-qqbot: bili 字段自检发现 ${issues.length} 处问题（升级可能改了输出）：${formatHealthIssues(issues)}`);
+        } else {
+          logger.info('im-qqbot: bili 字段自检通过');
+        }
+      } catch (err) {
+        // 自检自己挂了也不能影响主流程
+        logger.debug(`im-qqbot: bili 自检异常: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }, 15_000).unref?.();
   }
 
   // ── Steam 工具（qq_steam_bind / forget / lookup / friends / owner）──
