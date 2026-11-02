@@ -68,6 +68,8 @@ export function personaWakeGate(
     const content = String(msg.content ?? '');
     if (content && COMPLAINT_RE.test(content)) {
       const now = persona.self.registerComplaint();
+      // M31 写入点：被嫌吵 → 心情差 + 蔫下来（不只是调低话痨度）
+      persona.emotion.onComplained();
       logger.info(`persona: 被嫌吵「${content.slice(0, 20)}」→ chattiness=${now.toFixed(2)}`);
     } else if (content && msg.senderId !== peerId && /在吗|小羽|hi|hello/i.test(content)) {
       // 对方主动找她说话 → 稍微回暖
@@ -165,6 +167,9 @@ export function personaWakeGate(
       // 醒后才涨互动计数（m1①），并记录本次唤醒（潜水状态机消费 lastWakeAt）
       persona.memory.touch(msg.senderId, { name: msg.senderName });
       waker.wake(key, msg.senderId);
+      // M31 写入点：被叫到 / 被接话 → 注意力被拉过来，心情微升。
+      // 放在"确实要回应"之后，collectOnly（只归档不回复）不算。
+      if (!ctx.state.collectOnly) persona.emotion.onAddressed();
     }
 
     await next();
