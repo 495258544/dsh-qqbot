@@ -435,11 +435,6 @@ export function configureGroupActivity(opts: GroupActivityOptions): GroupActivit
   return defaultStore;
 }
 
-/** 取进程级实例（没配置过返回 null） */
-export function getGroupActivityStore(): GroupActivityStore | null {
-  return defaultStore;
-}
-
 /** 入站消息埋点：群消息进来时调一句即可，未配置时静默忽略 */
 export function recordGroupActivity(groupId: string, senderId: string, text: string): void {
   defaultStore?.record(groupId, senderId, text);

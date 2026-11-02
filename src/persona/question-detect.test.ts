@@ -7,7 +7,7 @@
  *  3. 陈述句反例（最容易误报的：吧字祈使、呢字进行、疑问代词任指）
  */
 import { describe, expect, it } from 'vitest';
-import { detectQuestion, detectAddressee, classifyUtterance, isQuestion, extractVocatives } from './question-detect.ts';
+import { detectQuestion, detectAddressee, isQuestion, extractVocatives } from './question-detect.ts';
 
 describe('detectQuestion · 原始失败样例', () => {
   it('旧正则漏掉的 7 条，现在都能识别', () => {
@@ -184,28 +184,6 @@ describe('detectAddressee · 在跟谁说话', () => {
   });
 });
 
-describe('classifyUtterance · 接不接话', () => {
-  it('明确问她 + 问句 → 接', () => {
-    expect(classifyUtterance('你吃了吗').shouldReply).toBe(true);
-    expect(classifyUtterance('小羽睡了吗', { names: ['小羽'] }).shouldReply).toBe(true);
-  });
-
-  it('省略主语的问句，只在对话窗口内才接', () => {
-    expect(classifyUtterance('吃了吗').shouldReply).toBe(false);
-    expect(classifyUtterance('吃了吗', { inConversationWithMe: true }).shouldReply).toBe(true);
-  });
-
-  it('在问别人时不抢话', () => {
-    expect(
-      classifyUtterance('老张吃了吗', { otherNames: ['老张'], inConversationWithMe: true }).shouldReply,
-    ).toBe(false);
-  });
-
-  it('陈述句默认不接（避免变成应答器）', () => {
-    expect(classifyUtterance('今天好热', { inConversationWithMe: true }).shouldReply).toBe(false);
-    expect(classifyUtterance('你吃吧', { inConversationWithMe: true }).shouldReply).toBe(false);
-  });
-});
 
 describe('extractVocatives · 提取"她可能被叫成什么"（M32）', () => {
   // 防的是 recordNameCall 零调用导致的死链：

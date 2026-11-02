@@ -35,6 +35,7 @@
  * "好"和"不好"都是**偏离**，回到 0 是常态，这才有起伏。
  */
 import fs from 'node:fs';
+import { dayInTz } from './clock.ts';
 import path from 'node:path';
 
 /** 情绪的持久化状态 */
@@ -47,7 +48,36 @@ export interface EmotionState {
   energy: number;
   /** 上次衰减基准 */
   at: number;
+  /**
+   * 当日各类事件计数（M34）。
+   *
+   * 为什么需要：实测 130 轮真实语料，正负比 **45.4 : 1**，
+   * valence 中位数 1.000、>0.85 占 95.4% —— 也就是"永远开心"。
+   *
+   * 根因不是负向太少，而是**正向事件的每轮净贡献 +0.159，
+   * 远超过 24h 半衰期的回落速度**，必然贴顶。
+   * 所以给正向事件加日上限 + 边际递减（见 onAddressed/onReplied）。
+   */
+  daily?: { day: string; addressed: number; replied: number };
 }
+
+/**
+ * 正向事件的日上限与边际递减（M34）。
+ *
+ * 实测数据：130 轮真实语料里 onAddressed 触发 130 次、onReplied 100 次，
+ * 而负向只有 own-life 每天最多 4 次。正负比 45.4:1，valence 中位数 1.000。
+ *
+ * 解法不是"加大负向"，而是**承认正向事件在一天里会饱和**：
+ *   - 被叫到：一天前 8 次全额，之后每多一次只给 1/3
+ *   - 被回应：一天前 5 次全额，之后每多一次只给 1/4
+ * 这样密集聊天时单次价值衰减，而偶尔聊天时每次仍算数。
+ */
+const DAILY_SOFT_CAP = { addressed: 8, replied: 5 } as const;
+// 溢流后降到 1/10 而不是 1/3 —— 因为稳态分析显示：
+//   每 30 分钟 +0.06、24h 半衰期 → 稳态 = 0.06/(1-0.9857) = 4.19，
+//   远超上限 1.0，光靠"日上限"压不住（130 轮跨 2.7 天，每天都会重置）。
+//   改成 1/10 后稳态 ≈ 0.06·(1/10)/(1-0.9857) = 0.42，落在合理区间。
+const OVERFLOW_DAMP = { addressed: 1 / 10, replied: 1 / 10 } as const;
 
 /** 基线：久不变化就回到这里 */
 const BASELINE: Omit<EmotionState, 'at'> = { valence: 0, arousal: 0.3, energy: 0.7 };
@@ -111,6 +141,9 @@ export function regress(state: EmotionState, now = Date.now()): EmotionState {
     arousal: clamp(pull(state.arousal, BASELINE.arousal, HALF_LIFE_H.arousal), 0, 1),
     energy: clamp(pull(state.energy, BASELINE.energy, HALF_LIFE_H.energy), 0, 1),
     at: now,
+    // M34：daily 计数器必须跟着走，否则 regress 一返回就被丢掉，
+    // 日上限形同虚设（实测发现：daily 恒 undefined，130 轮后 valence 仍 1.000）
+    ...(state.daily ? { daily: state.daily } : {}),
   };
 }
 
@@ -122,6 +155,8 @@ export function applyDeltas(state: EmotionState, d: EmotionDeltas, now = Date.no
     arousal: clamp(s.arousal + clamp(d.arousal ?? 0, -MAX_STEP, MAX_STEP), 0, 1),
     energy: clamp(s.energy + clamp(d.energy ?? 0, -MAX_STEP, MAX_STEP), 0, 1),
     at: now,
+    // M34：同样必须带上 daily —— regress 已保留，这里再丢一次就前功尽弃
+    ...(s.daily ? { daily: s.daily } : {}),
   };
 }
 
@@ -254,14 +289,38 @@ export class EmotionService {
   // 全部是"已经发生的事实"，不需要额外 LLM 调用：
   // 被 @ 了、被回复了、主动说话没人理、聊到深夜。
 
-  /** 被人叫到（@ / 点名）→ 注意力被拉过来，心情微升 */
-  onAddressed(): void {
-    this.bump({ valence: 0.06, arousal: 0.12, energy: -0.01 });
+  /**
+   * 取当日计数器并递增（跨日自动归零）。
+   * 用**北京时区**——容器无 tzdata，`new Date().getDate()` 是 UTC。
+   */
+  private tickDaily(kind: 'addressed' | 'replied'): { used: number; damp: number } {
+    const day = dayInTz(new Date());
+    if (!this.state.daily || this.state.daily.day !== day) {
+      this.state.daily = { day, addressed: 0, replied: 0 };
+    }
+    const d = this.state.daily;
+    d[kind] += 1;
+    const used = d[kind];
+    const cap = DAILY_SOFT_CAP[kind];
+    const damp = used <= cap ? 1 : OVERFLOW_DAMP[kind];
+    return { used, damp };
   }
 
-  /** 说出去的话有人接 → 被回应，心情明显好 */
+  /**
+   * 被人叫到（@ / 点名）→ 注意力被拉过来，心情微升。
+   *
+   * M34：过了当日软上限后边际递减 —— 见 DAILY_SOFT_CAP 的注释。
+   * 不这么做的话，实测每轮净 +0.159 会让 valence 必然贴顶。
+   */
+  onAddressed(): void {
+    const { damp } = this.tickDaily('addressed');
+    this.bump({ valence: 0.06 * damp, arousal: 0.12 * (damp === 1 ? 1 : 0.5), energy: -0.01 });
+  }
+
+  /** 说出去的话有人接 → 被回应，心情明显好。M34：同样加日上限与递减 */
   onReplied(): void {
-    this.bump({ valence: 0.14, arousal: 0.08 });
+    const { damp } = this.tickDaily('replied');
+    this.bump({ valence: 0.14 * damp, arousal: 0.08 * (damp === 1 ? 1 : 0.5) });
   }
 
   /**

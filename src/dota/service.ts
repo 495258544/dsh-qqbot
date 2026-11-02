@@ -167,7 +167,6 @@ export interface MatchDetailForm {
 }
 
 /** 多人查询之间的间隔：OpenDota 没有批量端点，连续打容易踩到 429 */
-const MULTI_QUERY_DELAY_MS = 250;
 
 /** 滑动窗口长度 */
 const RATE_WINDOW_MS = 60_000;
@@ -393,42 +392,6 @@ export class DotaService {
     } catch {
       return (id: number) => `#${id}`;
     }
-  }
-
-  /**
-   * 多人查询。OpenDota 不支持批量，所以串行 + 间隔；
-   * 单人失败不中断整批（群里问 5 个人，不该因为 1 个人 ID 填错就全查不到）。
-   */
-  async recentFormMulti(accountIds: number[], limit?: number): Promise<DotaFormOutcome[]> {
-    const unique = [...new Set(accountIds)];
-    const out: DotaFormOutcome[] = [];
-    for (let i = 0; i < unique.length; i += 1) {
-      const accountId = unique[i];
-      if (accountId === undefined) continue;
-      if (i > 0) await delay(MULTI_QUERY_DELAY_MS);
-      try {
-        out.push({ ok: true, form: await this.recentForm(accountId, limit) });
-      } catch (err) {
-        const errorKind = err instanceof OpenDotaError ? err.kind : 'unknown';
-        const message = err instanceof Error ? err.message : String(err);
-        this.logger.warn(`dota: ${accountId} 查询失败 kind=${errorKind} ${message}`);
-        out.push({ ok: false, accountId, errorKind, message });
-        // 远端限流时后面几个必然也失败，继续打只会更糟
-        if (errorKind === 'rate-limit') {
-          for (const rest of unique.slice(i + 1)) {
-            out.push({ ok: false, accountId: rest, errorKind, message });
-          }
-          break;
-        }
-      }
-    }
-    return out;
-  }
-
-  /** 清掉某个账号的缓存（想强制刷新时用） */
-  invalidate(accountId: number): void {
-    this.recentCache.delete(accountId);
-    this.profileCache.delete(accountId);
   }
 }
 
@@ -931,6 +894,3 @@ function renderMatchSummary(form: Omit<MatchDetailForm, 'summaryText'>): string 
   return lines.join('\n');
 }
 
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}

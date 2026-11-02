@@ -484,11 +484,6 @@ export class SelfProfileService {
       .slice(0, Math.min(n, MAX_ACTIVE_INTERESTS));
   }
 
-  /** 全部未冻结兴趣数量（用于"活跃兴趣上限"检查） */
-  activeInterestCount(): number {
-    return this.data.interests.filter((i) => !i.frozen).length;
-  }
-
   // ───────────── 厌恶（M30：与兴趣结构同构、符号相反） ─────────────
   //
   // 为什么不做成 interests 的负权重：
@@ -557,25 +552,6 @@ export class SelfProfileService {
       .filter((i) => !i.frozen)
       .sort((a, b) => this.strengthOf(b) - this.strengthOf(a))
       .slice(0, Math.min(n, MAX_ACTIVE_DISLIKES));
-  }
-
-  /** 有没有讨厌这个具体的话题 */
-  dislikesTopic(topic: string): boolean {
-    return this.data.dislikes.some((i) => !i.frozen && i.topic === topic && this.strengthOf(i) > 0);
-  }
-
-  /**
-   * 这句话里命中的**厌恶**总强度（0~1，封顶 1）。
-   * 用于唤醒闸门做减法：讨厌的东西被提起来，她会**更不想开口**。
-   */
-  dislikeLoad(text: string, matcher: (text: string, topic: string) => boolean): number {
-    const live = this.data.dislikes.filter((i) => !i.frozen);
-    if (live.length === 0) return 0;
-    let sum = 0;
-    for (const d of live) {
-      if (matcher(text, d.topic)) sum += this.strengthOf(d);
-    }
-    return Math.min(1, sum);
   }
 
   /**

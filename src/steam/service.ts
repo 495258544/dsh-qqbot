@@ -18,7 +18,7 @@ import type { Logger } from '../types.ts';
 import { BindingStore, type BindingHit } from './bindings.ts';
 import { SettingsStore } from './settings.ts';
 import { SteamApi, SteamApiError, type PlayerSummary, type RecentGame } from './steam-api.ts';
-import { parseSteamInput, steam64ToSteam2, steamProfileUrl, isSteamId64 } from './steam-id.ts';
+import { parseSteamInput, steamProfileUrl, isSteamId64 } from './steam-id.ts';
 
 /** 一条给人看的 Steam 状态 */
 export interface PersonStatus {
@@ -766,13 +766,6 @@ export class SteamService {
 
     this.refreshing = task;
     return task;
-  }
-
-  /** 展示用：某个人的 SteamID 两种形态（排查"绑错人"时很方便） */
-  describeBinding(openid: string): string | undefined {
-    const binding = this.bindings.get(openid);
-    if (binding === undefined) return undefined;
-    return `${binding.steamId}（${steam64ToSteam2(binding.steamId)}）`;
   }
 }
 

@@ -162,6 +162,10 @@ export function maxItemsFor(topEvidence: number): number {
 /** 强化：被再次提到时 A' = A + 0.2(1−A)，并把时间锚重置到现在 */
 export function reinforce(st: DecayState, nowMs = Date.now()): DecayState {
   const a = freshness(st, nowMs);
+  // 长期事实的鲜活度是恒定的（freshness 对它返回 0.5），
+  // 所以"强化"对它们没有意义 —— 反复提到一条"他住在杭州"
+  // 不该让它从 0.5 漂到 0.6、再漂到 0.68…（实测发现这个漂移）
+  if (st.stable) return { ...st, anchor: nowMs };
   return {
     ...st,
     activation0: Math.min(1, a + 0.2 * (1 - a)),

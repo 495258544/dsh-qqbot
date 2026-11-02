@@ -557,14 +557,26 @@ describe('写入点必须真的被调用（防"接上又被改掉"）', () => {
     const svc = await mkSvc(dir);
     // 先把精力压低
     for (let i = 0; i < 4; i++) svc.emotion.onNightChat(2);
-    const low = svc.emotion.current().energy;
 
-    // 第一次轮次：lastTurnAt 是 0，不触发
+    // 第一次轮次：lastTurnAt 是 0，不触发 onRest
     svc.noteUserTurn('s0', '先来一句', 'u1');
     svc.noteReplyChunk('s0', '在');
     svc.flushTurn('s0', 'c2c:u1', 'u1');
 
-    // 手动把"上次对话时间"推到 7 小时前，模拟睡了一觉
+    // M35：基线必须取**第一次 flush 之后**的值。
+    // 原因：第一轮本身还会触发别的 energy 写入点（实测 0.38 → 0.30），
+    // 拿 flush 前的值当基线，就把"那 0.08"误算成 onRest 没生效。
+    const low = svc.emotion.current().energy;
+
+    // 手动把"上次对话时间"推到 7 小时前，模拟睡了一觉。
+    // M35 修正：`lastTurnAt` 现在**同时落盘**（state/last-turn.json），
+    // 只改内存字段会被下一轮的 loadLastTurnAt() 覆盖 —— 必须写文件。
+    fs.mkdirSync(path.dirname((svc as unknown as { lastTurnFile: string }).lastTurnFile), { recursive: true });
+    fs.writeFileSync(
+      (svc as unknown as { lastTurnFile: string }).lastTurnFile,
+      JSON.stringify({ at: Date.now() - 7 * 3600_000 }),
+      'utf8',
+    );
     (svc as unknown as { lastTurnAt: number }).lastTurnAt = Date.now() - 7 * 3600_000;
 
     svc.noteUserTurn('s1', '早', 'u1');
@@ -681,5 +693,52 @@ describe('M33 · lastTurnAt 必须落盘（onRest 的唯一正向来源）', () 
     b.noteReplyChunk('s2', '早呀');
     b.flushTurn('s2', 'c2c:u1', 'u1');
     expect(b.emotion.current().energy).toBeGreaterThan(low);
+  });
+});
+
+describe('M34 · 正向事件日上限与边际递减（解决"永远贴顶"）', () => {
+  it('过了当日软上限后，单次增量显著变小', () => {
+    const svc = new EmotionService(`/tmp/emo-cap-${Math.random().toString(36).slice(2)}`);
+    // 前 8 次全额
+    const first: number[] = [];
+    for (let i = 0; i < 8; i++) {
+      const before = svc.current().valence;
+      svc.onAddressed();
+      first.push(svc.current().valence - before);
+    }
+    // 第 9 次开始递减（1/10）
+    const before = svc.current().valence;
+    svc.onAddressed();
+    const after = svc.current().valence - before;
+    expect(after).toBeLessThan(first[0]! * 0.2);
+  });
+
+  it('daily 计数器会跨 regress / applyDeltas 存活（实测发现过这个 bug）', () => {
+    const svc = new EmotionService(`/tmp/emo-daily-${Math.random().toString(36).slice(2)}`);
+    svc.onAddressed();
+    expect(svc.current().daily?.addressed).toBe(1);
+    svc.onReplied();
+    expect(svc.current().daily?.addressed).toBe(1);
+    expect(svc.current().daily?.replied).toBe(1);
+    // 再 bump 一次情绪（走 applyDeltas），计数器仍要在
+    svc.onIgnored();
+    expect(svc.current().daily?.addressed).toBe(1);
+  });
+
+  it('模拟 130 轮密集聊天，valence 不再贴顶', () => {
+    // 稳态分析：每 30min +0.06、24h 半衰期 → 原稳态 4.19，远超上限 1.0。
+    // 加日上限(1/10)后应落在 0.4 左右。
+    let st = { valence: 0, arousal: 0.3, energy: 0.7, at: Date.now() };
+    const t0 = Date.now(), H = 1800000;
+    const vals: number[] = [];
+    for (let i = 0; i < 130; i++) {
+      const now = t0 + i * H;
+      st = regress(st, now);
+      st = applyDeltas(st, { valence: i < 8 ? 0.06 : 0.006 }, now);
+      vals.push(st.valence);
+    }
+    const median = [...vals].sort((a, b) => a - b)[65]!;
+    expect(median).toBeLessThan(0.7);
+    expect(vals.filter((v) => v > 0.85).length / vals.length).toBeLessThan(0.05);
   });
 });

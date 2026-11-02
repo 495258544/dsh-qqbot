@@ -74,12 +74,6 @@ export class BindingService {
     return this.phase;
   }
 
-  /** 状态订阅（预留给 SSE 推送等增强） */
-  subscribe(listener: () => void): () => void {
-    this.listeners.add(listener);
-    return () => { this.listeners.delete(listener); };
-  }
-
   /** 挂载呈现策略（须在 start() 前调用） */
   attach(presenter: QrPresenter): void {
     this.presenters.push(presenter);

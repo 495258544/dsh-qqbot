@@ -21,6 +21,7 @@ import { SelfNoteService } from './self-note.ts';
 import { EmotionService, speakWillingness, typingSpeedFactor, burstLimit, describeEmotion } from './emotion.ts';
 import { runSurfRound, inSurfWindow, surfTopic, type SurfResult } from './surf.ts';
 import { clockInTz, weekdayInTz, dayInTz, hourInTz, DEFAULT_TZ } from './clock.ts';
+import { prunePendingAttachments } from '../features/pending-attachments.ts';
 import { Humanizer } from './humanize.ts';
 import { extractFact, extractTrait } from './fact-extract.ts';
 import { matchesTopic } from './word-match.ts';
@@ -307,6 +308,12 @@ export class PersonaService {
     const a = this.waker?.prune(SW) ?? 0;
     const b = this.budget.prune(SW);
     if (a || b) this.deps.logger.info(`persona: prune 清理 waker=${a} budget=${b}`);
+    // M35：待领附件也要清 —— 读取时会自清，但**没人来取的键会一直留在内存里**。
+    // `pruneStale` 6 小时跑一次，正好配 TTL 的节奏。
+    try {
+      const pa = prunePendingAttachments();
+      if (pa) this.deps.logger.info(`persona: 清理 ${pa} 个过期待领附件`);
+    } catch { /* 清理失败不影响主流程 */ }
     this.decaySelf();
     // M32：口癖退役体检（原来也是零调用 —— 长期不用的口癖永远不会退役）
     try {
@@ -391,6 +398,30 @@ export class PersonaService {
     return { isNew: r.isNew, reachedThreshold: r.reachedThreshold };
   }
 
+  /** M35：跨场合对话流水的缓存（避免每轮都读文件） */
+  private recentSecCache: { at: number; text: string } = { at: 0, text: '' };
+
+  /**
+   * 渲染"最近的真实对话"（跨场合）。
+   *
+   * 三条成本闸（实测：每轮注入 20 条历史会让上下文迅速膨胀）：
+   *   ① 只取 6 条
+   *   ② 只取 12 小时以内的
+   *   ③ 30 分钟内不重复读文件（缓存）
+   */
+  private renderCrossSceneRecent(now = Date.now()): string {
+    const TTL = 30 * 60_000;
+    if (now - this.recentSecCache.at < TTL) return this.recentSecCache.text;
+    let text = '';
+    try {
+      text = this.memory.renderRecent(6, { sinceMs: 12 * 3600_000 });
+    } catch {
+      text = '';
+    }
+    this.recentSecCache = { at: now, text };
+    return text;
+  }
+
   /** 该 peer 的注入 section（人格 + 该人的账 + 日记连续性）；空数组 = 不注入 */
   buildSections(personKey: string | undefined): Array<{ name: string; order: number; text: string }> {
     const out: Array<{ name: string; order: number; text: string }> = [];
@@ -406,6 +437,19 @@ export class PersonaService {
       const ledger = this.memory.renderPerson(personKey);
       if (ledger) out.push({ name: 'qqbot:persona-memory', order: 62, text: ledger });
     }
+
+    // M35：跨场合对话流水（原来 `renderRecent` 是零调用 —— 白写了）。
+    //
+    // 为什么值得接：`people.json` 只存"提炼过的账"（traits/facts/topics），
+    // 但**具体说过什么话**不在里面。而 memory.ts 的设计初衷是"按人存不是按会话存"：
+    // 同一个人在群里说的事，私聊里也该记得。
+    //
+    // 成本控制（三档）：
+    //   · 只取 6 条（不是默认 20）
+    //   · 只要 12 小时内的（旧的不必重复注入，账里已有摘要）
+    //   · 30 分钟内不重复注入（turn 频繁时避免每轮都塞）
+    const recentSec = this.renderCrossSceneRecent();
+    if (recentSec) out.push({ name: 'qqbot:persona-recent', order: 62.5, text: recentSec });
     const diaryCtx = this.diary.context(3);
     if (diaryCtx) out.push({ name: 'qqbot:persona-diary', order: 64, text: diaryCtx });
 

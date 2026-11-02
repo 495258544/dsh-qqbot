@@ -79,16 +79,3 @@ export function isHourInRange(hour: number, from: number, to: number): boolean {
   return from <= to ? hour >= from && hour < to : hour >= from || hour < to;
 }
 
-/**
- * 当前是否在指定的"活跃时段"内（用正确时区）。
- * @param from 起始小时（含）
- * @param to 结束小时（不含）
- */
-export function isActiveWindow(
-  from: number,
-  to: number,
-  date: Date = new Date(),
-  tz: string = DEFAULT_TZ,
-): boolean {
-  return isHourInRange(hourInTz(date, tz), from, to);
-}
