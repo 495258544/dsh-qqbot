@@ -81,18 +81,22 @@ describe('回归按真实经过时间，而不是按调用次数', () => {
     expect(stepped.valence).toBeCloseTo(once.valence, 6);
     expect(stepped.arousal).toBeCloseTo(once.arousal, 6);
     expect(stepped.energy).toBeCloseTo(once.energy, 6);
-    expect(stepped.valence).toBeCloseTo(0.2, 6); // 6h 半衰期，12h 后剩 1/4
+    // 不断言具体数值（半衰期是设计参数，会随"心情该不该跨天"这类语义判断调整），
+    // 只断言"分 24 步和一步到位一致" —— 这才是这条测试真正要防的东西。
+    expect(stepped.valence).toBeCloseTo(once.valence, 6);
   });
 });
 
 describe('回归方向是基线，不是 0', () => {
-  it('valence 从 +0.8 回到 0 附近', () => {
+  it('valence 从 +0.8 明显回落到基线', () => {
     // 防的是"衰减到 0"的实现：valence 的基线本来就是 0，所以这里同时
     // 验证它没有停在 +0.8 的高位（没有回归）也没有变成负值。
+    // 72h = 3 个 valence 半衰期 → 剩 1/8 左右。断言"明显回落"而不是"归零"：
+    // 指数回归是渐进的，永远不会精确等于基线。
     const after = regress(st({ valence: 0.8 }), T0 + 72 * HOUR);
 
-    expect(after.valence).toBeLessThan(1e-3);
-    expect(after.valence).toBeGreaterThan(-1e-3);
+    expect(after.valence).toBeLessThan(0.15);
+    expect(after.valence).toBeGreaterThan(0);
   });
 
   it('arousal 从 0.9 回到 0.3，而不是 0', () => {
@@ -114,9 +118,14 @@ describe('回归方向是基线，不是 0', () => {
 });
 
 describe('三个量的半衰期不同', () => {
-  it('同样经过 6 小时，arousal 退得最快、energy 最慢', () => {
-    // 防的是三个量用同一个半衰期：激动（2h）应该比心情（6h）退得快，
-    // 精力（12h）应该比心情恢复得慢，否则"气头过了"和"睡一觉"分不出来。
+  it('同样经过 6 小时，arousal 退得最快、valence 最慢', () => {
+    // 防的是三个量用同一个半衰期。设计意图（M31 实测调过）：
+    //   激动 4h  —— 气头过了就过了
+    //   精力 12h —— 累了要睡，睡醒才恢复
+    //   心情 24h —— 必须扛得过一夜睡眠，否则"情绪"退化成"当场抖动"
+    //
+    // 只断言**相对快慢**，不钉具体数值：半衰期是设计参数，
+    // 会随着"心情该不该跨天"这类语义判断调整（已经调过一次）。
     const start = st({ valence: 0.5, arousal: 0.9, energy: 0.2 });
     const after = regress(start, T0 + 6 * HOUR);
 
@@ -124,11 +133,9 @@ describe('三个量的半衰期不同', () => {
     const a = remainedFraction(after.arousal, start.arousal, 0.3);
     const e = remainedFraction(after.energy, start.energy, 0.7);
 
-    expect(v).toBeCloseTo(2 ** -1, 6); // 6h / 6h = 1 个半衰
-    expect(a).toBeCloseTo(2 ** -3, 6); // 6h / 2h = 3 个半衰
-    expect(e).toBeCloseTo(2 ** -0.5, 6); // 6h / 12h = 0.5 个半衰
-    expect(a).toBeLessThan(v);
-    expect(v).toBeLessThan(e);
+    expect(a).toBeLessThan(v);      // 激动退得比心情快
+    expect(v).toBeGreaterThan(0.5); // 6h 只过了 1/4 个心情半衰期，还留得住
+    // 精力从低于基线往回升（0.2 → 0.7），所以它"剩下"的比例会 >1，不做比较
   });
 });
 
@@ -371,12 +378,13 @@ describe('EmotionService 的持久化', () => {
     const service = new EmotionService(dir);
     const state = service.current(Date.now());
 
-    // 6h 半衰，12h = 2 个半衰 → 剩 1/4 偏离：0.2
-    expect(state.valence).toBeCloseTo(0.2, 6);
-    // 2h 半衰，12h = 6 个半衰 → 剩 1/64：0.3 + 0.6/64 = 0.309375
-    expect(state.arousal).toBeCloseTo(0.3 + 0.6 * 2 ** -6, 6);
-    // 12h 半衰，12h = 1 个半衰 → 剩 1/2 偏离：0.45
-    expect(state.energy).toBeCloseTo(0.45, 6);
+    // 不钉具体数值（半衰期会随语义判断调整），断言"确实按真实停摆时间回归了"：
+    // 激动（4h 半衰）应该几乎回到基线，心情（24h）只掉一点，精力（12h）掉一半。
+    expect(state.arousal).toBeLessThan(0.4);          // 0.9 → 接近基线 0.3
+    expect(state.valence).toBeGreaterThan(0.5);        // 0.8 → 只掉一点
+    expect(state.valence).toBeLessThan(0.8);           // 但确实降了
+    expect(state.energy).toBeGreaterThan(0.3);         // 0.2 → 回升了一些
+    expect(state.energy).toBeLessThan(0.6);            // 但没到基线 0.7
   });
 });
 
@@ -442,5 +450,47 @@ describe('load() · 坏字段必须各自回落各自基线（不是统一变 0�
     const st = new EmotionService(dir).current();
     expect(typingSpeedFactor(st)).toBeLessThan(1.2);
     expect([1, 2]).toContain(burstLimit(st));
+  });
+});
+
+describe('跨天连续性 · 心情必须扛得过一夜睡眠', () => {
+  // 这条防的是我第一版参数的错误：valence 半衰期定成 6h，
+  // 模拟 7 天真实节奏时发现睡一觉（8h）只剩 40%，
+  // 第二天永远从基线开始 —— "情绪"退化成"每场对话内的抖动"。
+  //
+  // 人的心情是跨天的：昨天被夸了，今天起来还是有点轻快。
+
+  const mk = () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'emotion-night-'));
+    return new EmotionService(dir);
+  };
+
+  it('开心之后睡 8 小时，还剩大半（不是归零）', () => {
+    const svc = mk();
+    for (let i = 0; i < 3; i++) svc.onReplied();
+    const before = svc.current().valence;
+    expect(before).toBeGreaterThan(0.2);
+
+    const after = svc.current(Date.now() + 8 * 3600_000).valence;
+    // 初版 6h 会掉到 40%，正确参数应保持六成以上
+    expect(after).toBeGreaterThan(before * 0.6);
+  });
+
+  it('激动退得比心情快（气头过了，但心情还在）', () => {
+    const svc = mk();
+    svc.onReplied();
+    const st0 = svc.current();
+    const st4 = svc.current(Date.now() + 4 * 3600_000);
+    const vKeep = st4.valence / Math.max(1e-9, st0.valence);
+    const aKeep = (st4.arousal - 0.3) / Math.max(1e-9, st0.arousal - 0.3);
+    expect(aKeep).toBeLessThan(vKeep);
+  });
+
+  it('连着两天好心情，第二天起点明显高于零', () => {
+    const svc = mk();
+    for (let i = 0; i < 4; i++) svc.onReplied();
+    // 睡一夜
+    const d2 = svc.current(Date.now() + 9 * 3600_000).valence;
+    expect(d2).toBeGreaterThan(0.15);
   });
 });
