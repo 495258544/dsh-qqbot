@@ -1,96 +1,72 @@
-# bili-mcp · B 站薄壳 MCP server
+# bili-chapter · 只做一件事的 MCP server
 
-给 DSH 用的 B 站接入。**18 个工具，只读 16 个 + 写 2 个（关注/取关）。**
+**B 站接入 = 官方 `bili mcp serve`（17 个工具）+ 这里 1 个自建工具。**
 
-## 为什么自己写，不用 `bili mcp serve`
+## 为什么要分两半
 
-官方那个看着只有 17 个工具，但里面有个 `run_bili`：
+官方那 17 个工具覆盖了 95% 场景：`watch_video` 一次拿全、`inbox`、`trending`、
+`feed`、`comments`、私信…**交给上游维护，bili 升级不用我们改代码。**
 
-> 运行任意 bili 子命令（不含开头的 bili）
+但字幕这块，两个官方路径都不行：
 
-**等于把 116 个命令全开放** —— 包括 `upload` 投稿、`me` 改昵称、`user block` 拉黑。
-所以"17 个工具"是假象，权限面是全部。
+| 官方路径 | 问题 |
+|---|---|
+| `video_transcript` | 纯文本，**时间轴被压平** |
+| `run_bili` 调 `video subtitle` | 返回 75513 字符原始 JSON ≈ **5 万 tokens** |
 
-另外官方 schema 实测 **8373 字符 ≈ 5861 tokens**，每次请求都进上下文。
+而用户最初的需求就是「别整段倒出来，标出哪几分钟讲到东西」。
+所以这一件事必须自己做。
 
-这个薄壳的取舍：
+## 这个工具干什么
 
-| | 官方 | 这个 |
-|---|---|---|
-| 工具数 | 17 | 18 |
-| schema | 5861 tokens | **5069 tokens** |
-| 任意命令后门 | 有（`run_bili`） | **没有** |
-| 写操作 | 6 个 | **2 个**（关注/取关） |
-
-## 工具清单
-
-**只读（16）**
-- `bili_status` 账号状态
-- `bili_following` 关注列表
-- `bili_inbox` 消息
-- `bili_video` 视频信息 + 分 P 目录
-- `bili_transcript` 字幕（**按分钟压缩、带时间戳**）
-- `bili_summary` AI 总结 + 分章提纲
-- `bili_danmaku` 弹幕高能时刻
-- `bili_search` 搜索
-- `bili_trending` 热门/每周必看/排行
-- `bili_up_videos` 某 UP 的投稿
-- `bili_up_timeline` 关注动态
-- `bili_comments` 评论
-- `bili_stats` 播放/点赞/投币数
-- `bili_relation` 我赞过吗/收藏过吗（**操作前先查**）
-- `bili_dm_list` 谁私信过我（带自动回复标记）
-- `bili_dm_read` 读私信内容
-
-**写（2）**
-- `bili_follow` 关注（幂等，已关注返回"没重复操作"）
-- `bili_unfollow` 取关
-
-## 白名单
-
-```bash
-BILI_MCP_TOOLS=bili_video,bili_transcript,bili_status  # 只启用这几个
+```python
+bili_chapters(bvid, page=1) -> str
 ```
 
-留空 = 全部启用。部署时可以临时收窄（比如只想给只读）。
+把逐句字幕按分钟聚桶，每分钟留最长的两句，带 `[mm:ss]`：
 
-## 依赖
+```
+[00:00] 好我们下面为大家去演示一下DHCP的配置 PC1和PC2啊分别属于微量十和微量20
+[01:02] 我们这时候可以输入一条命令叫undo information center 他后面就不会弹这种消息来阻断你
+[02:01] display危难summary就是微量的一个汇总 v interface vl10IPADDRE是192.168.1
+...
+↑ 共 32 分钟。**别整段转述** —— 挑出真正讲到东西的 3-5 段，
+每段一句话说清讲了什么，带上时间点。铺垫和寒暄跳过。
+```
 
-- `bili` CLI（bili-agent 1.2.1，已登录）
-- Python 3.10+ / `mcp>=2.3` / `pytest`（测试用）
+实测（BV1Xx9bBiEqx 第 3 P，31 分钟视频）：
+- 原始 771 句 / 8992 字 ≈ 6300 tokens
+- 压缩 32 条 / **1277 tokens**
+- **压缩 4.9 倍，覆盖全程**
+
+## 成本
+
+| | schema |
+|---|---|
+| 官方 17 个工具 | 5861 tokens |
+| 这里的 1 个工具 | **408 tokens** |
+| 合计 | ≈ 6269 tokens |
+
+对比之前自建的 18 个工具（4924 tokens）多 1345 tokens，
+但**换来的是上游维护**——这笔账是划算的：我们只需要维护一个函数。
 
 ## 跑测试
 
 ```bash
-cd ~/.dsh-qqbot/bili-mcp && python3 -m pytest test_server.py -q
+cd ~/.dsh-qqbot/bili-mcp && python3 -m pytest test_chapter_server.py -q
 ```
 
-16 条，覆盖：`mmss` 进位、白名单收窄、`run_bili` 的 5 种失败路径、
-字幕压缩**覆盖全程**（防"只给开头几分钟"）。
+11 条，重点钉「压缩必须覆盖全程」（防退化成只给开头几分钟）。
 
-## DSH 配置
+## 升级 bili 之后
 
-```yaml
-- id: mcp-bili
-  name: "@deepseek-ai/dsh-mcp-client"
-  config:
-    serverName: bili
-    transport: stdio
-    command: python3
-    args: ['/root/.dsh-qqbot/bili-mcp/server.py']
-```
-
-工具会以 `mcp__bili__bili_video` 这样的名字出现。
-
-## 升级 bili 之后要做什么
-
-工程侧已经做了自检（`src/persona/bili-health.ts`），但那个检查的是**旧封装**的字段。
-换成 MCP 之后，字段解析在 `server.py` 里，所以要看这里。
-
-升级后跑一遍：
+只有一件事可能坏：`video subtitle` 的输出字段（`items[].from` / `items[].content`）。
+验证：
 
 ```bash
-python3 -c "import sys; sys.path.insert(0,'/root/.dsh-qqbot/bili-mcp'); import server; print(server.run_bili(['video','info','BV1ednc6jE3j'])['ok'])"
+python3 -c "import sys; sys.path.insert(0,'.'); import chapter_server as c; \
+  print(c.run_bili(['video','subtitle','BV1ednc6jE3j'])['ok'])"
 ```
 
-返回 False 就说明字段或命令变了，改 `server.py` 对应那个函数。
+返回 False 就改 `run_bili` 或压缩逻辑里对应字段。
+其余 17 个工具由官方维护，不归我们管。

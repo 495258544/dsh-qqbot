@@ -34,7 +34,7 @@ for (const patch of patches) {
   if (!target) { warn("patch: entry %C not found", id); continue; }   // ← 我们的情况
 ```
 
-### 正确写法
+### 正确写法（当前定案：官方 + 自建字幕）
 
 ```yaml
 - insert:
@@ -43,11 +43,19 @@ for (const patch of patches) {
       config:
         serverName: bili
         transport: stdio
+        command: bili
+        args: ['mcp', 'serve']
+
+    - id: mcp-bili-chapter
+      name: '@deepseek-ai/dsh-mcp-client'
+      config:
+        serverName: 'bili-chapter'
+        transport: stdio
         command: /usr/bin/python3
-        args: ['<repo>/bili-mcp/server.py']
+        args: ['<repo>/bili-mcp/chapter_server.py']
 ```
 
-验证：`dsh --profile web --dump-config | grep mcp-bili` 要能看到。
+验证：`dsh --profile web --dump-config | grep serverName` 应该看到 `bili` 和 `bili-chapter` 两个。
 
 ## 第二坑：包要能被 profile 解析
 
@@ -120,10 +128,11 @@ done
 grep -o "mcp__bili__[a-z_]*" <会话>.v4.jsonl.zstd | sort -u
 ```
 
-18 个：`bili_status` `bili_video` `bili_transcript` `bili_summary`
-`bili_danmaku` `bili_stats` `bili_relation` `bili_search` `bili_trending`
-`bili_up_videos` `bili_up_timeline` `bili_comments` `bili_inbox`
-`bili_following` `bili_follow` `bili_unfollow` `bili_dm_list` `bili_dm_read`
+官方给 17 个（`bili_*`），自建再给 1 个（`bili_chapters`）：官方：`status` `inbox` `watch_video` `video_transcript` `search_videos`
+`recommended_videos` `trending` `list_comments` `list_dms` `read_dm`
+`post_comment` `reply_comment` `send_dm` `post_dynamic` `run_bili` `login` `wait_login`
+
+自建：`bili_chapters`
 
 ### 3. `dsh --dump-config` 里能看到条目
 
