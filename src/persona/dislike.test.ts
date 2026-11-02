@@ -180,3 +180,40 @@ describe('self.json · 向后兼容', () => {
     expect(again.topDislikes(3)).toEqual([]);
   });
 });
+
+describe('renderSection · 数据和感受必须同时在场', () => {
+  it('没兴趣也没厌恶时不注入（不占 token）', () => {
+    const { svc } = mkSelf();
+    expect(svc.renderSection()).toBe('');
+  });
+
+  it('讨厌的东西会进提示词，措辞是"没兴致"不是"拒绝回答"', () => {
+    const { svc } = mkSelf();
+    svc.recordDislike('短视频');
+    const s = svc.renderSection();
+    expect(s).toContain('短视频');
+    expect(s).toContain('没什么兴致');
+    // 不能出现禁令式措辞：那会把模型逼成客服话术
+    expect(s).not.toContain('拒绝');
+    expect(s).not.toContain('不许');
+  });
+
+  it('强度太弱的厌恶不渲染（否则人格变成一张清单）', () => {
+    const { svc } = mkSelf();
+    svc.recordDislike('短视频');
+    const e = svc.snapshot().dislikes[0]!;
+    e.strength = 0.1;
+    e.weight = 0.1;
+    expect(svc.renderSection()).toBe('');
+  });
+
+  it('喜欢和讨厌会同时渲染', () => {
+    const { svc } = mkSelf();
+    svc.touchInterest('猫');
+    svc.snapshot().interests[0]!.strength = 1;
+    svc.recordDislike('短视频');
+    const s = svc.renderSection();
+    expect(s).toContain('猫');
+    expect(s).toContain('短视频');
+  });
+});

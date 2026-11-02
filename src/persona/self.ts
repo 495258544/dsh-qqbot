@@ -540,6 +540,32 @@ export class SelfProfileService {
     return this.data.engagement.chattiness;
   }
 
+  /**
+   * 把「她喜欢什么 / 讨厌什么」渲染成可注入的提示段（M30）。
+   *
+   * 为什么必须注入，而不是让它只影响概率：
+   *   dislikes 接在唤醒概率上之后，她命中讨厌话题时**会明显变沉默**。
+   *   但如果她不知道自己讨厌什么，这个沉默在她那里就是"不知道为什么不想说话"——
+   *   表现出来就是"莫名其妙不理人"，比不沉默更糟。
+   *   数据和感受必须同时在场，否则就是行为漂移。
+   *
+   * 只渲染到「有感觉」的程度（强度 ≥ 0.35），弱的不提 ——
+   * 列一长串"我讨厌XX"会让人格变成一张清单。
+   */
+  renderSection(): string {
+    const likes = this.topInterests(4).filter((i) => this.strengthOf(i) >= 0.35);
+    const hates = this.topDislikes(3).filter((i) => this.strengthOf(i) >= 0.35);
+    if (likes.length === 0 && hates.length === 0) return '';
+    const L: string[] = [];
+    if (likes.length) L.push('你会被这些话题勾起来：' + likes.map((i) => i.topic).join('、'));
+    if (hates.length) {
+      // 措辞是"聊起来会没什么兴致"，不是"拒绝回答"——
+      // 前者是情绪，后者是禁令。禁令会把模型逼成客服话术。
+      L.push('这些话题你聊起来会没什么兴致（不是不能聊，是懒得展开）：' + hates.map((i) => i.topic).join('、'));
+    }
+    return '【你自己的口味】\n' + L.join('\n') + '\n';
+  }
+
   // ───────────── 需求（她想让用户实现的功能） ─────────────
 
   /** 提出一条需求（每周最多 2 条由调用方限制） */
