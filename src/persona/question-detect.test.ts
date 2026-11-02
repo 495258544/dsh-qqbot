@@ -241,3 +241,26 @@ describe('extractVocatives · 提取"她可能被叫成什么"（M32）', () => 
     expect(extractVocatives('叫我小明')).toEqual([]);
   });
 });
+
+describe('extractVocatives · 零误判（真实语料的教训）', () => {
+  // 第一版句首规则写得很宽松（任何 1~5 字 + 逗号都算称呼）。
+  // 拿 124 轮真实对话跑，抽出的是：
+  //   「忙是忙」「藏事儿多累」「一回就一回」「写的不错」「被限速了」「停一下」
+  // 全是句子开头碰巧跟了个逗号。
+  //
+  // 错记一个称呼的代价：她会去"接受"一个从没人叫过的名字，
+  // 之后任何消息里出现这几个字都会唤醒她 —— 比漏记严重得多。
+
+  it('句子开头跟逗号的普通句子不算称呼', () => {
+    expect(extractVocatives('忙是忙 但听见吃的还是会回头')).toEqual([]);
+    expect(extractVocatives('藏事儿多累 我又不是来上班的')).toEqual([]);
+    expect(extractVocatives('写的不错，就像我并不完全了解你')).toEqual([]);
+    expect(extractVocatives('一回就一回 我记着呢')).toEqual([]);
+    expect(extractVocatives('被限速了，等一下')).toEqual([]);
+  });
+
+  it('真正在叫她的才算', () => {
+    expect(extractVocatives('小羽，在吗')).toEqual(['小羽']);
+    expect(extractVocatives('小羽，几点了，你在干嘛')).toEqual(['小羽']);
+  });
+});
