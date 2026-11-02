@@ -874,6 +874,20 @@ export function registerPersonaTools(
               additionalProperties: false,
             },
           },
+          // M35：观众反应最强烈的时刻（bili 已按打字延迟前移算好）
+          danmakuPeaks: {
+            type: 'array',
+            items: {
+              type: 'object',
+              properties: {
+                t: { type: 'string' },
+                count: { type: 'number' },
+                top: { type: 'array', items: { type: 'string' } },
+              },
+              required: ['t', 'count', 'top'],
+              additionalProperties: false,
+            },
+          },
           frames: {
             type: 'array',
             items: {
@@ -902,13 +916,21 @@ export function registerPersonaTools(
           ok: boolean; title?: string; summary?: string; subtitle?: string;
           outline?: Array<{ title: string; start: string; points: Array<{ t: string; text: string }> }>;
           subtitleOutline?: Array<{ t: string; text: string }>;
+          pages?: Array<{ page: number; title: string; length: string }>;
           danmaku?: Array<{ t: string; text: string }>;
+          danmakuPeaks?: Array<{ t: string; count: number; top: string[] }>;
           frames?: Array<{ t: string; path: string }>;
           items?: { bvid: string; title: string }[]; error?: string;
         };
         if (!r.ok) return [{ type: 'text', text: `没查到（${r.error ?? '未知原因'}）` }];
         const parts: string[] = [];
         if (r.title) parts.push(`《${r.title}》`);
+        // 合集先给目录 —— 用户要挑着看，先得知道有哪些集
+        if (r.pages?.length) {
+          parts.push(`这是个合集（共 ${r.pages.length} P，只看第 1 P）：\n`
+            + r.pages.map((p) => `  P${p.page}（${p.length}）${p.title}`).join('\n')
+            + '\n（想看某一 P 的内容，跟我要那一 P 的提纲）');
+        }
         if (r.summary) parts.push(`AI 总结：${r.summary}`);
         // 分章提纲（官方给的，带时间点）—— 这是回答"哪几分钟有干货"的最好材料
         if (r.outline?.length) {
@@ -920,6 +942,11 @@ export function registerPersonaTools(
         if (r.subtitleOutline?.length) {
           parts.push('字幕·按分钟（[时间] 这一分钟主要在讲）：\n'
             + r.subtitleOutline.map((x) => `  [${x.t}] ${x.text}`).join('\n'));
+        }
+        // 观众反应最强烈的时刻 —— 回答"哪段最有戏"的免费信号
+        if (r.danmakuPeaks?.length) {
+          parts.push('观众反应最强的时刻（按打字延迟前移算过）：\n'
+            + r.danmakuPeaks.map((x) => `  ${x.t}（${x.count} 条）${x.top.join(' / ')}`).join('\n'));
         }
         if (r.danmaku?.length) {
           parts.push('弹幕（观众当时在说什么）：\n'
@@ -961,7 +988,30 @@ export function registerPersonaTools(
       const mode = (['subtitle', 'danmaku', 'frames', 'all'].includes(String(want)) ? String(want) : 'summary') as
         | 'subtitle' | 'danmaku' | 'frames' | 'all' | 'summary';
       const info = run(['video', 'info', bvid]);
-      const title = ((info?.data ?? {}) as { title?: string }).title ?? '';
+      const idata = (info?.data ?? {}) as {
+        title?: string;
+        duration?: number;
+        // 注意：字段是 `title` 不是 `part`（实测 pages[0] =
+        // {page:1, cid:..., title:"华为配置专题01 基础配置", duration:1637}）。
+        // 写错字段的后果是所有 P 都退化成 "P1"/"P2"，目录白给。
+        pages?: Array<{ page?: number; title?: string; duration?: number }>;
+      };
+      const title = idata.title ?? '';
+
+      // 合集导航（M35）：四十集的合集看不过来，第一层答案不是"压缩字幕"，
+      // 而是**先给分 P 目录让她挑**。
+      //
+      // `bili video info` 的 pages 数组带每 P 的时长（实测 16 P / 10.5 小时），
+      // `bili video subtitle -p N` 能按 P 取。但我们现在只处理 P1 ——
+      // 用户问合集时拿不到"P3 是讲 DHCP 的"这种目录。
+      const pages = (idata.pages ?? [])
+        .filter((p) => (p.page ?? 0) > 0)
+        .map((p) => ({
+          page: Number(p.page) || 0,
+          title: String(p.title ?? '').trim() || `P${p.page}`,
+          length: mmss(Number(p.duration) || 0),
+        }));
+      const isCollection = pages.length > 1;
 
       // AI 总结 + **分段提纲**（M35）。
       //
@@ -1018,8 +1068,32 @@ export function registerPersonaTools(
       }
 
       // 弹幕（M29）：观众看到画面后的真实反应，比 AI 总结有人味，且纯文本零成本
+      //
+      // M35 补：同时取 `--peaks`（观众反应最强烈的时刻）。
+      // 这是回答"哪几分钟有干货"的**免费信号**，而且 bili 已经帮我们算好了
+      // （按打字延迟前移 2 秒归到画面上）。
+      //
+      // 但实测覆盖率很差：一个 10.5 小时的教学合集只有 15 条弹幕且时间轴全 0，
+      // peaks 返回 []。所以它是**有就用、没有不指望**，不能当主判据。
       let danmaku: Array<{ t: string; text: string }> = [];
+      let danmakuPeaks: Array<{ t: string; count: number; top: string[] }> = [];
       if (mode === 'danmaku' || mode === 'all') {
+        try {
+          const pk = run(['video', 'danmaku', bvid, '--peaks', '5']);
+          const pdata = (pk?.data ?? {}) as {
+            peaks?: Array<{ time?: number; count?: number; top?: string[] }>;
+          };
+          danmakuPeaks = (pdata.peaks ?? [])
+            .filter((x) => (x.count ?? 0) > 0)
+            .slice(0, 5)
+            .map((x) => ({
+              t: mmss(Number(x.time) || 0),
+              count: Number(x.count) || 0,
+              top: (x.top ?? []).slice(0, 3).map(String),
+            }));
+        } catch {
+          /* peaks 拿不到不影响主流程 */
+        }
         const r = run(['video', 'danmaku', bvid]);
         const items = ((r?.data ?? {}) as { items?: Array<{ time?: number; text?: string }> }).items ?? [];
         danmaku = items
@@ -1052,11 +1126,13 @@ export function registerPersonaTools(
       return {
         ok: true,
         ...(title ? { title } : {}),
+        ...(isCollection ? { pages } : {}),
         ...(summary ? { summary } : {}),
         ...(outline.length ? { outline } : {}),
         ...(subtitle ? { subtitle } : {}),
         ...(subtitleOutline.length ? { subtitleOutline } : {}),
         ...(danmaku.length ? { danmaku } : {}),
+        ...(danmakuPeaks.length ? { danmakuPeaks } : {}),
         ...(frames.length ? { frames } : {}),
       };
     },

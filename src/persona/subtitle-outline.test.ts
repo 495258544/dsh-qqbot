@@ -98,3 +98,42 @@ describe('condenseSubtitlesByMinute · 长视频不再只剩开场白', () => {
     expect(packed).toBeLessThan(full / 4);
   });
 });
+
+describe('合集分 P 目录 · 字段名（踩过的坑）', () => {
+  // 实测 `bili video info` 的 pages[0] 长这样：
+  //   {page:1, cid:37940430009, title:"华为配置专题01 基础配置", duration:1637}
+  //
+  // 字段是 `title` **不是** `part`。我第一版写成 `p.part`，
+  // 结果 16 个 P 的标题全退化成 "P1"/"P2"/...，目录白给 ——
+  // 而用户要的正是"P3 是讲 DHCP 的"这个信息。
+
+  const buildPages = (raw: Array<{ page?: number; title?: string; part?: string; duration?: number }>) =>
+    raw
+      .filter((p) => (p.page ?? 0) > 0)
+      .map((p) => ({
+        page: Number(p.page) || 0,
+        title: String(p.title ?? p.part ?? '').trim() || `P${p.page}`,
+        length: `${String(Math.floor((p.duration ?? 0) / 60)).padStart(2, '0')}:${String((p.duration ?? 0) % 60).padStart(2, '0')}`,
+      }));
+
+  it('真实字段名 title 能取到', () => {
+    const r = buildPages([{ page: 1, title: '华为配置专题01 基础配置', duration: 1637 }]);
+    expect(r[0]!.title).toBe('华为配置专题01 基础配置');
+    expect(r[0]!.length).toBe('27:17');
+  });
+
+  it('标题缺失时才退化成 P 号（不能因此丢掉整个目录）', () => {
+    const r = buildPages([{ page: 3, duration: 600 }]);
+    expect(r[0]!.title).toBe('P3');
+  });
+
+  it('多 P 才当合集（单 P 视频不该显示目录）', () => {
+    const one = buildPages([{ page: 1, title: 'A', duration: 100 }]);
+    const many = buildPages([
+      { page: 1, title: 'A', duration: 100 },
+      { page: 2, title: 'B', duration: 200 },
+    ]);
+    expect(one.length > 1).toBe(false);
+    expect(many.length > 1).toBe(true);
+  });
+});
