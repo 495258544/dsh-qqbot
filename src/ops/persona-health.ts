@@ -101,7 +101,11 @@ function main(): void {
   );
   console.log(`\n【口癖 voice】`);
   if (!vf || !vf.habits || vf.habits.length === 0) {
-    console.log(`  ❌ 还没形成（正样本 ${vf?.caughtSamples?.length ?? 0} 条）`);
+    // M32：不能只报"正样本 N 条"就说一切正常 —— 样本 ≠ 口癖。
+    // 之前 extractCandidates/promoteHabits 零调用时，样本一直在攒，
+    // 这里就一直在报"有正样本"，而 habits 永远是空的（谎报健康）。
+    const n = vf?.caughtSamples?.length ?? 0;
+    console.log(`  ❌ 还没形成口癖（正样本 ${n} 条${n >= 4 ? '，但没抽取出候选 —— 管线可能又断了' : '，还不到抽取门槛 4 条'}）`);
   } else {
     const active = vf.habits.filter((h) => h.state === 'active');
     console.log(`  ✅ 共 ${vf.habits.length} 条，其中生效 ${active.length} 条`);

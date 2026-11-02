@@ -17,7 +17,7 @@ import { Waker } from './wake.ts';
 import { SelfProfileService } from './self.ts';
 import { VoiceService } from './voice.ts';
 import { SelfNoteService } from './self-note.ts';
-import { runSurfRound, inSurfWindow, type SurfResult } from './surf.ts';
+import { runSurfRound, inSurfWindow, surfTopic, type SurfResult } from './surf.ts';
 import { clockInTz, weekdayInTz, DEFAULT_TZ } from './clock.ts';
 import { Humanizer } from './humanize.ts';
 import { extractFact, extractTrait } from './fact-extract.ts';
@@ -251,6 +251,29 @@ export class PersonaService {
     const a = this.waker?.prune(SW) ?? 0;
     const b = this.budget.prune(SW);
     if (a || b) this.deps.logger.info(`persona: prune 清理 waker=${a} budget=${b}`);
+    // M32：口癖退役体检（原来也是零调用 —— 长期不用的口癖永远不会退役）
+    try {
+      const retired = this.voice.retireStale();
+      if (retired) this.deps.logger.info(`persona: ${retired} 条口癖因长期不用退役`);
+    } catch {
+      /* 不影响主流程 */
+    }
+  }
+
+  /**
+   * 记一次"她可能被叫成什么"（M32）。
+   *
+   * `recordNameCall()` 原来零调用 → names 候选永远是空的 →
+   * `qq_decide_name`（"她能拒绝某个称呼"）面对一个永远为空的列表，
+   * 等于一个永远点不动的按钮。
+   *
+   * 已配置的名字、已接受的称呼都不算候选（否则会把自己的名字记成"新称呼"）。
+   */
+  notePossibleName(name: string): { isNew: boolean; reachedThreshold: boolean } {
+    const known = new Set([...this.deps.config.names, ...this.self.activeNames()]);
+    if (!name || known.has(name)) return { isNew: false, reachedThreshold: false };
+    const r = this.self.recordNameCall(name);
+    return { isNew: r.isNew, reachedThreshold: r.reachedThreshold };
   }
 
   /** 该 peer 的注入 section（人格 + 该人的账 + 日记连续性）；空数组 = 不注入 */
@@ -351,6 +374,25 @@ export class PersonaService {
   }
 
   /**
+   * 按需冲浪（供 qq_browse 工具调用）。
+   *
+   * 与 startSurf 的区别：这是**她主动想查**的时候用，不受 3-7 点时段限制。
+   * 实测事故（2026-11-01）：用户让她"去逛逛"，她没有工具可用，
+   * 结果**编造了具体文章**（"散文吧有篇《修鞋摊子收起来了》"）。
+   * 有了这个入口，她就能真的查，查不到也如实说查不到。
+   */
+  surf(topic: string, opts: { deep?: boolean } = {}): SurfResult | undefined {
+    const t = String(topic ?? '').trim();
+    if (!t) return undefined;
+    try {
+      return surfTopic(t, { deep: opts.deep === true, maxFindings: 5 });
+    } catch (err) {
+      this.deps.logger.warn(`persona: 按需冲浪失败 ${err instanceof Error ? err.message : String(err)}`);
+      return undefined;
+    }
+  }
+
+  /**
    * 启动自主冲浪（M6）。
    * 只在 surfEnabled 且处于冲浪时段（默认凌晨 3-7 点）时跑；
    * 每 30 分钟检查一次，同一时段内最多跑一轮（用 lastSurfAt 防重复）。
@@ -430,10 +472,29 @@ export class PersonaService {
     this.voice.recordUtterance(`${sessionId}#${Date.now()}`, sessionId, text);
   }
 
-  /** inbound：判定她之前的发言是否被接住（M11） */
+  /**
+   * 她说的话被接住了吗（口癖学习的正样本来源）。
+   *
+   * M32：这条链原来只做了第一步 —— judgeIncoming 攒正样本，
+   * 但下游 extractCandidates（抽候选）和 promoteHabits（转正）
+   * **零调用**。结果是：
+   *   · 样本攒到上限被 shift() 丢掉
+   *   · habits 永远是空数组
+   *   · 而 persona-health 按"正样本 N 条"报进度，看起来一切正常
+   * —— 不只是没功能，是**谎报健康**。
+   *
+   * 现在：攒够 4 条就抽一次候选；每次抽完尝试转正。
+   */
   judgeVoice(sessionId: string, humanText: string): void {
     if (!humanText) return;
-    this.voice.judgeIncoming(sessionId, humanText);
+    const caught = this.voice.judgeIncoming(sessionId, humanText);
+    if (!caught || caught.length === 0) return;
+    // 攒够就抽（extractCandidates 内部还有 <4 条直接返回的保护）
+    if (this.voice.caughtSampleCount() >= 4) {
+      const cands = this.voice.extractCandidates();
+      if (cands.length > 0) this.deps.logger.info(`persona: 口癖候选 +${cands.length}`);
+    }
+    this.voice.promoteHabits();
   }
 
   /** outbound turn/end：配对写入跨场合流水并清暂存。

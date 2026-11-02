@@ -144,3 +144,45 @@ describe('VoiceService · 持久化', () => {
     expect(v2.caughtSampleCount()).toBe(1);
   });
 });
+
+describe('口癖管线 · 从样本到生效（M32 修的死链）', () => {
+  // 这条链原来只做了第一步：judgeIncoming 攒正样本，
+  // 而 extractCandidates / promoteHabits 零调用。
+  // 结果：样本攒到 60 条被丢，habits 永远空，
+  // 而 persona-health 还在报"有正样本"—— 谎报健康。
+  //
+  // 测试必须走 service.judgeVoice 走完整链路，
+  // 不能只测 extractCandidates 算得对 —— 那样把调用点删了测试还是绿的。
+
+  it('反复被接住后，会真的长出生效的口癖', async () => {
+    const { PersonaService } = await import('./service.ts');
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'voice-pipe-'));
+    const svc = new PersonaService({
+      config: {
+        enabled: true, dataDir: dir, roleCardPath: '', roleMaxChars: 12000,
+        wakeEnabled: false, names: [], keywords: [], ownerOpenids: [], groupProbability: 0,
+        humanizeEnabled: true, msPerChar: 110, burstMax: 2, gapMinMs: 700, gapMaxMs: 2600,
+        ownLifeEnabled: false, ownLifeIntervalMs: 9000000, ownLifeMaxPerDay: 6,
+        maxProactivePerDay: 2, proactiveMinGapMs: 7200000,
+      } as never,
+      dataDir: dir,
+      logger: { info: () => {}, warn: () => {}, error: () => {}, debug: () => {} } as never,
+    });
+
+    // 走完整真实路径：她说一句 → 记录 → 对方笑着接住 → service 判定
+    // （不能直接往 caughtSamples 里灌，那样测不到 recordUtterance/judgeIncoming）
+    for (let i = 0; i < 6; i++) {
+      svc.voice.recordUtterance(`t${i}`, 'group:g', '说实话这事挺离谱的吧');
+      svc.judgeVoice('group:g', '哈哈哈确实');
+    }
+
+    const habits = svc.voice.activeHabits();
+    expect(habits.length).toBeGreaterThan(0);
+  });
+
+  it('样本不够时不会硬造口癖', () => {
+    const v2 = new VoiceService(fs.mkdtempSync(path.join(os.tmpdir(), 'voice-few-')));
+    v2.judgeIncoming('group:g', '哈哈哈');
+    expect(v2.extractCandidates()).toEqual([]);
+  });
+});

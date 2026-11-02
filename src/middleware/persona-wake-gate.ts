@@ -19,6 +19,7 @@ const COMPLAINT_RE = /太吵|别刷屏|刷屏了|安静点|安静些|闭嘴|别�
 import type { Middleware, MiddlewareContext } from '@tencent-connect/qqbot-nodejs';
 import type { PersonaService } from '../persona/service.ts';
 import type { Logger } from '../types.ts';
+import { extractVocatives } from '../persona/question-detect.ts';
 
 /**
  * 这条群消息是不是 @ 了别人（而不是她）。
@@ -201,6 +202,15 @@ export function personaWakeGate(
       // 醒后才涨互动计数（m1①），并记录本次唤醒（潜水状态机消费 lastWakeAt）
       persona.memory.touch(msg.senderId, { name: msg.senderName });
       waker.wake(key, msg.senderId);
+      // M32：记下"她可能被叫成什么"（只认称呼句式，不记正文里碰巧出现的词）。
+      // 不记的话 recordNameCall 永远零调用，qq_decide_name 就是个点不动的按钮。
+      if ((ctx.state as Record<string, unknown>).collectOnly !== true) {
+        for (const n of extractVocatives(content)) {
+          const r = persona.notePossibleName(n);
+          if (r.reachedThreshold) logger.info(`persona: 称呼「${n}」被叫够了，等她表态（qq_decide_name）`);
+          else if (r.isNew) logger.debug(`persona: 新称呼候选「${n}」`);
+        }
+      }
     }
 
     await next();

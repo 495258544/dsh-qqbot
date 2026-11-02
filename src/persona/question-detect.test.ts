@@ -7,7 +7,7 @@
  *  3. 陈述句反例（最容易误报的：吧字祈使、呢字进行、疑问代词任指）
  */
 import { describe, expect, it } from 'vitest';
-import { detectQuestion, detectAddressee, classifyUtterance, isQuestion } from './question-detect.ts';
+import { detectQuestion, detectAddressee, classifyUtterance, isQuestion, extractVocatives } from './question-detect.ts';
 
 describe('detectQuestion · 原始失败样例', () => {
   it('旧正则漏掉的 7 条，现在都能识别', () => {
@@ -232,5 +232,63 @@ describe('detectAddressee · 别人名字的排除边界', () => {
     const r = detectAddressee('今晚有人打刀吗', { names: ['小深'], otherNames: others });
     expect(r.excluded).toBe(false);
     expect(r.explicit).toBe(false);
+  });
+});
+
+describe('extractVocatives · 提取"她可能被叫成什么"（M32）', () => {
+  // 防的是 recordNameCall 零调用导致的死链：
+  // names 候选永远为空 → qq_decide_name 面对空列表 = 点不动的按钮。
+  //
+  // 提取必须**保守**：错记一个称呼，她就会去接受一个从没人叫过的名字。
+
+  it('「叫你X」「以后叫你X」', () => {
+    expect(extractVocatives('以后叫你阿羽吧')).toEqual(['阿羽']);
+    expect(extractVocatives('叫你小鲸鱼')).toEqual(['小鲸鱼']);
+    expect(extractVocatives('喊你阿羽行吗')).toEqual(['阿羽']);
+  });
+
+  it('带客气后缀的不会被吞进名字', () => {
+    expect(extractVocatives('叫你小鱼可以吗')).toEqual(['小鱼']);
+    expect(extractVocatives('那就叫小鱼吧')).toEqual(['小鱼']);
+  });
+
+  it('句首称呼 + 停顿', () => {
+    expect(extractVocatives('小羽，在吗')).toEqual(['小羽']);
+  });
+
+  it('转述不算（"小羽说得对"不是在叫她）', () => {
+    expect(extractVocatives('小羽说得对')).toEqual([]);
+  });
+
+  it('普通句子不误判', () => {
+    expect(extractVocatives('我觉得这个不错')).toEqual([]);
+    expect(extractVocatives('今天天气挺好的')).toEqual([]);
+  });
+
+  it('"叫我X"不算（那是对方在说自己）', () => {
+    expect(extractVocatives('叫我小明')).toEqual([]);
+  });
+});
+
+describe('extractVocatives · 零误判（真实语料的教训）', () => {
+  // 第一版句首规则写得很宽松（任何 1~5 字 + 逗号都算称呼）。
+  // 拿 124 轮真实对话跑，抽出的是：
+  //   「忙是忙」「藏事儿多累」「一回就一回」「写的不错」「被限速了」「停一下」
+  // 全是句子开头碰巧跟了个逗号。
+  //
+  // 错记一个称呼的代价：她会去"接受"一个从没人叫过的名字，
+  // 之后任何消息里出现这几个字都会唤醒她 —— 比漏记严重得多。
+
+  it('句子开头跟逗号的普通句子不算称呼', () => {
+    expect(extractVocatives('忙是忙 但听见吃的还是会回头')).toEqual([]);
+    expect(extractVocatives('藏事儿多累 我又不是来上班的')).toEqual([]);
+    expect(extractVocatives('写的不错，就像我并不完全了解你')).toEqual([]);
+    expect(extractVocatives('一回就一回 我记着呢')).toEqual([]);
+    expect(extractVocatives('被限速了，等一下')).toEqual([]);
+  });
+
+  it('真正在叫她的才算', () => {
+    expect(extractVocatives('小羽，在吗')).toEqual(['小羽']);
+    expect(extractVocatives('小羽，几点了，你在干嘛')).toEqual(['小羽']);
   });
 });

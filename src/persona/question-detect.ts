@@ -345,6 +345,65 @@ export function isQuestion(text: string): boolean {
   return detectQuestion(text).isQuestion;
 }
 
+/**
+ * 从一句话里抽出"她可能被叫成的称呼"。
+ *
+ * 为什么需要：`recordNameCall()` 原来零调用 → 候选列表永远是空的 →
+ * `qq_decide_name`（"她能拒绝某个称呼"）面对空列表，等于一个点不动的按钮。
+ *
+ * 三条判据，从明确到模糊：
+ *   ① 「叫你X」「以后叫你X」—— 最明确
+ *   ② 句首「叫X吧」—— 祈使句，靠"那就/就/句首"定位
+ *   ③ 「小羽，在吗」—— 句首称呼 + 停顿，**这条必须严格**
+ *
+ * ③ 为什么收紧：实测用宽松版（任何 1~5 字 + 逗号）跑真实语料，124 轮里抽出
+ * 「忙是忙」「藏事儿多累」「一回就一回」「写的不错」「被限速了」「停一下」——
+ * 全是句子开头碰巧跟了个逗号。
+ * 错记一个称呼的代价：她会去"接受"一个从没人叫过的名字，之后任何消息里
+ * 出现这几个字都会唤醒她。
+ */
+export function extractVocatives(text: string): string[] {
+  const raw = String(text ?? '').trim();
+  if (!raw) return [];
+  const out = new Set<string>();
+
+  // 名字贪婪取 1~4 字，但**排除以语气词结尾**（否则 "叫你小鱼可以吗"
+  // 会把"小鱼可以吗"整串当名字）；再剥掉尾部残留的语气词。
+  const NAME = '[\\u4e00-\\u9fa50-9A-Za-z]{1,4}';
+  // 尾部语气词/客气话，可能叠加（"小鱼可以吗" → "小鱼" + "可以" + "吗"）
+  const TAIL = /(?:可以|好吗|行吗|好了|就行|就好|吧|吗|啊|呀|呗|呢)+$/;
+  const stripTail = (w: string): string => {
+    let prev = '';
+    let cur = w.trim();
+    while (cur !== prev) {
+      prev = cur;
+      cur = cur.replace(TAIL, '');
+    }
+    return cur;
+  };
+
+  // ① 「叫你X」「以后叫你X」。独占匹配，避免 "叫你小鱼" 里再命中 "你小鱼"
+  for (const m of raw.matchAll(new RegExp(`(?:叫|喊)(?:你|她|它)\\s*(${NAME})`, 'g'))) {
+    const w = stripTail(m[1] ?? '');
+    if (w && !/^(我|他|她)$/.test(w)) out.add(w);
+  }
+
+  // ② 「叫X吧」开头的祈使句（没有"你"，靠"那就/就"或句首定位）。
+  //    这里要排除 "叫你X" —— 上一段已处理，否则会从"叫"后面取到"你小鲸"当名字。
+  const lead = raw.match(new RegExp(`^(?:那就|就)?叫(${NAME})`));
+  if (lead?.[1]) {
+    const w = stripTail(lead[1]);
+    if (w && !/^[你我他她它]/.test(w)) out.add(w);
+  }
+
+  // ③ 句首称呼 + 停顿（"小羽，在吗"）
+  //    收紧到"像名字"才认：2~4 字、全部汉字、能接"在吗/你在/在不在/干嘛/几点"这类呼叫语。
+  const voc = raw.match(/^([\u4e00-\u9fa5]{2,4})\s*[，,、]\s*(?:在吗|你在|在不在|干嘛|几点)/);
+  if (voc?.[1]) out.add(voc[1]);
+
+  return [...out];
+}
+
 // ── 对外：说话对象判定 ────────────────────────────────────────────────
 
 /**
