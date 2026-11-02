@@ -8,6 +8,7 @@ import { execFileSync } from 'node:child_process';
 import type { Context } from '@deepseek-ai/cordis';
 import type { ContentBlock } from '@deepseek-ai/dsh-llm';
 import type { PersonaService } from './service.ts';
+import { describeEmotion } from './emotion.ts';
 import type { Logger } from '../types.ts';
 import type { DshAgent } from '../session/types.ts';
 
@@ -22,12 +23,18 @@ export function registerPersonaTools(
   logger: Logger,
 ): void {
   const tools = ctx.get('tools') as ToolsRegistryLike | undefined;
+  // 自动统计注册数量，避免日志里的数字靠手写（写死过一次 15，加到 17 就过期了）
+  const registered = new Set<string>();
+  const reg = (def: { name?: unknown } & Record<string, unknown>): void => {
+    if (typeof def?.name === 'string') registered.add(def.name);
+    tools?.register(def);
+  };
   if (!tools?.register) {
     logger.warn('im-qqbot: tools 服务不可用，persona 工具未注册');
     return;
   }
 
-  tools.register({
+  reg({
     name: 'qq_write_diary',
     description: '写一条你自己的日记（关于你这一天，不是关于对方的事——那用 qq_memory_append）。'
       + '第一人称、口语、短句，1~4 句。不要总结升华，不要"今天真是充实的一天"。',
@@ -62,7 +69,7 @@ export function registerPersonaTools(
     },
   });
 
-  tools.register({
+  reg({
     name: 'qq_read_diary',
     description: '翻你自己的日记。不传参数返回最近 5 条；传 day（YYYY-MM-DD）返回那天全部。',
     parameters: {
@@ -122,7 +129,7 @@ export function registerPersonaTools(
     },
   });
 
-  tools.register({
+  reg({
     name: 'qq_memory_append',
     description: '往某个人的账上记一笔。trait=他的习惯性格，fact=他告诉过你的事实，'
       + 'topic=聊过的话题，pending=你想说但还没说的话（会过期，别攒太多）。'
@@ -169,7 +176,7 @@ export function registerPersonaTools(
   });
 
 // ── 称呼表态：她可以接受或拒绝一个称呼（"喜欢了才接受"）──
-  tools.register({
+  reg({
     name: 'qq_decide_name',
     description:
       '决定接不接受别人对你的某个叫法。用户用新称呼叫过你几次之后，你来表态：'
@@ -208,7 +215,7 @@ export function registerPersonaTools(
   });
 
   // ── 兴趣记录：她可以主动记下自己关注的话题 ──
-  tools.register({
+  reg({
     name: 'qq_mark_interest',
     description:
       '记下你自己最近关注/感兴趣的话题，或者你**讨厌/不想聊**的话题（polarity=dislike）。'
@@ -274,7 +281,7 @@ export function registerPersonaTools(
   });
 
   // ── 提需求：她想要个新功能，可以提给用户 ──
-  tools.register({
+  reg({
     name: 'qq_raise_wish',
     description:
       '你想到一个自己想要、但需要用户帮忙实现的功能时用它提出来。每周最多 2 条，别滥用。'
@@ -319,7 +326,7 @@ export function registerPersonaTools(
   });
 
   // ── 回应需求：用户接受/拒绝时记录 ──
-  tools.register({
+  reg({
     name: 'qq_answer_wish',
     description: '用户对你的需求表态后，用它记录：接受（会做）还是拒绝（不做）。被拒的一个月后可再提。',
     parameters: {
@@ -351,7 +358,7 @@ export function registerPersonaTools(
   });
 
   // ── 查需求 ──
-  tools.register({
+  reg({
     name: 'qq_list_wishes',
     description: '查看你提过的需求及其状态。',
     parameters: { type: 'object', properties: {}, required: [], additionalProperties: false },
@@ -397,7 +404,7 @@ export function registerPersonaTools(
   });
 
 // ── 口癖表态：她可以接受或拒绝学到的新口头禅 ──
-  tools.register({
+  reg({
     name: 'qq_decide_voice',
     description:
       '系统从你被接住的话里提炼出一些说话习惯，你来表态接不接受。'
@@ -431,7 +438,7 @@ export function registerPersonaTools(
   });
 
   // ── 查看口癖 ──
-  tools.register({
+  reg({
     name: 'qq_list_voice',
     description: '查看你当前的说话习惯（候选/生效中）。',
     parameters: { type: 'object', properties: {}, required: [], additionalProperties: false },
@@ -478,7 +485,7 @@ export function registerPersonaTools(
   });
 
 // ── 自我叙述（L4 selfNote）：她写对自己的认识 ──
-  tools.register({
+  reg({
     name: 'qq_write_self_note',
     description:
       '写一条"对自己的认识"——不是记别人，是记你自己是个什么样的人、最近变了什么。'
@@ -519,7 +526,7 @@ export function registerPersonaTools(
   });
 
   // ── 读自我叙述 ──
-  tools.register({
+  reg({
     name: 'qq_read_self_note',
     description: '看看你对自己现在的认识（有归档的旧版）。',
     parameters: { type: 'object', properties: {}, required: [], additionalProperties: false },
@@ -565,7 +572,7 @@ export function registerPersonaTools(
    *   根因：surf.ts 只在凌晨 3-7 点定时跑，**没有"我现在去看看"的工具**，
    *   于是她只能凭想象描述"网上有什么"。编造具体文章比不答更糟。
    */
-  tools.register({
+  reg({
     name: 'qq_browse',
     description: '真的去网上看看（用 Bing 搜索 + 抓正文）。'
       + '想聊"最近网上在说什么""贴吧/微博有人讨论什么"时先用它，别凭印象编。'
@@ -639,7 +646,7 @@ export function registerPersonaTools(
    *
    * 刻意做得**很轻**：一句话就行，不是日志，不是汇报。
    */
-  tools.register({
+  reg({
     name: 'qq_note_activity',
     description: '记一句"这次自由时间做了什么"（一句话，不超过 60 字）。'
       + '下次自由时间会把最近几条带给你，好让你接着上次、或者换个不一样的。'
@@ -674,6 +681,52 @@ export function registerPersonaTools(
   });
 
   /**
+   * qq_check_mood —— 让她能感知自己现在的情绪（M31）。
+   *
+   * 为什么必须给她看：
+   * 情绪已经在四个闸门上真的改变行为了（开口意愿 / 打字快慢 / 分几条 / 主动概率）。
+   * 如果她自己不知道，那些行为变化在她那儿就是**无理由的**——
+   * 心情差时她只是"莫名懒得说话"，而不是"我今天有点蔫"。
+   * 有理由的行为才像人，没理由的行为像故障。
+   *
+   * 只读：情绪由事件驱动，不让她自己调（否则会变成"想开心就开心"的自欺）。
+   */
+  reg({
+    name: 'qq_check_mood',
+    description: '看看你现在的心情和精力怎么样。就是你此刻的状态，没有对错，不用分析原因。'
+      + '心情会自然回落，睡一觉、过几个小时就淡了，不用刻意维持。',
+    parameters: { type: 'object', properties: {}, additionalProperties: false },
+    output: {
+      schema: {
+        type: 'object',
+        properties: {
+          ok: { type: 'boolean' },
+          valence: { type: 'number', description: '-1 到 1，正=心情好' },
+          arousal: { type: 'number', description: '0 到 1，高=心里有起伏' },
+          energy: { type: 'number', description: '0 到 1，高=有精神' },
+          text: { type: 'string', description: '一句话概括' },
+        },
+        required: ['ok', 'valence', 'arousal', 'energy', 'text'],
+        additionalProperties: false,
+      },
+      render: (_a: unknown, v: unknown): ContentBlock[] => {
+        const r = v as { text: string };
+        return [{ type: 'text', text: r.text }];
+      },
+    },
+    async execute(): Promise<Record<string, unknown>> {
+      const st = persona.emotion.current();
+      return {
+        ok: true,
+        valence: Number(st.valence.toFixed(2)),
+        arousal: Number(st.arousal.toFixed(2)),
+        energy: Number(st.energy.toFixed(2)),
+        text: describeEmotion(st),
+      };
+    },
+  });
+
+  /**
    * qq_bili_check —— 让她真的能查 B 站视频。
    *
    * 背景（2026-11-02 实测事故）：
@@ -686,7 +739,7 @@ export function registerPersonaTools(
    * 现在真的给它接上：复用本机已装好的 `bili` CLI（bili-agent 1.2.1，已登录）。
    * 只暴露**只读**能力（info / summary / subtitle / search），不做写操作。
    */
-  tools.register({
+  reg({
     name: 'qq_bili_check',
     description: '查一个 B 站视频：拿标题、简介、AI 总结、字幕、弹幕、画面帧。'
       + '想聊某个 B 站视频的内容时用它，别凭印象编。没给 BV 号也可以按关键词搜。',
@@ -856,5 +909,7 @@ export function registerPersonaTools(
     },
   });
 
-  logger.info('im-qqbot: persona 工具已注册（日记/记忆/称呼/兴趣/需求/口癖/自我/浏览/活动/B站，共 15 个）');
+  // 数量写死过一次 15，后来加到 17 也忘了改 —— 改成动态。（这种"文档和代码脱节"
+  // 是本仓库反复踩的坑：写死在注释里的数字总会过期。）
+  logger.info(`im-qqbot: persona 工具已注册（日记/记忆/称呼/兴趣/需求/口癖/自我/浏览/活动/B站/心情，共 ${registered.size} 个）`);
 }

@@ -17,7 +17,7 @@ import { Waker } from './wake.ts';
 import { SelfProfileService } from './self.ts';
 import { VoiceService } from './voice.ts';
 import { SelfNoteService } from './self-note.ts';
-import { EmotionService, speakWillingness, typingSpeedFactor, burstLimit } from './emotion.ts';
+import { EmotionService, speakWillingness, typingSpeedFactor, burstLimit, describeEmotion } from './emotion.ts';
 import { runSurfRound, inSurfWindow, surfTopic, type SurfResult } from './surf.ts';
 import { clockInTz, weekdayInTz, dayInTz, hourInTz, DEFAULT_TZ } from './clock.ts';
 import { Humanizer } from './humanize.ts';
@@ -258,6 +258,10 @@ export class PersonaService {
     const b = this.budget.prune(SW);
     if (a || b) this.deps.logger.info(`persona: prune 清理 waker=${a} budget=${b}`);
     this.decaySelf();
+    // M31：心情也在动，但它是**最容易被写成死代码**的那类数据
+    // （算出来了没人看）。每 6 小时打一行，让"她的情绪"在日志里可见 ——
+    // 出问题时能一眼看出是"真的没波动"还是"根本没在跑"。
+    this.deps.logger.info(`persona: 心情 ${describeEmotion(this.emotion.current())}`);
   }
 
   /**
