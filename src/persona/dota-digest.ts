@@ -425,7 +425,7 @@ export function createDotaDigest(deps: DotaDigestDeps): DotaDigestHandle {
   }
 
   function inWindow(ts: number, range: [number, number]): boolean {
-    // 容器无 tzdata：必须显式 IANA 时区换算，不能信 getHours()
+    // 启动时未设 TZ：必须显式 IANA 时区换算，不能信 getHours()
     const h = hourInTz(new Date(ts), cfg.tz);
     return isHourInRange(h, range[0], range[1]);
   }

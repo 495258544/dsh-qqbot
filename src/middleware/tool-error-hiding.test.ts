@@ -37,3 +37,38 @@ describe('工具报错 · 不把技术细节泄露给用户', () => {
     expect(out).toContain('没成功');
   });
 });
+
+describe('"工具不存在" vs "命令执行失败" 不能混为一谈', () => {
+  // 这条防的是一个**代码级**的同款错误（不只是注释）：
+  //
+  // 原正则 /UNKNOWN_TOOL|NOT_FOUND|ToolNotFound|not found/i 里，
+  // NOT_FOUND / not found 是通用错误码，会把下面这些都判成"工具不存在"并静默：
+  //   COMMAND_NOT_FOUND  ← 她 bash 敲了个不存在的命令（正常失败，该给提示）
+  //   bash: not found    ← shell 自己的报错
+  //   FILE_NOT_FOUND     ← 文件不存在
+  //
+  // 结果是消息凭空消失，连「（这个操作没成功：bash）」都不发。
+  // 这和"把命令失败读成工具不存在"是同一种混淆 —— 只是发生在代码里。
+
+  const isToolMissingNow = (code: string, name = ''): boolean =>
+    /UNKNOWN_TOOL|ToolNotFound/i.test(code) || /ToolNotFound|UNKNOWN_TOOL/i.test(name);
+
+  it('结构化的"工具不存在"信号要识别', () => {
+    expect(isToolMissingNow('UNKNOWN_TOOL')).toBe(true);
+    expect(isToolMissingNow('ToolNotFound')).toBe(true);
+    expect(isToolMissingNow('', 'ToolNotFoundError')).toBe(true);
+  });
+
+  it('通用 NOT_FOUND **不能**当工具不存在（否则消息静默消失）', () => {
+    expect(isToolMissingNow('COMMAND_NOT_FOUND')).toBe(false);
+    expect(isToolMissingNow('FILE_NOT_FOUND')).toBe(false);
+    expect(isToolMissingNow('bash: not found')).toBe(false);
+    expect(isToolMissingNow('NOT_FOUND')).toBe(false);
+  });
+
+  it('她 bash 里的常见失败要给用户一句人话，不能吞掉', () => {
+    for (const code of ['COMMAND_NOT_FOUND', 'ENOENT', 'bash: not found']) {
+      expect(isToolMissingNow(code)).toBe(false);
+    }
+  });
+});

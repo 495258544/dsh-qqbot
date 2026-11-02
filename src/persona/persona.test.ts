@@ -373,7 +373,7 @@ describe('own-life · 静默唤醒约束', () => {
     expect(count).toBe(2);
   });
 
-  it('安静时段不叫（按北京时间判定，容器无 tzdata）', async () => {
+  it('安静时段不叫（按北京时间判定，启动时未设 TZ）', async () => {
     const life = createOwnLife({
       rollProbability: 1,
       deliver: async () => {},

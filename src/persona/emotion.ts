@@ -291,7 +291,7 @@ export class EmotionService {
 
   /**
    * 取当日计数器并递增（跨日自动归零）。
-   * 用**北京时区**——容器无 tzdata，`new Date().getDate()` 是 UTC。
+   * 用**北京时区**——启动时未设 TZ，`new Date().getDate()` 是 UTC。
    */
   private tickDaily(kind: 'addressed' | 'replied'): { used: number; damp: number } {
     const day = dayInTz(new Date());
@@ -339,7 +339,7 @@ export class EmotionService {
 
   /**
    * 深夜还在聊 → 精力下降。
-   * hour 用**北京时间**（容器无 tzdata，调用方负责传对）。
+   * hour 用**北京时间**（启动时未设 TZ，调用方负责传对）。
    */
   onNightChat(hour: number): void {
     if (hour >= 23 || hour < 6) this.bump({ energy: -0.08, arousal: -0.03 });

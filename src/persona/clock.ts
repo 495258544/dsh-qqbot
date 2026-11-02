@@ -1,14 +1,24 @@
 /**
- * 时区工具（容器无 tzdata 的正确解法）
+ * 时区工具（显式 IANA 时区，不依赖进程环境）
  * ─────────────────────────────────────────────────────────────
- * 问题：这个 Ubuntu proot 容器**没有 /usr/share/zoneinfo**，
- *      `TZ=Asia/Shanghai` 被静默忽略，`new Date().getHours()` 返回的是 **UTC**。
+ * 问题：`new Date().getHours()` 返回的是 **UTC**，不是北京时间。
  *
- * 后果（已实测）：
+ * 原因（2026-11-03 更正）：**启动时没有设 TZ 环境变量**。
+ *   早先这里写的是"容器没有 /usr/share/zoneinfo、TZ 被静默忽略"——
+ *   那是错的，已实测证伪：
+ *     · /usr/share/zoneinfo 存在（2.0M）
+ *     · TZ=Asia/Shanghai date → Tue Nov  3 02:05:20 CST 2026 ✓
+ *     · 不设 TZ 时 date → Mon Nov  2 18:05:20 UTC 2026
+ *   而且那句话本身自相矛盾：TZ 若真被忽略，恰恰说明系统不认识 TZ。
+ *
+ * 后果（实测）：
  *   配置写"凌晨 3-7 点冲浪"，实际会在 UTC 3-7 点跑 = **北京时间 11-15 点**。
  *
  * 解法：用 `Intl.DateTimeFormat` 显式指定 IANA 时区。
- *      Node 自带完整 ICU，不依赖系统 tzdata（已实测 UTC 2:25 → 北京 10:25 正确）。
+ *   Node 自带完整 ICU，**不依赖进程环境**——这样无论宿主有没有设 TZ、
+ *   以后换到别的容器，行为都不变。
+ *   （也可以在启动时补 `process.env.TZ ??= 'Asia/Shanghai'`，
+ *     但那只影响之后 new Date() 的本地方法，已经写死的代码仍要走这里。）
  */
 
 /** 默认时区（用户在北京） */

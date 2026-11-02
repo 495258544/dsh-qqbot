@@ -104,7 +104,7 @@ function watch(probe: ScreenProbe, extra: Partial<Parameters<typeof createScreen
 /**
  * 按**北京时刻**构造 Date。
  *
- * 容器无 tzdata，new Date(y, m, d, h) 是按 UTC 构造的。
+ * 启动时未设 TZ，new Date(y, m, d, h) 是按 UTC 构造的。
  * inActiveHours 已改成用显式时区（北京），所以测试也必须按北京时刻构造，
  * 否则 UTC 12:00 会被当成北京 20:00，断言自然对不上。
  */

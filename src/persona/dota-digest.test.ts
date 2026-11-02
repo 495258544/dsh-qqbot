@@ -2,7 +2,7 @@
  * dota-digest 测试
  * ─────────────────────────────────────────────────────────────
  * 全部用假 bindings / queryForm / pickGroup / deliver / now，绝不联网。
- * 时间统一用「北京时间」构造（容器无 tzdata，但 Intl 换算是对的）。
+ * 时间统一用「北京时间」构造（启动时未设 TZ，但 Intl 换算是对的）。
  */
 import { afterEach, describe, expect, it } from 'vitest';
 import fs from 'node:fs';

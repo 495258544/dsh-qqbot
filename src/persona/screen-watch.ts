@@ -377,7 +377,7 @@ export function matchInterests(
 
 /** 观察时段：默认 [9,23)，支持跨零点区间 */
 export function inActiveHours(now: Date, hours: readonly [number, number]): boolean {
-  // 必须用显式时区：容器无 tzdata，getHours() 返回 UTC。
+  // 必须用显式时区：启动时未设 TZ，getHours() 返回 UTC。
   // 配了 [9,23) 会变成「北京 17:00 → 次日 07:00」，白天不看、半夜乱看。
   const h = hourInTz(now);
   const [from, to] = hours;
