@@ -142,3 +142,47 @@ git log --oneline e220f56..origin/xiaoyu          # 上次同步点之后的新�
 | `1d99f21/41dbb8d/dbe5656/64c07ce` | 本地旧快照，会回退 steam/dota 修复 |
 | `5a2802a` / `e731f74` | 死代码清理会删掉本地还在用的 `classifyUtterance`；后者依赖前者 |
 | 全部远端 `lib/*.js` | 编译产物，一律本地 `npm run build` |
+
+---
+
+## 2026-11-03 · 第三次同步（远端 `4afe637`，13 个提交）
+
+| 项 | 值 |
+|---|---|
+| 远端同步点 | `4afe637`（上次是 `e220f56`） |
+| 提交 | `ee3b8a0` |
+| 主题 | 几乎全是 B 站视频能力 + 一批注释/时区修正 |
+
+### 吸收了
+
+| 提交 | 内容 | 方式 |
+|---|---|---|
+| `9ec22bd` | 字幕时间轴（原来 join 掉 from/to 且只取前 40 句 ≈ 90 秒）→ 按分钟选最长句 + 接官方 outline | 按文件 patch |
+| `8b6ce35` | 合集先给分 P 目录（`pages[].title`，不是 `part`）+ 弹幕高能时刻 | 按文件 patch |
+| `c6eb71a` | `runBili()` 薄壳（失败时从 `err.stdout` 捞 bili 自己写的错误）+ `page` 参数 + `bili-health.ts` 自检 | 按文件 patch |
+| `cbb8254` | `render()` 措辞：字幕/目录标成「原料不是结论」并给挑选标准（没有引入 LLM） | 按文件 patch |
+| `6e648af` | `tool-presenter` 正则去掉 `NOT_FOUND\|not found`（消息凭空消失的 bug） | 手工改 1 行 |
+| 时区（多文件） | `diary.ts` / `screen-watch.ts` 的 `getHours/getDate` → 显式时区 | 整文件取 |
+| 注释 | 「容器无 tzdata」→「启动时未设 TZ」；去掉「文章实测参数 C1」假出处；`self.ts` 厌恶半衰期注释 72h/24h → 90天/30天（原注释与常量差 30 倍） | 批量改 |
+
+**这 4 个 bili 提交全部是本地进程内的纯 TS 规则**，一条都不依赖 MCP —— 所以保留 `qq_bili_check` 手写工具，同时拿到了全部改进。按顺序 patch（`git show <sha> -- <src 路径> \| git apply`）4 个全部干净应用，零冲突。
+
+### 跳过（附理由，下次别重新纠结）
+
+| 提交 | 理由 |
+|---|---|
+| `3f9752f` 改用 MCP + skill、砍掉手写工具 | **净能力倒退**：`server.py` 的 18 个工具里**没有 frames（画面帧）**，丢掉结构化 output schema，搜索只返回纯文本。还要用户改宿主 cordis.yml、装 Python + `mcp>=2.3`。仓库自己的 `8186bcb` 已论证「DSH 能 exec，MCP 无收益」 |
+| `a1fb1b3` bili-mcp 加 4 个工具 | 没有 MCP 就是 0 价值；真需要那几个能力，在手写工具里加分支更便宜 |
+| `ab1d9ba` 去掉 C1 假出处 | 已手工改注释（没整取，本地 bootstrap 有 149 行定制） |
+| `5bb3818` 的 `surf.ts` B 站 Layer 0 | `biliHot()` 用同步 `execFileSync` + 20s timeout，而 `surfTopic` 是同步函数、被手动触发和定时轮次共用 → 会卡住 QQ 消息循环 |
+| `bili-mcp/**`、`comment-audit.md` 等调研文档 | 本地无对应上下文，进仓库只是噪声 |
+| 所有 `lib/*.js` | 编译产物，本地 `npm run build` |
+
+### 特别注意
+
+`bili-health.ts` 取了模块和测试，但**没有接进 bootstrap**：它同步跑 4 次 `execFileSync`（实测 7.6s），
+接在启动的 `setTimeout` 里会阻塞事件循环。需要时手动跑，或改成异步 `execFile` 再接线。
+
+`diary.ts` / `screen-watch.ts` 这两个时区 bug 是**上一轮（e220f56）漏掉的** ——
+当时只看了 `clock.ts` 的改动就以为已经覆盖，实际上这两个文件本地仍等于 `f5b34a1`。
+教训：**同步"时区/工具"类改动时，要 grep 一遍全仓的 `getHours()/getDate()`，而不是只跟改了哪个文件。**
