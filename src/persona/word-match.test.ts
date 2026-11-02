@@ -57,3 +57,30 @@ describe('hanSegments · 切分连续汉字', () => {
     expect(hanSegments('hello 123')).toEqual([]);
   });
 });
+
+describe('多词型 topic（从搜索框来的兴趣）', () => {
+  // 背景：兴趣是冲浪时用搜索词建的，天然带空格（"游戏 新作"、"AI 技术"）。
+  // 旧逻辑对这类 topic 走 raw.includes，要求原文出现"游戏 新作"五个字符
+  // （含空格）—— 人说话不会这么写。实测 124 轮对话命中 0 次。
+
+  it('带空格的 topic 能被各部分的自然说法命中', () => {
+    expect(matchesTopic('最近有什么新游戏吗', '游戏 新作')).toBe(true);
+    expect(matchesTopic('聊聊AI技术吧', 'AI 技术')).toBe(true);
+    expect(matchesTopic('给我推荐个书单', '读书 书单')).toBe(true);
+  });
+
+  it('原样的带空格写法当然也命中', () => {
+    expect(matchesTopic('游戏 新作 推荐', '游戏 新作')).toBe(true);
+  });
+
+  it('完全不相关的话不命中（别因为拆分而变宽松到误触发）', () => {
+    expect(matchesTopic('今天天气不错', '游戏 新作')).toBe(false);
+    expect(matchesTopic('晚饭吃什么', 'AI 技术')).toBe(false);
+  });
+
+  it('多词 topic 的边界判定跟着各单词走，不是无脑 includes', () => {
+    // "车" 单字仍然不许撞进 "车站"，即使它出现在多词 topic 里
+    expect(matchesTopic('车站人很多', '车 旅行')).toBe(false);
+    expect(matchesTopic('我开车去上班', '车 旅行')).toBe(true);
+  });
+});

@@ -21,6 +21,7 @@ import { runSurfRound, inSurfWindow, surfTopic, type SurfResult } from './surf.t
 import { clockInTz, weekdayInTz, dayInTz, DEFAULT_TZ } from './clock.ts';
 import { Humanizer } from './humanize.ts';
 import { extractFact, extractTrait } from './fact-extract.ts';
+import { matchesTopic } from './word-match.ts';
 import { pickDiaryMaterial, composeDiaryText, readTurnsOfDay, shouldWriteDiary } from './diary-auto.ts';
 import { createOwnLife, type OwnLifeHandle, type OwnLifeDeliverResult } from './own-life.ts';
 import { createScreenWatch, type ScreenWatchHandle, type ScreenWatchOptions, type ScreenNudge, type ScreenDeliverResult } from './screen-watch.ts';
@@ -493,7 +494,36 @@ export class PersonaService {
     // 根因是"指望模型自觉调 qq_memory_append"≈不写（群聊里 0 次）。
     // 改成每轮由代码抽一次，不依赖她想起用工具。
     this.autoRemember(entry.who ?? fallbackWho, user);
+    // ── M30：兴趣续命（同样是硬触发）──
+    this.touchMentionedInterests(user);
     this.autoDiary();
+  }
+
+  /**
+   * 聊天里聊到她感兴趣的话题 → 该兴趣续命（刷新 lastAt）。
+   *
+   * 为什么必须自动做：衰减的计时基准是 `lastAt`，而刷新 `lastAt` 原本只有
+   * 两条路 —— 她主动调 qq_mark_interest、或冲浪拿到新东西。两条都依赖
+   * "她自觉"，而实测她几乎从不调那个工具。
+   *
+   * 后果很硬：`current` 类兴趣按 24h 半衰，没有续命就会被
+   * "聊得越多反而越接近过期"反噬 —— 实测她 4 条 current 兴趣里
+   * 唯一活着的那条已 5.7 天没刷新，接上衰减的那一刻会直接
+   * 从 0.335 掉到 0.0064 被冻结。**不接这条，衰减等于一键清空。**
+   *
+   * 用「对方说的话」判断而不是她的回复：她被勾起来是因为**话题出现了**，
+   * 不是因为她自己提了一嘴。
+   */
+  private touchMentionedInterests(userText: string): void {
+    if (!userText) return;
+    try {
+      for (const i of this.self.snapshot().interests) {
+        if (i.frozen) continue;
+        if (matchesTopic(userText, i.topic)) this.self.touchInterest(i.topic);
+      }
+    } catch {
+      /* 续命失败不影响主流程 */
+    }
   }
 
   /**

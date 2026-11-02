@@ -492,15 +492,26 @@ export class SelfProfileService {
     return Math.min(1, sum);
   }
 
-  /** 记录一次冲浪成果 */
+  /**
+   * 记录一次冲浪成果（她在这个话题上主动查到了新东西）。
+   *
+   * M30 修的 bug：原来只写 findings，**不刷新 lastAt**。
+   * 而 lastAt 是衰减的计时基准 —— 结果是"她越研究某个话题，
+   * 那个话题在数据上越接近过期"，因为她查得越多、旧时间戳显得越旧。
+   * 语义上"主动查资料"本来就是对这个话题最强的投入信号，必须续命。
+   */
   addFinding(topic: string, summary: string, source?: string): void {
     const e = this.data.interests.find((i) => i.topic === topic);
     if (!e) return;
+    const now = Date.now();
     e.findings = e.findings ?? [];
-    e.findings.push({ at: Date.now(), summary, source });
+    e.findings.push({ at: now, summary, source });
     // 上限 8 条，防膨胀
     while (e.findings.length > 8) e.findings.shift();
-    this.data.lastSurfAt = Date.now();
+    // 续命：主动查 = 投入，等价于一次 ACCESS 事件
+    e.lastAt = now;
+    if (e.frozen && this.strengthOf(e) >= REVIVE_THRESHOLD) e.frozen = false;
+    this.data.lastSurfAt = now;
     this.save();
   }
 

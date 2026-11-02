@@ -217,3 +217,83 @@ describe('renderSection · 数据和感受必须同时在场', () => {
     expect(s).toContain('短视频');
   });
 });
+
+describe('聊天续命 · 不接这条衰减等于一键清空', () => {
+  const mkSvc = async (dir: string, selfSeed: (s: SelfProfileService) => void) => {
+    const { PersonaService } = await import('./service.ts');
+    const svc = new PersonaService({
+      config: {
+        enabled: true, dataDir: dir, roleCardPath: '', roleMaxChars: 12000,
+        wakeEnabled: true, names: [], keywords: [], ownerOpenids: [], groupProbability: 0,
+        humanizeEnabled: true, msPerChar: 110, burstMax: 2, gapMinMs: 700, gapMaxMs: 2600,
+        ownLifeEnabled: false, ownLifeIntervalMs: 9000000, ownLifeMaxPerDay: 6,
+        maxProactivePerDay: 2, proactiveMinGapMs: 7200000,
+      } as never,
+      dataDir: dir,
+      logger: { info: () => {}, warn: () => {}, error: () => {}, debug: () => {} } as never,
+    });
+    selfSeed(svc.self);
+    return svc;
+  };
+
+  it('聊天里聊到兴趣 → lastAt 被刷新', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'persona-'));
+    const svc = await mkSvc(dir, (s) => {
+      s.touchInterest('咖啡');
+      // 手动做旧：假装 5 天前碰过
+      const e = s.snapshot().interests[0]!;
+      e.lastAt = Date.now() - 5 * 24 * 3600_000;
+    });
+    const before = svc.self.snapshot().interests[0]!.lastAt;
+
+    svc.noteUserTurn('s1', '今天又喝咖啡了', 'u1');
+    svc.flushTurn('s1', 'c2c:u1', 'u1');
+
+    const after = svc.self.snapshot().interests[0]!.lastAt;
+    expect(after).toBeGreaterThan(before);
+  });
+
+  it('没聊到的兴趣不被动（续命不是无差别刷）', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'persona-'));
+    const svc = await mkSvc(dir, (s) => {
+      s.touchInterest('咖啡');
+      const e = s.snapshot().interests[0]!;
+      e.lastAt = Date.now() - 5 * 24 * 3600_000;
+    });
+    const before = svc.self.snapshot().interests[0]!.lastAt;
+
+    svc.noteUserTurn('s1', '今天天气不错', 'u1');
+    svc.flushTurn('s1', 'c2c:u1', 'u1');
+
+    expect(svc.self.snapshot().interests[0]!.lastAt).toBe(before);
+  });
+
+  it('搜索词型兴趣（带空格）也能被日常说话续命', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'persona-'));
+    const svc = await mkSvc(dir, (s) => {
+      s.touchInterest('游戏 新作');
+      const e = s.snapshot().interests[0]!;
+      e.lastAt = Date.now() - 5 * 24 * 3600_000;
+    });
+    const before = svc.self.snapshot().interests[0]!.lastAt;
+
+    svc.noteUserTurn('s1', '最近有什么新游戏吗', 'u1');
+    svc.flushTurn('s1', 'c2c:u1', 'u1');
+
+    expect(svc.self.snapshot().interests[0]!.lastAt).toBeGreaterThan(before);
+  });
+});
+
+describe('addFinding · 查资料必须续命（越研究越接近过期的 bug）', () => {
+  it('写 findings 会刷新 lastAt', () => {
+    const { svc } = mkSelf();
+    svc.touchInterest('咖啡');
+    const e0 = svc.snapshot().interests[0]!;
+    e0.lastAt = Date.now() - 5 * 24 * 3600_000;
+    const before = e0.lastAt;
+
+    svc.addFinding('咖啡', '一篇关于手冲的文章');
+
+    expect(svc.snapshot().interests[0]!.lastAt).toBeGreaterThan(before);
+  });
+});
