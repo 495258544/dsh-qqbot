@@ -95,3 +95,38 @@ cd /root/.dsh/profiles/web && node -e "require.resolve('@deepseek-ai/dsh-mcp-cli
 
 以后往这个 profile 加**任何**新插件，都得用 `insert:` 语法。
 直接写条目 = 静默跳过，只在 `--dump-config` 时看到一行 warn。
+
+## 加载成功怎么验证（三条硬证据）
+
+### 1. Python 子进程被 DSH 拉起
+
+```bash
+for p in /proc/[0-9]*; do
+  c=$(tr '\0' ' ' < "$p/cmdline" 2>/dev/null)
+  case "$c" in *bili-mcp*server.py*) echo "$c";; esac
+done
+```
+
+实测：
+
+    PID 18484  /usr/bin/python3 .../bili-mcp/server.py
+    父进程 18397 = node .../bin.js web --no-open --host 127.0.0.1 --port 41245
+
+**父进程是 DSH 主进程** —— 这就是 `dsh-mcp-client` 拉起的 stdio 传输。
+
+### 2. 工具名出现在会话存档里
+
+```bash
+grep -o "mcp__bili__[a-z_]*" <会话>.v4.jsonl.zstd | sort -u
+```
+
+18 个：`bili_status` `bili_video` `bili_transcript` `bili_summary`
+`bili_danmaku` `bili_stats` `bili_relation` `bili_search` `bili_trending`
+`bili_up_videos` `bili_up_timeline` `bili_comments` `bili_inbox`
+`bili_following` `bili_follow` `bili_unfollow` `bili_dm_list` `bili_dm_read`
+
+### 3. `dsh --dump-config` 里能看到条目
+
+注意：**启动日志（DSHA_STARTUP）里不会有 mcp-bili** ——
+那个日志只报部分插件，不能作为判断依据。
+我一开始就是被这一点误导，以为没加载。
