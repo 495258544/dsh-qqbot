@@ -82,6 +82,11 @@ export interface InterestContext {
   dislikes?: Array<{ topic: string; weight: number }>;
   /** 话痨度 0~1，被嫌吵会降低 */
   chattiness: number;
+  /**
+   * 心情对"愿不愿意开口"的乘数（M31 闸门①，0.6~1.4，1.0=没影响）。
+   * 由 emotion.ts 的 speakWillingness() 算，这里只负责乘上去。
+   */
+  moodFactor?: number;
   /** 兴趣命中时的基础唤醒概率（默认 0.5） */
   baseProbability?: number;
 }
@@ -305,7 +310,9 @@ export class Waker {
     const aversion = Math.min(1, (ctx.dislikes ?? [])
       .filter((d) => d.weight > 0 && matchesTopic(text, d.topic))
       .reduce((a, b) => a + b.weight, 0));
-    const probability = Math.max(0, Math.min(1, raw * (1 - 0.6 * aversion)));
+    // 心情乘数（M31 闸门①）：心情好更愿意开口，蔫了懒得多话
+    const mood = ctx.moodFactor ?? 1;
+    const probability = Math.max(0, Math.min(1, raw * (1 - 0.6 * aversion) * mood));
     return { hit: true, topics: hits.map((h) => h.topic), probability };
   }
 

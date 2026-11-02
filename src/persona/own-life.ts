@@ -123,6 +123,12 @@ export interface OwnLifeOptions {
    * 默认 0.7：配合 4h 间隔 + 日限 4，实际每天约 2-3 次。
    */
   rollProbability?: number;
+  /**
+   * 心情对"要不要主动开口"的乘数（M31 闸门④，0.6~1.4，1.0=没影响）。
+   * 做成注入而不是 import：own-life 是独立可测的调度器，
+   * 不该知道情绪模块存在；没注入时行为与原来完全一致。
+   */
+  moodFactor?: () => number;
   /** [from, to) 小时，不叫 */
   quiet?: [number, number];
   midnightAt?: string;
@@ -177,6 +183,7 @@ export function createOwnLife(opts: OwnLifeOptions): OwnLifeHandle {
     midnightAt = '23:30',
     maxPerDay = 6,
     rollProbability = 0.7,
+    moodFactor,
     enabled = true,
     textDay = DEFAULT_TEXT_DAY,
     textMidnight = DEFAULT_TEXT_MIDNIGHT,
@@ -306,10 +313,14 @@ export function createOwnLife(opts: OwnLifeOptions): OwnLifeHandle {
       // 到点了先掷骰子（本地 Math.random，零 token）
       // intervalMs=0 是"每次 tick 都算到点"的测试/调试配置，这种情况不掷骰
       // （否则测试结果会随机化，且调试时无法稳定复现）
-      if (intervalMs > 0 && rollProbability < 1 && Math.random() >= rollProbability) {
+      //
+      // M31 闸门④：心情乘进来。心情好时更想说话，蔫了更想一个人待着。
+      // 乘完夹在 [0,1]—— 心情再好也不能超过 100% 必然开口（那就不叫"想"了）。
+      const p = Math.max(0, Math.min(1, rollProbability * (moodFactor?.() ?? 1)));
+      if (intervalMs > 0 && p < 1 && Math.random() >= p) {
         // 没掷中：什么都不做，也不推进 lastFiredAt
         // —— 下一个 tick 会再掷，概率随之累积（不会因为一次没中就永远错过）
-        log(`掷骰未中（${(rollProbability * 100).toFixed(0)}%），这次不打扰`);
+        log(`掷骰未中（${(p * 100).toFixed(0)}%），这次不打扰`);
         return { ok: false, skipped: 'roll-missed' };
       }
       return fire('day', nowTs);

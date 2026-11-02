@@ -17,8 +17,9 @@ import { Waker } from './wake.ts';
 import { SelfProfileService } from './self.ts';
 import { VoiceService } from './voice.ts';
 import { SelfNoteService } from './self-note.ts';
+import { EmotionService, speakWillingness, typingSpeedFactor, burstLimit } from './emotion.ts';
 import { runSurfRound, inSurfWindow, surfTopic, type SurfResult } from './surf.ts';
-import { clockInTz, weekdayInTz, dayInTz, DEFAULT_TZ } from './clock.ts';
+import { clockInTz, weekdayInTz, dayInTz, hourInTz, DEFAULT_TZ } from './clock.ts';
 import { Humanizer } from './humanize.ts';
 import { extractFact, extractTrait } from './fact-extract.ts';
 import { matchesTopic } from './word-match.ts';
@@ -175,6 +176,8 @@ export class PersonaService {
   public readonly voice: VoiceService;
   /** 她对自己的认识（M16：L4 层，她自己写的成长叙述） */
   public readonly selfNote: SelfNoteService;
+  /** 情绪（M31：三个数字，接在四个行为闸门上，不进提示词当描述） */
+  public readonly emotion: EmotionService;
   public readonly humanizer: Humanizer;
   public readonly budget: ProactiveBudget;
   public ownLife: OwnLifeHandle | undefined;
@@ -194,6 +197,7 @@ export class PersonaService {
     this.self = new SelfProfileService(dataDir, (m) => logger.info(m));
     this.voice = new VoiceService(dataDir, (m) => logger.info(m));
     this.selfNote = new SelfNoteService(dataDir, (m) => logger.info(m));
+    this.emotion = new EmotionService(dataDir, (m) => logger.info(m));
     if (config.roleCardPath) {
       this.role = new Role({ cardPath: config.roleCardPath, maxChars: config.roleMaxChars });
       const l = this.role.lint();
@@ -217,6 +221,8 @@ export class PersonaService {
           // M30：讨厌的话题把唤醒概率打下来（在 wake.ts 的公式里做减法）
           dislikes: (snap.dislikes ?? []).filter((i) => !i.frozen).map((i) => ({ topic: i.topic, weight: i.strength ?? i.weight })),
           chattiness: this.self.chattiness(),
+          // M31 闸门①：心情好坏影响"愿不愿意主动开口"（0.6~1.4 倍）
+          moodFactor: speakWillingness(this.emotion.current()),
           baseProbability: config.interestBaseProbability,
         };
       });
@@ -232,6 +238,11 @@ export class PersonaService {
       msPerChar: config.msPerChar,
       burstMax: config.burstMax,
       gapRange: config.gapMinMs && config.gapMaxMs ? [config.gapMinMs, config.gapMaxMs] : undefined,
+      // M31 闸门②③：情绪影响打字快慢（累了会拖）与分几条发（激动时连发）
+      mood: () => {
+        const st = this.emotion.current();
+        return { speed: typingSpeedFactor(st), burst: burstLimit(st, config.burstMax) };
+      },
     });
     this.budget = new ProactiveBudget(config.maxProactivePerDay, config.proactiveMinGapMs, logger);
     // 周期清理 Waker/Budget 的过期会话状态（审查 m9）——每 6h 一次
@@ -332,6 +343,8 @@ export class PersonaService {
       deliver,
       statePath: path.join(this.deps.dataDir, 'state', 'own-life.json'),
       intervalMs: this.deps.config.ownLifeIntervalMs,
+      // M31 闸门④：心情影响"想不想主动说话"
+      moodFactor: () => speakWillingness(this.emotion.current()),
       maxPerDay: this.deps.config.ownLifeMaxPerDay,
       // quiet = "这个时段别打扰她"，语义是**禁止**（own-life.ts: inQuiet → skipped:'quiet'）。
       //
@@ -488,6 +501,14 @@ export class PersonaService {
     const user = (entry.user ?? '').trim();
     const reply = entry.reply.trim();
     if (user || reply) this.memory.logTurn({ where, who: entry.who ?? fallbackWho, text: user, reply });
+
+    // ── M31 情绪写入点②：她说了话、而且对方也说了话 → 这是"聊起来了" ──
+    // 判据用"本轮既有她的回复又有对方的话"，而不是"来了条消息"——
+    // 后者在她没说话时也会触发，等于白送心情。
+    if (reply && user) this.emotion.onReplied();
+    // ── M31 情绪写入点④：深夜还在聊 → 精力下降 ──
+    // 时间必须用北京时间算（容器无 tzdata，getHours() 是 UTC）
+    if (user || reply) this.emotion.onNightChat(hourInTz(new Date(), DEFAULT_TZ));
 
     // ── M23：事实硬触发 ──
     // 实测失效：3 个人 89 次交互，实质记忆 0 条。

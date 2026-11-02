@@ -40,6 +40,15 @@ export interface HumanizerOptions {
   longGapChance?: number;
   /** 长停顿范围 */
   longGapRange?: [number, number];
+  /**
+   * 情绪系数提供者（M31 闸门②③）。
+   *
+   * 为什么做成注入而不是直接 import emotion.ts：
+   * Humanizer 是从 ai-companion-kit 移植来的通用工具，
+   * 不该知道"情绪"这种东西存在。注入一个返回数字的函数即可，
+   * 没注入时完全退化成原行为 —— 既有测试不用搭情绪环境。
+   */
+  mood?: () => { speed: number; burst: number };
 }
 
 export interface HumanizerIO {
@@ -61,6 +70,7 @@ export class Humanizer {
   private readonly gapRange: [number, number];
   private readonly longGapChance: number;
   private readonly longGapRange: [number, number];
+  private readonly mood: (() => { speed: number; burst: number }) | undefined;
 
   constructor(opts: HumanizerOptions = {}) {
     this.enabled = opts.enabled !== false;
@@ -72,6 +82,7 @@ export class Humanizer {
     this.gapRange = opts.gapRange ?? [700, 2600];
     this.longGapChance = opts.longGapChance ?? 0.25;
     this.longGapRange = opts.longGapRange ?? [3000, 9000];
+    this.mood = opts.mood;
   }
 
   /** 按字数算"正在输入"该持续多久 */
@@ -86,6 +97,9 @@ export class Humanizer {
     // （实测：北京 10:35 会被当成凌晨 2:35，误触发 1.6 倍慢速）。
     const h = hourInTz(new Date());
     if (h >= NIGHT.from && h < NIGHT.to) ms *= 1.6;
+    // M31 闸门②：没精神的时候打字慢（累了会拖）
+    const speed = this.mood?.().speed ?? 1;
+    ms *= speed;
     return Math.round(ms);
   }
 
@@ -101,11 +115,21 @@ export class Humanizer {
   }
 
   /**
+   * M31 闸门③：今天分几条发。
+   * 激动时更容易连发两条，蔫的时候合成一条。
+   * 上限仍受 burstMax 约束（官方 API 同一 msgId 被动回复限 4 次，要留额度）。
+   */
+  private effectiveBurstMax(): number {
+    const want = this.mood?.().burst ?? this.burstMax;
+    return Math.max(1, Math.min(this.burstMax, want));
+  }
+
+  /**
    * 把一段长回复切成"像人打出来的"若干条：
    * 先按换行切，过长的按中文标点再切，太短的相邻项合并，
    * 超过 burstMax 的合并进最后一条。
    */
-  split(text: string, max = this.burstMax): string[] {
+  split(text: string, max = this.effectiveBurstMax()): string[] {
     const raw = String(text ?? '').trim();
     if (!raw) return [];
     let parts = raw.split(/\n+/).map((s) => s.trim()).filter(Boolean);
