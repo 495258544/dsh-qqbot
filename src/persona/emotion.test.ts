@@ -742,3 +742,38 @@ describe('M34 · 正向事件日上限与边际递减（解决"永远贴顶"）'
     expect(vals.filter((v) => v > 0.85).length / vals.length).toBeLessThan(0.05);
   });
 });
+
+describe('renderSection · 她得知道自己是什么心情（M33）', () => {
+  // 同一类错误第三次出现：数据接在闸门上会影响行为，但不注入提示词，
+  // 她本人就不知道为什么。外面看是"她在闹脾气"，里面是"她不知道为什么"。
+
+  it('平静时不注入（天天说"我心情还行"本身就是 AI 味）', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'emotion-render-'));
+    expect(new EmotionService(dir).renderSection()).toBe('');
+  });
+
+  it('心情好会注入，且措辞不是"请表现出来"', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'emotion-render2-'));
+    const svc = new EmotionService(dir);
+    for (let i = 0; i < 3; i++) svc.onReplied();
+    const t = svc.renderSection();
+    expect(t).toContain('心情');
+    // 不能写成命令式：那会变成表演
+    expect(t).not.toContain('请表现');
+    expect(t).not.toContain('保持');
+  });
+
+  it('很累会注入', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'emotion-render3-'));
+    const svc = new EmotionService(dir);
+    for (let i = 0; i < 6; i++) svc.onNightChat(2);
+    expect(svc.renderSection()).toContain('累');
+  });
+
+  it('注入内容不会泄露给用户（是给她的状态，不是台词）', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'emotion-render4-'));
+    const svc = new EmotionService(dir);
+    for (let i = 0; i < 3; i++) svc.onReplied();
+    expect(svc.renderSection()).toContain('不用解释原因');
+  });
+});
