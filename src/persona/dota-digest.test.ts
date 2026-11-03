@@ -315,7 +315,9 @@ describe('tickQuery · 提炼', () => {
 
     const res = await h.handle.tickQuery(QUERY_AT);
     expect(res).toEqual({ ran: false, count: 0, reason: 'no-highlight' });
-    expect(exists(h.dataDir)).toBe(false);
+    // 2026-11-03 改：无亮点也落一个空摘要（items: []）当"今天查过了"的标记，
+    // 否则 tickQuery 每分钟重查一次。见「无亮点也要记住」那组用例。
+    expect(h.handle.snapshot().digest?.items).toEqual([]);
   });
 
   it('同一天已备好摘要 → already-prepared，不重复查', async () => {
@@ -519,7 +521,8 @@ describe('recentHours · 只要新鲜的', () => {
     const res = await h.handle.tickQuery(QUERY_AT);
     expect(res.ran).toBe(false);
     expect(res.reason).toBe('no-highlight');
-    expect(exists(h.dataDir)).toBe(false);
+    // 同样：过滤后没亮点，也落空摘要（避免每分钟重查）
+    expect(h.handle.snapshot().digest?.items).toEqual([]);
   });
 
   it('recentHours=24 时，20 小时前打的 Carry 局可以播', async () => {
@@ -662,5 +665,41 @@ describe('DotaDigest · 选不到群时要留下线索', () => {
     const second = await h.handle.tickDeliver(cst(2026, 3, 10, 10, 31))
     expect(second.sent).toBe(true)
     expect(h.handle.snapshot().digest?.deliveredAt).toBeDefined()
+  })
+})
+
+describe('DotaDigest · 无亮点也要记住「今天查过了」', () => {
+  // 2026-11-03 实测：无亮点时原来不落盘，于是 tickQuery 每次都判"还没备好"，
+  // 在 2 小时查询窗口内每分钟重查一次 Steam + OpenDota（约 120 次/天）。
+  const noHighlight = () => harness({
+    bindings: () => [{ openid: 'u_a', alias: '小周', steamId: STEAM_A }],
+    forms: {},   // 谁都没打过 → 没有亮点
+  })
+
+  it('第一次查：no-highlight，但落一个空摘要当标记', async () => {
+    const h = noHighlight()
+    const first = await h.handle.tickQuery(QUERY_AT)
+    expect(first.ran).toBe(false)
+    expect(first.reason).toBe('no-highlight')
+    const d = h.handle.snapshot().digest
+    expect(d).not.toBeNull()
+    expect(d?.forDay).toBe('2026-03-10')
+    expect(d?.items).toEqual([])
+  })
+
+  it('第二次查：判 already-prepared，不再重复打 API', async () => {
+    const h = noHighlight()
+    await h.handle.tickQuery(QUERY_AT)
+    const second = await h.handle.tickQuery(QUERY_AT + 60_000)
+    expect(second.ran).toBe(false)
+    expect(second.reason).toBe('already-prepared')
+  })
+
+  it('空摘要不会被当成可投递内容（不发空消息）', async () => {
+    const h = noHighlight()
+    await h.handle.tickQuery(QUERY_AT)
+    const r = await h.handle.tickDeliver(cst(2026, 3, 10, 10, 30))
+    expect(r).toEqual({ sent: false, reason: 'no-items' })
+    expect(h.deliverCalls).toHaveLength(0)
   })
 })

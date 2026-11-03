@@ -549,10 +549,17 @@ export function createDotaDigest(deps: DotaDigestDeps): DotaDigestHandle {
       const fresh = items.filter((it) => !recentlySent(it, now));
       const picked = sortItems(fresh).slice(0, Math.max(0, Math.floor(cfg.maxItems)));
       if (picked.length === 0) {
+        // 查完没亮点也要落一个「今天查过了」的空摘要 ——
+        // 否则 tickQuery 每次都会判"还没备好"而重查，2 小时窗口内每分钟跑一遍
+        // Steam + OpenDota（2026-11-03 实测约 120 次/天）。
+        // tickDeliver 见到空 items 会直接跳过（reason=no-items），不会发空消息。
+        const forDay = dayInTz(new Date(now), cfg.tz);
+        digest = { version: 1, queriedAt: now, forDay, items: [] };
+        save();
         if (items.length > 0) {
           logger.info(`dota-digest: 这晚只有 ${items.length} 条亮点，但最近 3 天都播过了，不重复发`);
         } else {
-          logger.info('dota-digest: 这一晚没有值得说的战绩，不落盘');
+          logger.info(`dota-digest: 这一晚没有值得说的战绩（最近 ${cfg.recentHours}h 内无亮点），今天不再重查`);
         }
         return { ran: false, count: 0, reason: 'no-highlight' };
       }
@@ -587,6 +594,8 @@ export function createDotaDigest(deps: DotaDigestDeps): DotaDigestHandle {
       return { sent: false, reason: 'stale' };
     }
     if (today < digest.forDay) return { sent: false, reason: 'not-yet' };
+    // 当天空摘要（查过但没有亮点）→ 别往下走，buildDeliverText 会拿到空数组
+    if (digest.items.length === 0) return { sent: false, reason: 'no-items' };
 
     if (digest.deliveredDay === today || digest.deliveredAt !== undefined) {
       return { sent: false, reason: 'already-delivered' };
