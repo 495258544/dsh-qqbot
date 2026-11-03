@@ -13,6 +13,7 @@
  * 战绩查询的主流程不能因为一个名字缺失就整体失败。
  */
 import { HERO_NAMES, HERO_NAMES_EN } from './heroes-data.ts';
+import { HERO_ALIASES } from './hero-aliases.ts';
 
 /** 已收录的英雄 ID 集合（校验用：判断某个 id 是不是真的存在） */
 export const HERO_IDS: ReadonlySet<number> = new Set(Object.keys(HERO_NAMES).map(Number));
@@ -45,4 +46,61 @@ export function heroNameEn(id: number): string | undefined {
 /** 这个 ID 是否是已知英雄 */
 export function isKnownHero(id: number): boolean {
   return HERO_IDS.has(Math.floor(Number(id)));
+}
+
+// ── 名字 → ID 的反查（群友用黑话聊英雄时对上号）──────────────────
+
+/**
+ * 名字归一化：忽略大小写、空格、连字符、点、撇号、下划线、全角空格。
+ * 「Anti-Mage」「anti mage」「ANTIMAGE」归一化后都是 `antimage`。
+ */
+function normName(s: string): string {
+  return String(s ?? '').toLowerCase().replace(/[\s\-'’.·_\u3000]/g, '');
+}
+
+/** 官方中文名集合（归一化后），用于校验别名表有没有写错字 */
+const OFFICIAL_CN: ReadonlySet<string> = new Set(Object.values(HERO_NAMES).map(normName));
+
+/**
+ * 名字索引：官方中文名 / 英文名 / 黑话 → 英雄 ID。
+ * 先到先得 —— 官方名优先，黑话只补官方名没占用的键，避免别名把官方名覆盖掉。
+ */
+const NAME_INDEX: ReadonlyMap<string, number> = (() => {
+  const map = new Map<string, number>();
+  for (const [idStr, cn] of Object.entries(HERO_NAMES)) {
+    const k = normName(cn);
+    if (k !== '' && !map.has(k)) map.set(k, Number(idStr));
+  }
+  for (const [idStr, en] of Object.entries(HERO_NAMES_EN)) {
+    const k = normName(en);
+    if (k !== '' && !map.has(k)) map.set(k, Number(idStr));
+  }
+  for (const [alias, cn] of Object.entries(HERO_ALIASES)) {
+    const id = map.get(normName(cn));
+    if (id === undefined) continue;   // 官方名写错了 —— unresolvedAliases() 会报出来
+    const k = normName(alias);
+    if (k !== '' && !map.has(k)) map.set(k, id);
+  }
+  return map;
+})();
+
+/**
+ * 名字 → 英雄 ID。接受官方中文名、英文名、群里的黑话（敌法/剑圣/白牛/AM/SF…）。
+ *
+ * 找不到返回 undefined —— 调用方自己决定怎么说"没认出来"，
+ * 不要猜一个最像的（猜错比不认更糟：她会照着错英雄编一段分析）。
+ */
+export function heroIdByName(name: string): number | undefined {
+  const k = normName(name);
+  return k === '' ? undefined : NAME_INDEX.get(k);
+}
+
+/**
+ * 别名表里"官方中文名对不上"的条目（诊断用，正常应为空）。
+ * 写错一个字，这条别名就会静默失效 —— 测试里用它兜底。
+ */
+export function unresolvedAliases(): string[] {
+  return Object.entries(HERO_ALIASES)
+    .filter(([, cn]) => !OFFICIAL_CN.has(normName(cn)))
+    .map(([alias, cn]) => `${alias} → ${cn}`);
 }
