@@ -64,6 +64,36 @@ export interface SelfInterest {
   findings?: Array<{ at: number; summary: string; source?: string }>;
 }
 
+/**
+ * 一条「我看过的东西」（M37）。
+ *
+ * ## 为什么不用 findings
+ *
+ * `findings` 存的是**外部情报**：冲浪搜到的网页摘要。
+ * 那是"我从网上查到的"。
+ *
+ * 这里存的是**她自己的经历**：今天看了哪个视频、看懂了什么、什么感觉。
+ * 那是"我今天经历了什么"。
+ *
+ * 混在一起会出事：冲浪一次刷进 8 条 findings 会把真正的经历挤掉
+ * （`findings` 上限就是 8），而她自己的日子反而留不下来。
+ */
+export interface Watching {
+  /** 标题（人看得懂的，不是 BV 号） */
+  title: string;
+  /** 来源标识（如 BV 号），用于去重 */
+  ref?: string;
+  /** 她看完记下的一句：讲了什么 / 什么感觉 */
+  note?: string;
+  /** 什么时候看的 */
+  at: number;
+  /** 有没有真的看完（从中间跳进去的不算看完） */
+  done?: boolean;
+}
+
+/** 观看记录上限。人的"最近看过"不会记很久，但也不该只剩 3 条 */
+export const MAX_WATCHING = 20;
+
 /** 社交状态（被嫌吵后的收敛） */
 export interface SelfEngagement {
   /** 话痨度 1.0 正常 → 0.1 几乎不说话 */
@@ -122,6 +152,14 @@ export interface SelfProfile {
   lastSurfAt?: number;
   /** 她想要的功能（提给用户的） */
   wishes: WishRequest[];
+  /**
+   * 最近看过什么（M37）。
+   *
+   * 和 `interests` 的区别：interests 是"我喜欢什么话题"（长期的），
+   * watching 是"我最近看了这个"（一次性的经历）。
+   * 和 `findings` 的区别：findings 是查到的情报，watching 是自己经历的。
+   */
+  watching?: Watching[];
 }
 
 /** 冻结线：强度低于此值 → 冻结（不删除，保留可追溯） */
@@ -196,6 +234,7 @@ function emptyProfile(): SelfProfile {
     engagement: { chattiness: 1.0, lastComplainedAt: 0, complaints: 0 },
     screenWatch: { enabled: false, allowedApps: [], intervalMs: 30 * 60 * 1000 },
     wishes: [],
+    watching: [],
   };
 }
 
@@ -225,6 +264,7 @@ export class SelfProfileService {
         screenWatch: { ...base.screenWatch, ...(raw.screenWatch ?? {}) },
         lastSurfAt: raw.lastSurfAt,
         wishes: Array.isArray(raw.wishes) ? raw.wishes : base.wishes,
+        watching: Array.isArray(raw.watching) ? raw.watching : base.watching,
       };
     } catch (err) {
       this.log?.(`self: 读取失败，用空画像: ${err instanceof Error ? err.message : String(err)}`);
@@ -578,6 +618,80 @@ export class SelfProfileService {
     if (e.frozen && this.strengthOf(e) >= REVIVE_THRESHOLD) e.frozen = false;
     this.data.lastSurfAt = now;
     this.save();
+  }
+
+  /**
+   * 记一条「我看了什么」（M37）。
+   *
+   * ## 为什么按 ref 去重而不是无限追加
+   *
+   * 同一个视频她可能看两次（第一次没看完、第二次补上）。
+   * 无限追加会让"最近看过"变成一串重复的 BV 号，
+   * 而人回忆"我最近看了什么"时，一个片子只算一次。
+   * 所以同 ref 覆盖旧的，保留最新的 note 和时间。
+   *
+   * 没有 ref 的（比如她随口提到看过的）就按标题去重。
+   */
+  addWatching(w: { title: string; ref?: string; note?: string; done?: boolean }, now = Date.now()): void {
+    const title = String(w.title ?? '').trim();
+    if (!title) return;
+    this.data.watching = this.data.watching ?? [];
+    const key = w.ref || title;
+    const idx = this.data.watching.findIndex((x) => (x.ref || x.title) === key);
+    const entry: Watching = {
+      title,
+      ...(w.ref ? { ref: w.ref } : {}),
+      // note 只在有新内容时覆盖，避免"补看一次"把之前的感受冲掉
+      ...(w.note ? { note: String(w.note).slice(0, 120) } : (idx >= 0 && this.data.watching[idx]!.note
+        ? { note: this.data.watching[idx]!.note } : {})),
+      at: now,
+      ...(w.done ? { done: true } : (idx >= 0 && this.data.watching[idx]!.done ? { done: true } : {})),
+    };
+    if (idx >= 0) this.data.watching.splice(idx, 1);
+    this.data.watching.push(entry);
+    // 上限：只留最近的
+    while (this.data.watching.length > MAX_WATCHING) this.data.watching.shift();
+    this.save();
+  }
+
+  /**
+   * 最近看过什么，新的在前。
+   *
+   * 排序用 `at`，但同一毫秒内加的多条会打平（实测踩到：
+   * 快速连续记 25 条，`at` 全一样，`sort` 结果不稳定，
+   * "最新的"取到的是 T23 而不是 T24）。
+   * 数组本身是 push 进去的，所以**越靠后越新** —— 用下标做次级排序即可。
+   */
+  recentWatching(n = 5): Watching[] {
+    const arr = this.data.watching ?? [];
+    return arr
+      .map((w, i) => ({ w, i }))
+      .sort((a, b) => (b.w.at - a.w.at) || (b.i - a.i))
+      .slice(0, n)
+      .map((x) => x.w);
+  }
+
+  /**
+   * 渲染成可注入的提示段。
+   *
+   * 只说**事实**（看了什么、什么时候），不下"这说明你爱看X"这种结论——
+   * 跟 M33 那条一样：解释权留给她自己。
+   */
+  renderWatching(n = 4): string {
+    const arr = this.recentWatching(n);
+    if (arr.length === 0) return '';
+    const days = (ms: number): string => {
+      const d = Math.floor((Date.now() - ms) / 86_400_000);
+      if (d <= 0) return '今天';
+      if (d === 1) return '昨天';
+      return `${d} 天前`;
+    };
+    const lines = arr.map((w) => {
+      const parts = [`${days(w.at)}看的《${w.title}》`];
+      if (w.note) parts.push(`当时记了一句：${w.note}`);
+      return '- ' + parts.join('，');
+    });
+    return `【你最近看过的东西】\n${lines.join('\n')}\n（这是你自己的记录，不用主动汇报。）`;
   }
 
   // ───────────── 收敛（被嫌吵） ─────────────

@@ -5,6 +5,9 @@
  * 注册形态对齐 media/send-file-tool.ts：tools 服务缺失时优雅降级。
  */
 import { execFileSync } from 'node:child_process';
+import { existsSync, readdirSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
 import type { Context } from '@deepseek-ai/cordis';
 import type { ContentBlock } from '@deepseek-ai/dsh-llm';
 import type { PersonaService } from './service.ts';
@@ -34,27 +37,107 @@ interface ToolsRegistryLike {
  * 自己切会切掉结构（比如 JSON 截断），而且升级后行为不一致。
  * 让上游做截断，我们只管取字段。
  */
+/**
+ * bili CLI 的调用结果。
+ *
+ * `ok:false` 时 `error.code` 说明到底是哪种失败 —— 这一点很关键：
+ * 原来失败一律返回 undefined，上层只能说"没查到"，模型就自己编内容
+ * （2026-11-02 她编了一篇《修鞋摊子收起来了》就是这条链）。
+ */
+interface BiliResult {
+  ok?: boolean;
+  data?: unknown;
+  error?: { code?: string; message?: string };
+  items?: unknown;
+}
+
+/**
+ * 找 bili 可执行文件。
+ *
+ * 为什么不能只依赖 PATH：`pip install bili-agent` 装出来的脚本落在
+ * Python 的 `Scripts` 目录里，而 WorkBuddy 内置的那个 Python 目录
+ * **默认不在 PATH**（实测 `C:\Users\...\.workbuddy\binaries\python\versions\3.13.12\Scripts`）。
+ * 宿主进程的 PATH 又是启动时的快照，加了也不用，只能重启。
+ *
+ * 所以这里主动扫一遍常见位置；成功的结果缓存（免每轮 stat 一堆路径），
+ * 失败不缓存 —— 这样**装完 bili 下一句话就能用，不用重启**。
+ */
+function biliCommand(): string {
+  if (cachedBili !== undefined) return cachedBili;
+  const exe = process.platform === 'win32' ? 'bili.exe' : 'bili';
+  const candidates: string[] = [];
+  const envBin = process.env.BILI_BIN;
+  if (envBin) candidates.push(envBin);
+  // WorkBuddy 内置 Python：版本号不固定，扫一遍
+  const wbPy = join(homedir(), '.workbuddy', 'binaries', 'python', 'versions');
+  try {
+    for (const v of readdirSync(wbPy)) candidates.push(join(wbPy, v, 'Scripts', exe));
+  } catch { /* 没这个目录就算了 */ }
+  candidates.push(
+    join(homedir(), 'AppData', 'Roaming', 'Python', 'Scripts', exe),
+    'C:\\Python315\\Scripts\\' + exe,
+    'C:\\Python314\\Scripts\\' + exe,
+    'C:\\Python313\\Scripts\\' + exe,
+    join(homedir(), '.local', 'bin', exe),
+  );
+  for (const c of candidates) {
+    try {
+      if (c && existsSync(c)) { cachedBili = c; return c; }
+    } catch { /* 权限问题就跳过 */ }
+  }
+  // 找不到就交给 PATH，让 execFileSync 抛 ENOENT → 上层报 no_bili
+  return 'bili';
+}
+let cachedBili: string | undefined;
+
 function runBili(
   argv: string[],
   timeoutMs = 60_000,
-): { ok?: boolean; data?: unknown; error?: { code?: string; message?: string }; items?: unknown } | undefined {
+): BiliResult {
   try {
-    const out = execFileSync('bili', argv, {
+    const out = execFileSync(biliCommand(), argv, {
       encoding: 'utf8',
       timeout: timeoutMs,
       maxBuffer: 16 * 1024 * 1024,
     });
-    return JSON.parse(out) as { ok?: boolean; data?: unknown };
+    try {
+      return JSON.parse(out) as BiliResult;
+    } catch {
+      return { ok: false, error: { code: 'bad_json', message: 'bili 返回的不是合法 JSON' } };
+    }
   } catch (err) {
     // 命令不存在 / 超时 / 非零退出：都不抛，让调用方走"拿不到内容"分支。
     // bili 失败时也会输出 JSON（{ok:false,error}），但 execFileSync 对非零退出抛异常，
     // 所以这里要把 stdout 再捞一次。
-    const e = err as { stdout?: string; message?: string };
+    const e = err as { stdout?: string; message?: string; code?: string | number; killed?: boolean; signal?: string };
     if (e?.stdout) {
-      try { return JSON.parse(e.stdout) as { ok?: boolean; data?: unknown }; } catch { /* 不是 JSON */ }
+      try { return JSON.parse(e.stdout) as BiliResult; } catch { /* 不是 JSON */ }
     }
-    return undefined;
+    // 分不清"bili 没装"和"视频不存在"是最坑的：上层只能说"没查到"，
+    // 模型于是自己编。这里把三种情况分开，让上层能说人话。
+    let code = 'spawn_failed';
+    if (e?.code === 'ENOENT') code = 'no_bili';
+    else if (e?.killed || e?.signal) code = 'timeout';
+    const message = code === 'no_bili'
+      ? 'bili 命令不存在（没安装，或不在 PATH 里）'
+      : code === 'timeout'
+        ? `bili 超时（${Math.round(timeoutMs / 1000)}s）`
+        : String(e?.message ?? '执行失败');
+    return { ok: false, error: { code, message } };
   }
+}
+
+/** 把 BiliResult 的失败翻译成"她能照着说"的一句话；成功返回空串 */
+function biliFailure(r: BiliResult, what: string): string {
+  const code = String(r.error?.code ?? '');
+  const msg = String(r.error?.message ?? '');
+  if (code === 'no_bili') return `${what}不了：这台机器上没装 bili（B 站命令行工具）。不是你搜得不对，是工具不可用 —— 直接说明查不了，别编。`;
+  if (code === 'not_logged_in' || /-101|账号未登录/.test(msg)) {
+    return `${what}需要登录 B 站（这台机器还没扫码登录）。跟他说"这个得先登录才能看"，别自己编内容。`;
+  }
+  if (code === 'timeout') return `${what}超时了（${msg}），过一会儿再试。`;
+  if (code === 'bad_json') return `${what}失败：返回格式不对（bili 版本可能变了）。`;
+  return `${what}失败：${code || '未知错误'}${msg ? ` - ${msg}` : ''}`;
 }
 
 /** mm:ss */
@@ -745,6 +828,74 @@ export function registerPersonaTools(
   });
 
   /**
+   * qq_note_watched —— 记下"我看了什么、当时怎么想"(M37)。
+   *
+   * ## 为什么要单独一个工具，而不是让她调 MCP 记
+   *
+   * MCP 的 `watch_video` 只返回内容，不写她的记忆。
+   * 而"我看过并觉得xxx"是**她自己的经历**，得落在 self.json 里，
+   * 下次才能在提示里出现。
+   *
+   * ## 为什么一条只写一句 note
+   *
+   * 写得长就变成观后感作业。人回忆"那个视频怎么样"时是一句话，
+   * 不是三段分析。所以 note 限 120 字，可以完全不填。
+   */
+  reg({
+    name: 'qq_note_watched',
+    description:
+      '记下你刚看过的东西：标题 + 一句自己的话（讲了什么、什么感觉，都可以）。'
+      + '不用写观后感，一句话就行；也可以只记标题不写感受。'
+      + '下次你会记得自己看过它 —— 而不是每次被问到都现编。',
+    parameters: {
+      type: 'object',
+      properties: {
+        title: { type: 'string', description: '看的什么，如《华为配置专题03 DHCP VLAN配置》' },
+        ref: { type: 'string', description: '可选：BV 号之类的标识，用来去重' },
+        note: { type: 'string', description: '可选：一句你自己的话（≤120 字）' },
+        done: { type: 'boolean', description: '可选：看完了吗（从中间跳进去的可以填 false）' },
+      },
+      required: ['title'],
+      additionalProperties: false,
+    },
+    output: {
+      schema: {
+        type: 'object',
+        properties: {
+          ok: { type: 'boolean' },
+          total: { type: 'number' },
+          error: { type: 'string' },
+        },
+        required: ['ok'],
+        additionalProperties: false,
+      },
+      render: (_a: unknown, v: unknown): ContentBlock[] => {
+        const r = v as { ok: boolean; total?: number; error?: string };
+        return [{
+          type: 'text',
+          text: r.ok ? `记下了（你最近看过 ${r.total ?? '?'} 个）` : `没记成（${r.error ?? '未知'}）`,
+        }];
+      },
+    },
+    async execute(args: unknown): Promise<Record<string, unknown>> {
+      const a = args as { title?: string; ref?: string; note?: string; done?: boolean };
+      const title = String(a.title ?? '').trim();
+      if (!title) return { ok: false, error: '标题不能空' };
+      try {
+        persona.self.addWatching({
+          title,
+          ...(a.ref ? { ref: String(a.ref) } : {}),
+          ...(a.note ? { note: String(a.note) } : {}),
+          ...(a.done === true ? { done: true } : {}),
+        });
+        return { ok: true, total: persona.self.recentWatching(99).length };
+      } catch (err) {
+        return { ok: false, error: err instanceof Error ? err.message : String(err) };
+      }
+    },
+  });
+
+  /**
    * qq_note_activity —— 让她记下"这次自由时间做了什么"。
    *
    * 为什么需要（M24，开源调研结论）：
@@ -861,9 +1012,11 @@ export function registerPersonaTools(
         page: { type: 'number', description: '合集看到第几 P（默认 1）' },
         want: {
           type: 'string',
-          enum: ['summary', 'subtitle', 'danmaku', 'frames', 'all'],
+          enum: ['summary', 'subtitle', 'danmaku', 'frames', 'all', 'inbox', 'trending', 'recommend', 'comments'],
           description: '要什么：summary=AI总结+分章提纲（默认）、subtitle=字幕（按分钟压缩、带时间戳）、'
-            + 'danmaku=观众弹幕、frames=抽画面帧、all=全都拿',
+            + 'danmaku=观众弹幕、frames=抽画面帧、all=全都拿；'
+            + 'inbox=我的消息中心、trending=B站热门、recommend=首页推荐（这三个不用 bvid）、'
+            + 'comments=某视频的评论（要 bvid）',
         },
       },
       additionalProperties: false,
@@ -873,6 +1026,22 @@ export function registerPersonaTools(
         type: 'object',
         properties: {
           ok: { type: 'boolean' },
+          // 具体失败原因（没字幕 / 没登录 / bili 没装）——
+          // 比笼统的"视频信息拿不到"有用得多，模型不会当成"视频不存在"
+          biliError: { type: 'string' },
+          comments: {
+            type: 'array',
+            items: {
+              type: 'object',
+              properties: {
+                user: { type: 'string' },
+                text: { type: 'string' },
+                likes: { type: 'number' },
+              },
+              required: ['user', 'text', 'likes'],
+              additionalProperties: false,
+            },
+          },
           title: { type: 'string' },
           page: { type: 'number' },
           // 合集目录：四十集看不过来时的第一层答案
@@ -965,7 +1134,8 @@ export function registerPersonaTools(
         required: ['ok'],
         additionalProperties: false,
       },
-      render: (_a: unknown, v: unknown): ContentBlock[] => {
+      render: (a: unknown, v: unknown): ContentBlock[] => {
+        const inp = (a ?? {}) as { want?: string };
         const r = v as {
           ok: boolean; title?: string; page?: number;
           pages?: Array<{ page: number; title: string; length: string }>;
@@ -975,10 +1145,15 @@ export function registerPersonaTools(
           danmakuPeaks?: Array<{ t: string; count: number; top: string[] }>;
           danmaku?: Array<{ t: string; text: string }>;
           frames?: Array<{ t: string; path: string }>;
+          comments?: Array<{ user: string; text: string; likes: number }>;
           items?: { bvid: string; title: string }[];
+          biliError?: string;
           error?: string;
         };
-        if (!r.ok) return [{ type: 'text', text: `没查到（${r.error ?? '未知原因'}）` }];
+        if (!r.ok) {
+          // biliError 比 error 具体（"没字幕" vs "拿不到"），优先显示
+          return [{ type: 'text', text: `没查到（${r.biliError ?? r.error ?? '未知原因'}）` }];
+        }
         const parts: string[] = [];
         if (r.title) parts.push(`《${r.title}》${r.page && r.page > 1 ? ` 第 ${r.page} P` : ''}`);
         // 合集先给目录 —— 用户要挑着看，先得知道有哪些集
@@ -1024,27 +1199,92 @@ export function registerPersonaTools(
         if (r.frames?.length) {
           parts.push('画面帧（图片路径）：\n' + r.frames.map((x) => `  ${x.t} ${x.path}`).join('\n'));
         }
-        if (r.items?.length) {
-          parts.push('搜到这些：\n' + r.items.map((x, i) => `${i + 1}. ${x.title}（${x.bvid}）`).join('\n'));
+        if (r.comments?.length) {
+          parts.push('评论（按热度）：\n' + r.comments.slice(0, 12).map((c, i) =>
+            `  ${i + 1}. ${c.likes > 0 ? `[${c.likes}赞] ` : ''}${c.user}：${c.text}`).join('\n')
+            + '\n\n↑ 挑有信息量的说，别整段复述。');
         }
+        if (r.items?.length) {
+          // 措辞跟着 want 走：对着消息中心说"搜到这些"很怪
+          const label = inp.want === 'inbox' ? '消息中心：'
+            : inp.want === 'trending' ? '现在 B 站热门：'
+              : inp.want === 'recommend' ? '首页推荐：'
+                : '搜到这些：';
+          parts.push(label + '\n' + r.items.map((x, i) => `${i + 1}. ${x.title}${x.bvid ? `（${x.bvid}）` : ''}`).join('\n'));
+        }
+        // 成功但有一部分没拿到（比如没字幕）：说清楚，别让她以为全拿到了
+        if (r.biliError) parts.push(`注意：${r.biliError}`);
         return [{ type: 'text', text: parts.join('\n\n') || '（空）' }];
       },
     },
     async execute(args: unknown): Promise<Record<string, unknown>> {
       const a = args as { bvid?: string; query?: string; page?: number; want?: string };
-      const run = (argv: string[]): { ok?: boolean; data?: unknown; error?: { message?: string } } | undefined =>
-        runBili(argv);
+      const run = (argv: string[]): BiliResult => runBili(argv);
+      const want = String(a.want ?? 'summary');
+
+      // ── 浏览类：不需要 BV 号 ──
+      // 这三条走 bili 自己的 feed / hot 命令。返回结构随 bili 版本变化，
+      // 所以解析做得宽容，解析不出来就如实说，不要假装"没有内容"。
+      const browse = want === 'inbox' ? ['feed', 'inbox']
+        : want === 'trending' ? ['hot', 'popular']
+          : want === 'recommend' ? ['feed', 'recommend']
+            : null;
+      if (browse !== null) {
+        const r = run(browse);
+        if (r.ok === false) return { ok: false, error: biliFailure(r, '看 B 站首页') };
+        const d = (r.data ?? {}) as Record<string, unknown>;
+        const candidate = d.items ?? d.list ?? d.videos ?? d.data ?? d.feed;
+        const arr = Array.isArray(candidate) ? (candidate as Array<Record<string, unknown>>) : [];
+        const items = arr.slice(0, 10).map((x) => {
+          const o = (x ?? {}) as Record<string, unknown>;
+          return {
+            bvid: String(o.bvid ?? o.bv ?? ''),
+            title: String(o.title ?? o.name ?? ''),
+          };
+        }).filter((x) => x.title !== '');
+        if (!items.length) {
+          return { ok: false, error: '拿到数据了但解析不出标题（bili 版本可能变了，用搜索代替）' };
+        }
+        return { ok: true, items };
+      }
+
+      // ── 评论：要 BV 号 ──
+      if (want === 'comments') {
+        const bv = String(a.bvid ?? '').trim();
+        if (!bv) return { ok: false, error: '看评论需要 bvid' };
+        const r = run(['comment', 'list', bv]);
+        if (r.ok === false) return { ok: false, error: biliFailure(r, '拉评论') };
+        const d = (r.data ?? {}) as Record<string, unknown>;
+        const src = d.items ?? d.comments ?? d.list ?? d.data;
+        const arr = Array.isArray(src) ? (src as Array<Record<string, unknown>>) : [];
+        const comments = arr.slice(0, 20).map((x) => {
+          const o = (x ?? {}) as Record<string, unknown>;
+          // 实测 bili 1.2.1 的字段是 user:{name}，不是 uname
+          const u = o.user as { name?: string } | undefined;
+          const author = o.author as { name?: string } | undefined;
+          return {
+            user: String(u?.name ?? author?.name ?? o.uname ?? ''),
+            text: String(o.content ?? o.message ?? o.text ?? ''),
+            likes: Number(o.like ?? o.likes ?? 0) || 0,
+          };
+        }).filter((x) => x.text !== '');
+        if (!comments.length) return { ok: false, error: '没拿到评论（可能没有评论，或者没登录 B 站）' };
+        return { ok: true, comments };
+      }
 
       // 没给 BV → 搜索
       if (!a.bvid) {
         const q = String(a.query ?? '').trim();
         if (!q) return { ok: false, error: '需要 bvid 或 query' };
         const r = run(['search', 'video', q]);
-        const d = (r?.data ?? {}) as { items?: Array<{ bvid?: string; title?: string }> };
+        // 关键：工具坏了和搜不到是两回事。
+        // 原来一律返回 undefined → "没查到" → 模型自己编内容。
+        if (r.ok === false) return { ok: false, error: biliFailure(r, '搜索') };
+        const d = (r.data ?? {}) as { items?: Array<{ bvid?: string; title?: string }> };
         const items = (d.items ?? []).slice(0, 5)
           .filter((x) => x.bvid && x.title)
           .map((x) => ({ bvid: x.bvid as string, title: x.title as string }));
-        if (!items.length) return { ok: false, error: '没搜到' };
+        if (!items.length) return { ok: false, error: '没搜到相关内容（换个关键词试试，别硬编）' };
         return { ok: true, items };
       }
 
@@ -1054,6 +1294,11 @@ export function registerPersonaTools(
         ? String(a.want) : 'summary') as 'subtitle' | 'danmaku' | 'frames' | 'all' | 'summary';
 
       const info = run(['video', 'info', bvid]);
+      // info 是最基础的一步，它失败说明视频不存在 / 需要登录 / bili 没装 ——
+      // 继续查字幕弹幕都是白费，而且最后只会得到"视频信息拿不到"这种含糊答案。
+      if (info.ok === false) {
+        return { ok: false, error: biliFailure(info, '查视频') };
+      }
       const idata = (info?.data ?? {}) as {
         title?: string;
         duration?: number;
@@ -1102,9 +1347,22 @@ export function registerPersonaTools(
       // 正是用户抱怨的"整段倒出来"。带时间轴的只有 subtitle（不带 --text）。
       if (mode === 'subtitle' || mode === 'all') {
         const r = run(['video', 'subtitle', bvid, '-p', String(page)]);
-        const items = ((r?.data ?? {}) as { items?: Array<{ from?: number; to?: number; content?: string }> }).items ?? [];
+        const items = ((r.data ?? {}) as { items?: Array<{ from?: number; to?: number; content?: string }> }).items ?? [];
         const packed = condenseSubtitlesByMinute(items);
         if (packed.length) out.subtitleOutline = packed;
+        else if (r.ok === false) {
+          // 分清楚三种情况 —— 一刀切"拿不到"会让模型以为要换关键词重搜，
+          // 实际可能是"这视频本来就没字幕"或"没登录"。
+          const code = String(r.error?.code ?? '');
+          const msg = String(r.error?.message ?? '');
+          if (/^no[_.-]?sub(title)?$|没有字幕|无字幕|字幕不存在/i.test(code) || /没有字幕|无字幕/i.test(msg)) {
+            out.biliError = '这个视频没有字幕（不是查询失败，换个信息源或直接看简介）';
+          } else if (/auth|login|credential|未登录|登录/i.test(code + msg)) {
+            out.biliError = '没登录 B 站，字幕拿不到（其他信息还能用）';
+          } else {
+            out.biliError = `字幕拿不到：${code || '未知'}${msg ? ` - ${msg}` : ''}`;
+          }
+        }
       }
 
       if (mode === 'danmaku' || mode === 'all') {
@@ -1136,10 +1394,13 @@ export function registerPersonaTools(
         if (fr.length) out.frames = fr;
       }
 
-      const hasContent = out.summary || out.subtitleOutline || out.danmaku || out.danmakuPeaks || out.frames;
+      const hasContent = out.summary || out.subtitleOutline || out.danmaku || out.danmakuPeaks || out.frames
+        || out.comments || out.items;
       if (!hasContent) {
         // 合集只给目录也算成功（用户接下来要挑 P）
         if (isCollection) return out;
+        // 有具体原因就带上（没字幕 / 没登录），别让模型自己猜
+        if (out.biliError) return { ...out, ok: false };
         return { ok: false, error: '视频信息拿不到' };
       }
       return out;

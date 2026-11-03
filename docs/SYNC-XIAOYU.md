@@ -186,3 +186,104 @@ git log --oneline e220f56..origin/xiaoyu          # 上次同步点之后的新�
 `diary.ts` / `screen-watch.ts` 这两个时区 bug 是**上一轮（e220f56）漏掉的** ——
 当时只看了 `clock.ts` 的改动就以为已经覆盖，实际上这两个文件本地仍等于 `f5b34a1`。
 教训：**同步"时区/工具"类改动时，要 grep 一遍全仓的 `getHours()/getDate()`，而不是只跟改了哪个文件。**
+
+---
+
+## 2026-11-03 · 第四次同步（远端 `272537a`，7 个提交）
+
+| 项 | 值 |
+|---|---|
+| 远端同步点 | `272537a`（上次 `4afe637`） |
+| 主题 | B 站能力再改造（官方 MCP）+ 口癖/冲浪三个真 bug + M37 记住看过什么 |
+
+### 吸收了
+
+| 提交 | 内容 | 方式 |
+|---|---|---|
+| `a6e8081` ① | **口癖管线停摆**：`PENDING_TTL_MS` 5 分钟 → 60 分钟。本地实锤：`voice.json` 的 `updatedAt` 停在 11-01 22:50，36 小时没更新，`habits` 0 条 | 整取 `voice.ts`（见下） |
+| `a6e8081` ② | **单字字典页**：新增 `coreKeywords()`，长口语句压成核心词。本地 `surf.ts` 同样缺 | 手工并 +32 行 |
+| `a6e8081` ③ | **冲浪无痕**：每次 tick 记窗口/距上次 | 手工并，但**改用 info**（见下） |
+| `9e21060` | **M37 watching**：`self.ts` +114（上限 20，与 `findings` 分开）、`qq_note_watched` 工具、注入段 `order 66.2` | self.ts 整取 / tools.ts 手工并 / service.ts 手工并 |
+
+### 关键：`voice.ts` 整取，不是只改一行常量
+
+**上一轮（第三次同步）漏取了 `voice.ts`。** 本地当时等于分叉点 `f5b34a1`，比 `4afe637` 少 102 行：
+
+- `isExpressive()`：挡 `的。` / `多。` / `行,` / `叫小羽我` 这类碎片（M33/M34 四道判据）
+- `PROMOTE_MIN_COUNT = 3`（原来 2）
+- `consider()` 的 `matched` 证据链（原来 `evidence: samples.slice(0,2)` 配上 `count: n`，让"抽出来就转正"恒成立）
+- 中间词 3~4 字（原来 2 字，抽出的 `出来`/`自己`/`句话` 全是中文公共零件）
+
+**只把 TTL 放宽会放大副作用**：能判定的 pending 变多 → 垃圾碎片变多 → 因为护栏缺失而全部立刻转正并注入提示词，比停摆更糟。所以这次整取 `a6e8081:src/persona/voice.ts`（含护栏 + 新 TTL），测试也一并取（+85 行）。
+
+### 关键：`log.debug` 在这个宿主不落盘
+
+`a6e8081` ③ 用的是 `log.debug`，但实测 `desktop-next.log` 里 `[debug]` 出现 **0 次** —— 照抄等于没修。改成 `log.info` + 按天节流：窗口内每 tick 一条（2 小时窗口约 4 条），窗口外每天只记第一条。**以后同步任何"加日志"的改动都要先确认本地 debug 是否输出。**
+
+### 跳过：`ff0da01` 换官方 bili MCP
+
+远端这次给了有力反驳：*"她有 bash ⇒ `run_bili` 不构成任何额外权限"* —— **这个反驳成立**。但反驳的只是"安全"一条，真正的代价在别处：
+
+| 项 | 官方 MCP | 本地 `qq_bili_check` |
+|---|---|---|
+| 工具 schema 常驻 | 17 个 ≈ **5861 tokens** | 1 个 ≈ 1.2k |
+| 返回值 | 纯 text，无 outputSchema | 结构化 `frames[]`/`subtitleOutline[]`/`items[].bvid` |
+| bvid | 从纯文本里抄（错一位就是一次无效调用） | 可编程字段 |
+| 画面帧 | 无专用工具，要她拼 `run_bili`（`-q hd` 还要 ffmpeg） | `want=frames` 一等入口，可转 `qqbot_describe_image` / `qqbot_send_file` |
+| 挑段指令 | 只在 description | 钉在 `render()` 返回结果里 |
+
+它净增的 7 项（inbox/trending/recommend/comments/私信/写操作/login）**不需要 MCP**：`bili feed inbox`、`bili hot popular`、`bili comment list` 都是 enum 分支的事，schema 增量约 200–400 tokens（是 5861 的十分之一）。
+
+依赖成本：现网 bili 是 `pip --break-system-packages` 装的，官方 hint 让用 `uv tool install` → 会装出**两份 bili-agent**，PATH 里谁是 `bili` 看先后，很可能弄乱现有登录态。还要系统 python 装 `mcp` SDK、宿主 `cordis.patch.yml` 加 `insert`、`dsh-mcp-client` 手动软链。**而这些配置在宿主 profile 里、不在仓库里 —— 换台机器就哑。**
+
+`272537a` 写播放历史是 `bili-mcp/history_report.py`（Python），本地连 `bili-mcp/` 都没有，跟不了。
+
+### 顺带：bili 工具的失败分类（自建，非远端）
+
+改造 `runBili` 让它返回 `error.code`，不再一律 `undefined`：
+
+| code | 含义 | 输出的那句话 |
+|---|---|---|
+| `no_bili` | 命令不存在 | "这台机器上没装 bili。不是你搜得不对，是工具不可用 —— 直接说明查不了，别编" |
+| `timeout` | 超时 | "超时了，过一会儿再试" |
+| `bad_json` | 返回不是 JSON | "返回格式不对（bili 版本可能变了）" |
+| `spawn_failed` | 其他 | 带原始 message |
+
+**这条比能力扩展更重要**：2026-11-02 她编了一篇《修鞋摊子收起来了》，根因就是"工具坏了"和"搜不到"在上层看起来一模一样。字幕失败也拆成三种（没字幕 / 没登录 / 其他）。
+
+### 教训汇总（给下次同步）
+
+1. **整取某个模块前先 `git diff <同步点> HEAD` 看本地缺了什么** —— `voice.ts` 就是"以为取过、其实少 102 行"。
+2. **加日志的改动要确认日志级别真的输出**（`debug` 在这个宿主不落盘）。
+3. **"净增能力"要连成本一起算**：17 个工具的 schema 常驻成本是每条消息都付的。
+
+### 附带查明：本机原本**没有装 bili CLI**
+
+准备扩展 `qq_bili_check` 时才发现，`execFileSync('bili', ...)` 在这台机器上一直抛 ENOENT ——
+`bili-agent` 从来没装成功过（之前判断"本机 bili CLI 已装好"是错的，那是远端的机器）。
+这解释了 2026-11-02 她为什么编造了一篇文章：查不到任何东西，又不知道是工具坏了。
+
+这次装了 `bili-agent==1.2.1`（Python 3.13.12，WorkBuddy 内置）。两个坑：
+
+1. **装在 `C:/Users/.../.workbuddy/binaries/python/versions/3.13.12/Scripts/`，该目录不在 PATH**，
+   而宿主进程的 PATH 是启动时快照。所以 `runBili` 不再只依赖 PATH，改为主动扫常见位置
+   （`BILI_BIN` 环境变量 → WorkBuddy 内置 python 各版本的 Scripts → APPDATA\Python\Scripts →
+   C:/Python31x/Scripts → ~/.local/bin），成功结果缓存、失败不缓存 —— **装完不用重启就能用**。
+   （和之前 bun 的处理是同一套思路。）
+2. **`ok:false` 时退出码是 3，不是 1**。`execFileSync` 照样抛异常，但 stdout 里有完整 JSON，
+   原有"从 `err.stdout` 再捞一次"的逻辑能接住。
+
+实测各命令的**登录要求**（重要，决定了能给她什么）：
+
+| 命令 | 未登录 | 备注 |
+|---|---|---|
+| `bili search video` | ✅ 可用 | 返回 `data.items[].{bvid,title}` |
+| `bili video info` | ✅ 可用 | 含 `pages[]` 分 P 目录 |
+| `bili comment list` | ✅ 可用 | 字段是 `user.name`，**不是 `uname`** |
+| `bili hot popular` | ✅ 可用 | 带 `reason`（如"百万播放"） |
+| `bili feed recommend` | ✅ 可用 | 未登录时 `personalized:false`（通用推荐） |
+| `bili feed inbox` | ❌ `not_logged_in` | 消息中心必须登录 |
+| `bili video subtitle` | ❌ `not_logged_in` | **字幕必须登录** |
+| `bili video summary` | ❌ B站 `-101` | **AI 总结必须登录** |
+
+所以字幕/AI 总结这两个核心能力目前用不了，需要 `bili auth login --qr-out <png>` 让人类扫码。

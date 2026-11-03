@@ -523,6 +523,13 @@ export class PersonaService {
     const tasteSec = this.self.renderSection();
     if (tasteSec) out.push({ name: 'qqbot:persona-taste', order: 66, text: tasteSec });
 
+    // M37 看过的：她自己的经历，和口味（喜欢什么）分开 ——
+    // 「我查到的情报」（findings，上限 8，冲浪一次刷满）
+    // 和「我看过的东西」（watching，上限 20，她自己记）不是一回事。
+    // order 66.2 刻意夹在口味(66) 和情绪(66.5) 之间。
+    const watchedSec = this.self.renderWatching(4);
+    if (watchedSec) out.push({ name: 'qqbot:persona-watching', order: 66.2, text: watchedSec });
+
     // M33 状态：**只给事实，不给结论**。
     //
     // 情绪已经在四个闸门上真的改变了她的话多话少、打字快慢，
@@ -652,11 +659,30 @@ export class PersonaService {
     if (!cfg.surfEnabled) return;
     const log = this.deps.logger;
 
+    // 早退留痕（M36）。原来所有早退都是静默 return，日志里只有启动时一行
+    // "冲浪已武装"，导致 05:36 那轮该跑没跑完全查不出原因。
+    //
+    // 注意：上游用的是 log.debug，但**这个宿主的 debug 不落盘**
+    // （实测 desktop-next.log 里 `[debug]` 出现 0 次），照抄等于没修。
+    // 所以改用 info + 按天节流：窗口内每 tick 记一条（2 小时窗口约 4 条），
+    // 窗口外每天只记第一条 —— 既看得出"今天到底进没进窗口"，又不刷屏。
+    let surfLogDay = '';
     const tick = (): void => {
-      if (!inSurfWindow(new Date(), cfg.surfFromHour, cfg.surfToHour)) return;
+      const now = Date.now();
+      const prev = this.self.snapshot().lastSurfAt ?? 0;
+      const gapH = prev ? (now - prev) / 3600_000 : 999;
+      const inWin = inSurfWindow(new Date(), cfg.surfFromHour, cfg.surfToHour);
+      const day = dayInTz(new Date(), DEFAULT_TZ);
+      if (inWin || day !== surfLogDay) {
+        surfLogDay = day;
+        log.info(`persona: surf tick · 窗口=${inWin} 距上次=${gapH.toFixed(2)}h`);
+      }
+      if (!inWin) return;
       // 同一冲浪时段内只跑一轮（2 小时内已冲过就跳过）
-      const last = this.self.snapshot().lastSurfAt ?? 0;
-      if (Date.now() - last < 2 * 3600_000) return;
+      if (gapH < 2) {
+        log.info(`persona: surf 跳过（距上次 ${gapH.toFixed(2)}h < 2h）`);
+        return;
+      }
       try {
         log.info('persona: 冲浪开始');
         const results = runSurfRound(this.self, {

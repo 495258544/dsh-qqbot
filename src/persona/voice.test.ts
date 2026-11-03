@@ -186,3 +186,110 @@ describe('口癖管线 · 从样本到生效（M32 修的死链）', () => {
     expect(v2.extractCandidates()).toEqual([]);
   });
 });
+
+describe('markUsed · 使用计数必须真的在涨（M32）', () => {
+  // 防的是 markUsed 零调用：lastSaidAt 永远 undefined，
+  // retireStale 按一个从没被写过的时间判定退役，count 也永远不涨。
+
+  it('说出口癖后会计数，并刷新 lastSaidAt', () => {
+    const dir2 = fs.mkdtempSync(path.join(os.tmpdir(), 'voice-used-'));
+    const svc = new VoiceService(dir2);
+    // 造一条生效口癖
+    for (let i = 0; i < 6; i++) {
+      svc.recordUtterance(`t${i}`, 'group:g', '说实话这事挺离谱的吧');
+      svc.judgeIncoming('group:g', '哈哈哈确实');
+    }
+    svc.extractCandidates();
+    svc.promoteHabits();
+    const h = svc.activeHabits()[0];
+    expect(h).toBeDefined();
+
+    const before = h!.count;
+    svc.markUsed(h!.id);
+    const after = svc.activeHabits().find((x) => x.id === h!.id)!;
+    expect(after.count).toBe(before + 1);
+    expect(after.lastSaidAt).toBeGreaterThan(0);
+  });
+});
+
+describe('M33 · 口癖产出的表达性（线上 48 条样本的真实教训）', () => {
+  // 复核 8a94319 时，用线上 voice.json 实跑，抽出并 100% 转正的是：
+  //   「的。」「多。」「完了。」「一样。」「行,」
+  // 这些会原样注入 system prompt：「当"想收尾时"时，可以用"的。"来表达。」
+  //
+  // 根因不是"没接线"，是**抽取粒度**：字符 n-gram 没有词边界，标点尾巴天然高频。
+  // 同时 promoteHabits 的判据被 consider() 写死（count:n 且 evidence 恒定 2 条），
+  // 任何候选一产生就转正 —— 门槛等于没设。
+
+  function seed(service: VoiceService, lines: string[], key = 'group:g'): void {
+    for (const [i, l] of lines.entries()) {
+      service.recordUtterance(`t${i}`, key, l);
+      service.judgeIncoming(key, '哈哈确实');
+    }
+  }
+
+  it('标点尾巴不算口癖（"的。""完了。""行,"都不该出现）', () => {
+    const dir2 = fs.mkdtempSync(path.join(os.tmpdir(), 'voice-m33-'));
+    const svc = new VoiceService(dir2);
+    // 构造一批"以标点结尾"的样本，模拟线上那 48 条的形态
+    seed(svc, ['逛了会儿，翻出点东西。', '好，逛得挺实在。', '成，这句翻篇了。', '那下回喊你吃饭就行。']);
+    const c = svc.extractCandidates();
+    for (const h of c) {
+      // 去掉尾部标点后必须还有 >=2 个汉字，且以汉字开头
+      const core = h.style.replace(/[，。！？、,.!?~…：:；;"'）)】\]》」]+$/, '');
+      expect(core.length, `候选「${h.style}」去掉标点后太短`).toBeGreaterThanOrEqual(2);
+      expect(/^[\u4e00-\u9fa5]/.test(core), `候选「${h.style}」不以汉字开头`).toBe(true);
+    }
+  });
+
+  it('只有一个样本的不转正（门槛必须真的拦得住）', () => {
+    const dir2 = fs.mkdtempSync(path.join(os.tmpdir(), 'voice-m33b-'));
+    const svc = new VoiceService(dir2);
+    // 同一句话只出现在 1 条样本里 → 不该转正
+    seed(svc, ['随便说句别的吧', '今天天气还行呢', '这个我也不太懂', '总之先这样吧']);
+    svc.extractCandidates();
+    const promoted = svc.promoteHabits();
+    const active = svc.activeHabits();
+    // 任何转正的都必须有 >=3 次真实出现（PROMOTE_MIN_COUNT）
+    for (const h of active) expect(h.count).toBeGreaterThanOrEqual(3);
+    expect(promoted).toBe(active.length);
+  });
+
+  it('真口癖仍然能转正（护栏不能把功能一起拦死）', () => {
+    const dir2 = fs.mkdtempSync(path.join(os.tmpdir(), 'voice-m33c-'));
+    const svc = new VoiceService(dir2);
+    // "说实话" 在 4 个不同会话的 4 句话里都出现 → 这是真的说话习惯
+    const lines = ['说实话这事挺离谱吧', '说实话我也这么想', '说实话不太行', '说实话有点难'];
+    for (const [i, l] of lines.entries()) {
+      svc.recordUtterance(`s${i}#${i}`, `group:g${i}`, l);
+      svc.judgeIncoming(`group:g${i}`, '哈哈确实');
+    }
+    svc.extractCandidates();
+    expect(svc.promoteHabits()).toBeGreaterThan(0);
+    const styles = svc.activeHabits().map((h) => h.style);
+    expect(styles).toContain('说实话');
+    expect(svc.renderSection()).toContain('说实话');
+  });
+});
+
+describe('PENDING_TTL · 口癖样本必须有足够存活时间（M36）', () => {
+  it('她说的话在 30 分钟后仍可被判定（原来 5 分钟就丢）', async () => {
+    // 实测：线上 48 条样本、最新停在 11-02 12:07，40 小时没有新样本，
+    // 但期间有 10 轮对话。根因是 TTL=5min，而真实对话间隔平均 12.1 分钟。
+    const { mkdtempSync } = await import('node:fs');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
+    const dir = mkdtempSync(join(tmpdir(), 'voice-ttl-'));
+    const { VoiceService } = await import('./voice.ts');
+    const v = new VoiceService(dir);
+
+    expect(v.recordUtterance('t1', 'k1', '翻了下那个系列，看它还更不更新。')).toBe(true);
+    // 模拟 30 分钟过去
+    const pending = (v as unknown as { data: { pending: Array<{ at: number }> } }).data.pending;
+    pending[0]!.at = Date.now() - 30 * 60_000;
+
+    // 30 分钟后仍应能判定（不该被 TTL 丢掉）
+    const caught = v.judgeIncoming('k1', '确实是这样');
+    expect(caught.length).toBe(1);
+  });
+});
