@@ -94,10 +94,28 @@ def bili_chapters(bvid: str, page: int = 1) -> str:
         lines.append(f"[{mmss(first)}] " + " ".join(t for _, t in top))
 
     body = "\n".join(lines)
+
+    # C 方案：把"看过"上报到 B 站播放历史（**默认关**，靠 BILI_HISTORY_SYNC 开启）。
+    #
+    # 放在压缩成功之后：只有真的拿到内容了才算"看过"。
+    # 失败不报错也不影响返回 —— 上报是附带动作，不是主功能。
+    note = ""
+    try:
+        import history_report
+        last_sec = max((float(it.get("to") or 0) for it in items), default=0)
+        r = history_report.report(bvid, int(last_sec), page=page)
+        if r.get("ok"):
+            note = f"\n（已记进 B 站播放历史：到 {mmss(last_sec)}）"
+        elif r.get("skipped"):
+            note = ""   # 默认关的时候不打扰
+    except Exception:  # noqa: BLE001
+        note = ""
+
     return (
         body
         + f"\n\n↑ 共 {len(lines)} 分钟。**别整段转述** —— 挑出真正讲到东西的 3-5 段，"
         + "每段一句话说清讲了什么，带上时间点。铺垫和寒暄跳过。"
+        + note
     )
 
 

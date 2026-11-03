@@ -70,3 +70,49 @@ python3 -c "import sys; sys.path.insert(0,'.'); import chapter_server as c; \
 
 返回 False 就改 `run_bili` 或压缩逻辑里对应字段。
 其余 17 个工具由官方维护，不归我们管。
+
+## C 方案：写进 B 站播放历史（默认关，小羽这台开）
+
+`history_report.py` 把"看过"上报到 B 站播放历史。
+
+**默认关闭**，靠环境变量 `BILI_HISTORY_SYNC=1` 打开。
+原因：部署到别人的机器上不能默默改人家的账号数据。
+小羽这台是专属账号，所以在 `cordis.patch.yml` 里显式开了。
+
+### 实现
+
+用 `bilibili_api` 的 `video.report_watch_history(progress, page_index)` ——
+它已经把 wbi 签名、csrf、分P cid 全封装好了，不用自己打接口。
+
+### 踩的两个坑
+
+**① `page_index` 是 0 起，不是 1 起**
+
+传 `page_index=1` 报 `ArgsException: 不存在该分 p`。
+因为内部走 `get_cid(page_index)`，而 `pages` 数组是 0 索引的。
+对外仍用"第几 P"（1 起，人话），内部转 0 起。
+
+**② 不要调 `report_start_watching`**
+
+`bilibili_api` 的文档原话：「该接口使用似乎存在 200 播放限制, 请勿滥用!」
+那个接口会计播放量。只调 `report_watch_history`（"我看到了这里"）。
+
+### 验证
+
+```bash
+# 真的写进去了吗
+python3 -c "
+import asyncio, json
+from pathlib import Path
+from bilibili_api import Credential, user
+raw = json.loads((Path.home()/'.config/bili-cli/credential.json').read_text())
+cred = Credential(sessdata=raw['sessdata'], bili_jct=raw['bili_jct'],
+                  buvid3=raw.get('buvid3'), dedeuserid=raw.get('dedeuserid'))
+async def t():
+    h = await user.get_self_history(credential=cred)
+    print(len(h if isinstance(h,list) else h.get('list') or []), '条历史')
+asyncio.run(t())
+"
+```
+
+实测他账号历史里确实出现了那条视频。
