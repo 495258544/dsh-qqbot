@@ -296,6 +296,22 @@ export function registerDotaTools(ctx: Context, service: DotaService, logger: Lo
             additionalProperties: false,
           },
           notes: { type: 'array', items: { type: 'string' } },
+          // 技能组合：技能征召（OMG）局里这是分析的核心，不是装饰
+          abilities: {
+            type: 'array',
+            items: {
+              type: 'object',
+              properties: {
+                name: { type: 'string' },
+                uses: { type: 'integer' },
+                behavior: { type: 'string' },
+                damageType: { type: 'string' },
+              },
+              required: ['name', 'uses'],
+              additionalProperties: false,
+            },
+          },
+          abilityMix: { type: 'string' },
         },
         required: ['ok', 'matchId', 'summary'],
         additionalProperties: false,
@@ -369,6 +385,18 @@ export function registerDotaTools(ctx: Context, service: DotaService, logger: Lo
         ...(form.teamfights !== null ? { teamfights: form.teamfights } : {}),
         lineup: form.lineup,
         notes: form.notes,
+        // 技能组合（内部 key 不上报，schema 里也没有它）
+        ...(p.abilities !== undefined && p.abilities.length > 0
+          ? {
+            abilities: p.abilities.map((a) => ({
+              name: a.name,
+              uses: a.uses,
+              ...(a.behavior !== undefined ? { behavior: a.behavior } : {}),
+              ...(a.damageType !== undefined ? { damageType: a.damageType } : {}),
+            })),
+          }
+          : {}),
+        ...(p.abilityMix !== undefined && p.abilityMix !== '' ? { abilityMix: p.abilityMix } : {}),
       };
     },
   });

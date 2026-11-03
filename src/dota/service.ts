@@ -17,6 +17,8 @@
  */
 import type { Logger } from '../types.ts';
 import { heroName } from './heroes.ts';
+import { parseAbilities, describeAbilityMix, type ParsedAbility } from './abilities.ts';
+import { AbilityRecordStore } from './ability-records.ts';
 import {
   OpenDotaApi,
   OpenDotaError,
@@ -146,6 +148,13 @@ export interface MatchDetailForm {
     level: number;
     items: string[];
     backpack: string[];
+    /**
+     * 技能组合（按使用次数降序）。技能征召（OMG）模式里英雄只是个壳子，
+     * 真正决定强弱的是拿了哪些技能 —— 没有这个就只能靠 KDA 说空话。
+     */
+    abilities?: ParsedAbility[];
+    /** 一句话概括这套技能的路子（空 = 没拿到技能数据） */
+    abilityMix?: string;
   };
   /** 队内排名（1 = 最好，按净资产 / 英雄伤害） */
   teamRank: { netWorth: number; heroDamage: number; teamSize: number };
@@ -188,11 +197,17 @@ export class DotaService {
   private readonly detailInFlight = new Map<number, Promise<RawMatchDetail>>();
   /** 滑动窗口内的请求时间戳 */
   private readonly requestLog: number[] = [];
+  /**
+   * 技能记录：每次解析单场就把技能组合存一份（OMG 局尤其重要）。
+   * 落盘失败只记 warn，绝不影响查询本身。
+   */
+  public readonly abilityRecords: AbilityRecordStore;
 
   constructor({ config, logger }: { config: DotaConfig; logger: Logger }) {
     this.config = config;
     this.logger = logger;
     this.api = new OpenDotaApi({ timeoutMs: config.timeoutMs });
+    this.abilityRecords = new AbilityRecordStore(undefined, { warn: (m: string) => logger.warn(m) });
   }
 
   get enabled(): boolean {
@@ -362,6 +377,47 @@ export class DotaService {
     const raw = await this.matchRaw(matchId);
     const itemName = await this.itemNameResolver();
     const form = buildMatchDetailForm(raw, accountId, itemName);
+
+    // 技能组合（技能征召/OMG 的核心信息）。
+    // 常量拉取失败就留空并记一条 note —— 不能因为拿不到技能名就让整条战绩查询失败。
+    try {
+      const me = raw.players.find((p) => p.account_id === accountId);
+      const uses = me?.ability_uses;
+      if (uses !== undefined && uses !== null) {
+        const meta = await this.api.abilityMeta();
+        const abilities = parseAbilities(uses, meta);
+        if (abilities.length > 0) {
+          form.player.abilities = abilities;
+          const mix = describeAbilityMix(abilities);
+          if (mix !== '') form.player.abilityMix = mix;
+          // 接进"可直接发群"的摘要 —— OMG 局里技能恰恰是最该说的部分，
+          // 只放在结构化字段里的话她很可能压根不去看。
+          form.summaryText += `\n技能｜${abilities.map((a) => `${a.name}×${a.uses}`).join(' / ')}`;
+          if (mix !== '') form.summaryText += `\n路子｜${mix}`;
+
+          // 落一份记录（同一场重复解析就覆盖，幂等）—— 隔几天再问"他上把拿了什么"就有据可查
+          this.abilityRecords.put({
+            matchId,
+            at: Date.now(),
+            gameMode: form.gameMode,
+            players: [{
+              accountId,
+              heroName: form.player.heroName,
+              win: form.player.win,
+              abilities: abilities.map((a) => ({
+                name: a.name,
+                uses: a.uses,
+                ...(a.behavior !== undefined ? { behavior: a.behavior } : {}),
+                ...(a.damageType !== undefined ? { damageType: a.damageType } : {}),
+              })),
+              ...(mix !== '' ? { mix } : {}),
+            }],
+          });
+        }
+      }
+    } catch (err) {
+      form.notes.push(`技能没解析出来：${err instanceof Error ? err.message : String(err)}`);
+    }
     this.logger.info(
       `dota: 单场 ${matchId} → ${form.player.heroName} `
       + `${form.player.kills}/${form.player.deaths}/${form.player.assists}（${form.player.win ? '胜' : '负'}）`,
