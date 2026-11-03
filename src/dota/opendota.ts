@@ -87,6 +87,16 @@ export interface RawMatch {
   hero_variant: number | null;
 }
 
+/** 技能的展示信息（来自 /constants/abilities） */
+export interface AbilityMeta {
+  /** 英文显示名，如 Shadowraze */
+  dname?: string;
+  /** 施法类型，如 "No Target" / "Unit Target" / "Point Target" */
+  behavior?: string;
+  /** 伤害类型：Magical / Physical / Pure（不是所有技能都有） */
+  dmgType?: string;
+}
+
 /** /players/{id} 的裁剪结果 */
 export interface PlayerProfile {
   accountId: number;
@@ -133,6 +143,14 @@ export interface RawMatchPlayer {
   backpack_2: number | null;
   /** 1=优势路 2=中路 3=劣势路 4=打野（OpenDota 口径） */
   lane_role: number | null;
+  /**
+   * 技能使用次数：`{技能内部名: 次数}`。
+   * 技能征召（OMG）模式里这是判断"这套技能怎么打"的核心数据 ——
+   * 用了 126 次的技能和顺手点一下是两回事。
+   */
+  ability_uses?: Record<string, number> | null;
+  /** 技能加点顺序（数字 id，里面混着天赋，展示前要过滤） */
+  ability_upgrades_arr?: number[] | null;
 }
 
 /** /matches/{id} 的一条目标事件（首血 / 肉山 / 推塔） */
@@ -224,6 +242,10 @@ export class OpenDotaApi {
 
   /** 物品 id → 名称；/constants/items 拉一次后进程内永久缓存 */
   private itemNamesCache: Map<number, string> | null = null;
+  /** 技能数字 id → 内部名（/constants/ability_ids，约 3150 条） */
+  private abilityIdsCache: Map<number, string> | null = null;
+  /** 技能内部名 → 展示信息（/constants/abilities，约 3080 条） */
+  private abilityMetaCache: Map<string, AbilityMeta> | null = null;
 
   constructor({ timeoutMs = 8000, userAgent = 'dsh-qqbot/dota' }: OpenDotaOptions = {}) {
     this.timeoutMs = timeoutMs;
@@ -459,6 +481,56 @@ export class OpenDotaApi {
   get quota(): DotaQuota | undefined {
     return this.lastQuota;
   }
+
+  // ── 技能常量（OMG / 技能征召模式解析用）────────────────────
+
+  /**
+   * 技能数字 id → 内部名（如 `5060` → `nevermore_shadowraze2`）。
+   * `ability_upgrades_arr` 里是数字，要展示就得先过这一层。
+   */
+  async abilityIds(): Promise<Map<number, string>> {
+    if (this.abilityIdsCache !== null) return this.abilityIdsCache;
+    const data = await this.get('/constants/ability_ids');
+    const map = new Map<number, string>();
+    if (data !== null && typeof data === 'object') {
+      for (const [k, v] of Object.entries(data as Record<string, unknown>)) {
+        const id = Number(k);
+        const name = typeof v === 'string' ? v.trim() : '';
+        if (Number.isInteger(id) && id > 0 && name !== '') map.set(id, name);
+      }
+    }
+    this.abilityIdsCache = map;
+    return map;
+  }
+
+  /**
+   * 技能内部名 → 展示信息（显示名 / 施法类型 / 伤害类型）。
+   * 这份表决定了她能不能说出「他拿的是个无目标爆发技能」而不是只念一串英文。
+   */
+  async abilityMeta(): Promise<Map<string, AbilityMeta>> {
+    if (this.abilityMetaCache !== null) return this.abilityMetaCache;
+    const data = await this.get('/constants/abilities');
+    const map = new Map<string, AbilityMeta>();
+    if (data !== null && typeof data === 'object') {
+      for (const [key, value] of Object.entries(data as Record<string, unknown>)) {
+        if (value === null || typeof value !== 'object') continue;
+        const a = value as { dname?: unknown; behavior?: unknown; dmg_type?: unknown };
+        const dname = typeof a.dname === 'string' ? a.dname.trim() : '';
+        // behavior 可能是字符串，也可能是字符串数组（"No Target" / ["Unit Target","Channeled"]）
+        const behavior = Array.isArray(a.behavior)
+          ? a.behavior.filter((x) => typeof x === 'string').join(' / ')
+          : typeof a.behavior === 'string' ? a.behavior : '';
+        const dmgType = typeof a.dmg_type === 'string' ? a.dmg_type.trim() : '';
+        map.set(key, {
+          ...(dname !== '' ? { dname } : {}),
+          ...(behavior !== '' ? { behavior } : {}),
+          ...(dmgType !== '' ? { dmgType } : {}),
+        });
+      }
+    }
+    this.abilityMetaCache = map;
+    return map;
+  }
 }
 
 // ── 原始数据校验 ────────────────────────────────────────────
@@ -543,6 +615,15 @@ function normalizeMatchDetail(v: Record<string, unknown>, id: number): RawMatchD
         backpack_1: numOrNull(p.backpack_1),
         backpack_2: numOrNull(p.backpack_2),
         lane_role: numOrNull(p.lane_role),
+        // 技能：这两项原来是白名单外的（归一化只保留"详细解析要用的字段"），
+        // 但技能征召（OMG）模式里它才是核心信息，必须带出来。
+        ability_uses:
+          p.ability_uses !== null && typeof p.ability_uses === 'object'
+            ? (p.ability_uses as Record<string, number>)
+            : null,
+        ability_upgrades_arr: Array.isArray(p.ability_upgrades_arr)
+          ? (p.ability_upgrades_arr.filter((x) => typeof x === 'number') as number[])
+          : null,
       });
     }
   }
