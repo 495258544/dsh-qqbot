@@ -1045,6 +1045,20 @@ export function registerPersonaTools(
             },
           },
           title: { type: 'string' },
+          // 简介（watch 带的，比只给标题有用）
+          desc: { type: 'string' },
+          // 进度条上的分章（UP 主设置的），不给就是没有
+          chapters: {
+            type: 'array',
+            items: {
+              type: 'object',
+              properties: { title: { type: 'string' }, start: { type: 'string' } },
+              required: ['title', 'start'],
+              additionalProperties: false,
+            },
+          },
+          // watch 抽帧后拼成的**一张**总览图（不是多张单帧）
+          framesSheet: { type: 'string' },
           page: { type: 'number' },
           // 合集目录：四十集看不过来时的第一层答案
           pages: {
@@ -1139,7 +1153,9 @@ export function registerPersonaTools(
       render: (a: unknown, v: unknown): ContentBlock[] => {
         const inp = (a ?? {}) as { want?: string };
         const r = v as {
-          ok: boolean; title?: string; page?: number;
+          ok: boolean; title?: string; page?: number; desc?: string;
+          chapters?: Array<{ title: string; start: string }>;
+          framesSheet?: string;
           pages?: Array<{ page: number; title: string; length: string }>;
           summary?: string;
           outline?: Array<{ title: string; start: string; points: Array<{ t: string; text: string }> }>;
@@ -1159,6 +1175,11 @@ export function registerPersonaTools(
         }
         const parts: string[] = [];
         if (r.title) parts.push(`《${r.title}》${r.page && r.page > 1 ? ` 第 ${r.page} P` : ''}`);
+        if (r.desc) parts.push(`简介：${r.desc}`);
+        if (r.chapters?.length) {
+          parts.push('分章（UP 主标的进度条节点）：\n'
+            + r.chapters.map((c) => `  [${c.start}] ${c.title}`).join('\n'));
+        }
         // 合集先给目录 —— 用户要挑着看，先得知道有哪些集
         if (r.pages?.length) {
           // 目录同样要"先筛再说"。
@@ -1202,6 +1223,10 @@ export function registerPersonaTools(
         if (r.frames?.length) {
           parts.push('画面帧（图片路径）：\n' + r.frames.map((x) => `  ${x.t} ${x.path}`).join('\n'));
         }
+        if (r.framesSheet) {
+          parts.push(`画面总览图（抽帧拼成一张）：\n  ${r.framesSheet}\n`
+            + '（这是图片路径。想知道画面内容就交给能看图的工具读，别凭标题猜。）');
+        }
         if (r.comments?.length) {
           parts.push('评论（按热度）：\n' + r.comments.slice(0, 12).map((c, i) =>
             `  ${i + 1}. ${c.likes > 0 ? `[${c.likes}赞] ` : ''}${c.user}：${c.text}`).join('\n')
@@ -1223,7 +1248,7 @@ export function registerPersonaTools(
     },
     async execute(args: unknown): Promise<Record<string, unknown>> {
       const a = args as { bvid?: string; query?: string; page?: number; want?: string };
-      const run = (argv: string[]): BiliResult => runBili(argv);
+      const run = (argv: string[], timeoutMs?: number): BiliResult => runBili(argv, timeoutMs);
       const want = String(a.want ?? 'summary');
 
       // ── 消息中心：结构跟列表类不同，是 {unread:{...}, total, note} ──
@@ -1341,6 +1366,70 @@ export function registerPersonaTools(
       if (title) out.title = title;
       if (isCollection) { out.pages = pages; out.page = page; }
 
+      // ── all：优先走 `bili video watch`（一次拿全）──
+      //
+      // 实测同一视频：watch 6.4s，原来逐项（summary+subtitle+danmaku+frames）25.7s。
+      // 但它的 transcript 是**纯文本、没有时间轴**（官方路径的老问题），
+      // 所以拿完 watch 还要单独补一次 subtitle —— 总计仍快得多，
+      // 而且白拿章节、热评和画面总览图（这三项本地原来没有）。
+      if (mode === 'all') {
+        const w = run(['video', 'watch', bvid, '-p', String(page), '--frames', '6', '--comments', '5'], 120_000);
+        if (w.ok !== false) {
+          const d = (w.data ?? {}) as Record<string, unknown>;
+          const desc = String(d.desc ?? '').trim();
+          if (desc) out.desc = desc.slice(0, 400);
+
+          // ai_summary 是字符串被逐字符拆成 {0:'华',1:'为',…} —— 拼回来
+          const rawSum = d.ai_summary as unknown;
+          let sumText = '';
+          if (typeof rawSum === 'string') sumText = rawSum;
+          else if (rawSum !== null && typeof rawSum === 'object') {
+            sumText = Object.values(rawSum as Record<string, unknown>).map(String).join('');
+          }
+          if (sumText.trim() !== '') out.summary = sumText.trim();
+
+          const chs = Array.isArray(d.chapters) ? (d.chapters as Array<Record<string, unknown>>) : [];
+          const chapters = chs.slice(0, 20).map((c) => ({
+            title: String(c.title ?? c.name ?? ''),
+            start: mmss(Number(c.start ?? c.time ?? 0) || 0),
+          })).filter((c) => c.title !== '');
+          if (chapters.length) out.chapters = chapters;
+
+          const hc = Array.isArray(d.hot_comments) ? (d.hot_comments as Array<Record<string, unknown>>) : [];
+          const hot = hc.slice(0, 8).map((c) => ({
+            user: String(c.user ?? c.uname ?? ''),
+            text: String(c.content ?? c.message ?? ''),
+            likes: Number(c.like ?? c.likes ?? 0) || 0,
+          })).filter((c) => c.text !== '');
+          if (hot.length) out.comments = hot;
+
+          const dmp = ((d.danmaku ?? {}) as { peaks?: Array<Record<string, unknown>> }).peaks ?? [];
+          const peaks = dmp.slice(0, 5).map((p) => ({
+            t: mmss(Number(p.time ?? 0) || 0),
+            count: Number(p.count ?? 0) || 0,
+            top: Array.isArray(p.top) ? (p.top as unknown[]).slice(0, 3).map(String) : [],
+          })).filter((p) => p.count > 0);
+          if (peaks.length) out.danmakuPeaks = peaks;
+
+          const sheet = String(d.frames_sheet ?? '');
+          if (sheet) out.framesSheet = sheet;
+
+          // 字幕时间轴：watch 有文本但没时间轴，单独补一次（只为这个才多跑一条命令）
+          const trText = String((d.transcript as { text?: string } | undefined)?.text ?? '');
+          if (trText.trim() !== '') {
+            const sr = run(['video', 'subtitle', bvid, '-p', String(page)]);
+            const sitems = ((sr.data ?? {}) as { items?: Array<{ from?: number; to?: number; content?: string }> }).items ?? [];
+            const packed = condenseSubtitlesByMinute(sitems);
+            if (packed.length) out.subtitleOutline = packed;
+          }
+
+          const got = out.summary || out.subtitleOutline || out.comments || out.danmakuPeaks
+            || out.framesSheet || out.chapters;
+          if (got || isCollection) return out;
+        }
+        // watch 失败或没拿到内容 → 落到下面逐项取，宁可慢也别没有
+      }
+
       // AI 总结 + 分段提纲
       let summary = '';
       let outline: Array<{ title: string; start: string; points: Array<{ t: string; text: string }> }> = [];
@@ -1420,7 +1509,7 @@ export function registerPersonaTools(
       }
 
       const hasContent = out.summary || out.subtitleOutline || out.danmaku || out.danmakuPeaks || out.frames
-        || out.comments || out.items;
+        || out.comments || out.items || out.chapters || out.framesSheet;
       if (!hasContent) {
         // 合集只给目录也算成功（用户接下来要挑 P）
         if (isCollection) return out;
