@@ -14,6 +14,7 @@ import type { Context } from '@deepseek-ai/cordis';
 import type { ContentBlock } from '@deepseek-ai/dsh-llm';
 import type { Logger } from '../types.ts';
 import { steamIdToAccountId } from './opendota.ts';
+import { heroIdByName } from './heroes.ts';
 import type { DotaService } from './service.ts';
 
 interface ToolsRegistryLike {
@@ -52,6 +53,12 @@ export function registerDotaTools(ctx: Context, service: DotaService, logger: Lo
         limit: {
           type: 'integer',
           description: `查最近几局，默认 ${defaultLimit}，最多 ${maxLimit}（OpenDota 一次最多返回 20 条）`,
+        },
+        hero: {
+          type: 'string',
+          description: '只看某个英雄的局：填英雄名都行 —— 官方名（伐木机）、英文名（Timbersaw）、'
+            + '群里常见的叫法（timber / 锯子 / 剑圣 / 白牛 / AM / SF）。'
+            + '给了这个参数时 limit 默认拉满（20 局），因为只查几局很可能没玩这个英雄。',
         },
       },
       additionalProperties: false,
@@ -114,17 +121,36 @@ export function registerDotaTools(ctx: Context, service: DotaService, logger: Lo
       },
     },
     async execute(args: unknown): Promise<Record<string, unknown>> {
-      const { account_id, steam_id, limit } = args as {
+      const { account_id, steam_id, limit, hero } = args as {
         account_id?: number;
         steam_id?: string;
         limit?: number;
+        hero?: string;
       };
 
       const accountId = resolveAccountId(account_id, steam_id);
-      const form = await service.recentForm(accountId, limit);
+
+      // 英雄筛选：群友说的往往是黑话（timber / 剑圣 / 白牛 / SF），先翻译成 ID。
+      // 认不出来就如实说 —— 猜一个最像的比不认更糟，她会照着错英雄编一整段分析。
+      let heroId: number | undefined;
+      if (hero !== undefined && String(hero).trim() !== '') {
+        const q = String(hero).trim();
+        heroId = heroIdByName(q);
+        if (heroId === undefined) {
+          return {
+            ok: false,
+            error: `没认出英雄「${q}」。可以用官方名（伐木机）、英文名（Timbersaw）或常见叫法（timber / 锯子 / 白牛）。`,
+          };
+        }
+      }
+
+      // 按英雄筛时默认拉满（20 局）：只查最近 5 局的话，很可能这几局里根本没玩这个英雄
+      const finalLimit = heroId !== undefined && limit === undefined ? maxLimit : limit;
+      const form = await service.recentForm(accountId, finalLimit, heroId);
 
       logger.info(
-        `dota: 工具查询 ${accountId} → ${form.matches.length} 局（${form.wins}W/${form.losses}L）`,
+        `dota: 工具查询 ${accountId} → ${form.matches.length} 局（${form.wins}W/${form.losses}L）`
+        + (hero !== undefined ? ` 筛=${String(hero)}` : ''),
       );
 
       return {
