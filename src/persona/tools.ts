@@ -646,6 +646,74 @@ export function registerPersonaTools(
   });
 
   /**
+   * qq_note_watched —— 记下"我看了什么、当时怎么想"(M37)。
+   *
+   * ## 为什么要单独一个工具，而不是让她调 MCP 记
+   *
+   * MCP 的 `watch_video` 只返回内容，不写她的记忆。
+   * 而"我看过并觉得xxx"是**她自己的经历**，得落在 self.json 里，
+   * 下次才能在提示里出现。
+   *
+   * ## 为什么一条只写一句 note
+   *
+   * 写得长就变成观后感作业。人回忆"那个视频怎么样"时是一句话，
+   * 不是三段分析。所以 note 限 120 字，可以完全不填。
+   */
+  reg({
+    name: 'qq_note_watched',
+    description:
+      '记下你刚看过的东西：标题 + 一句自己的话（讲了什么、什么感觉，都可以）。'
+      + '不用写观后感，一句话就行；也可以只记标题不写感受。'
+      + '下次你会记得自己看过它 —— 而不是每次被问到都现编。',
+    parameters: {
+      type: 'object',
+      properties: {
+        title: { type: 'string', description: '看的什么，如《华为配置专题03 DHCP VLAN配置》' },
+        ref: { type: 'string', description: '可选：BV 号之类的标识，用来去重' },
+        note: { type: 'string', description: '可选：一句你自己的话（≤120 字）' },
+        done: { type: 'boolean', description: '可选：看完了吗（从中间跳进去的可以填 false）' },
+      },
+      required: ['title'],
+      additionalProperties: false,
+    },
+    output: {
+      schema: {
+        type: 'object',
+        properties: {
+          ok: { type: 'boolean' },
+          total: { type: 'number' },
+          error: { type: 'string' },
+        },
+        required: ['ok'],
+        additionalProperties: false,
+      },
+      render: (_a: unknown, v: unknown): ContentBlock[] => {
+        const r = v as { ok: boolean; total?: number; error?: string };
+        return [{
+          type: 'text',
+          text: r.ok ? `记下了（你最近看过 ${r.total ?? '?'} 个）` : `没记成（${r.error ?? '未知'}）`,
+        }];
+      },
+    },
+    async execute(args: unknown): Promise<Record<string, unknown>> {
+      const a = args as { title?: string; ref?: string; note?: string; done?: boolean };
+      const title = String(a.title ?? '').trim();
+      if (!title) return { ok: false, error: '标题不能空' };
+      try {
+        persona.self.addWatching({
+          title,
+          ...(a.ref ? { ref: String(a.ref) } : {}),
+          ...(a.note ? { note: String(a.note) } : {}),
+          ...(a.done === true ? { done: true } : {}),
+        });
+        return { ok: true, total: persona.self.recentWatching(99).length };
+      } catch (err) {
+        return { ok: false, error: err instanceof Error ? err.message : String(err) };
+      }
+    },
+  });
+
+  /**
    * qq_note_activity —— 让她记下"这次自由时间做了什么"。
    *
    * 为什么需要（M24，开源调研结论）：
