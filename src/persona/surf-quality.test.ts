@@ -8,7 +8,7 @@
  * 全是导航站/百科首页，她拿去聊天只能说空话。
  */
 import { describe, expect, it } from 'vitest';
-import { isMeaningful, refineQuery, queryIntent } from './surf.ts';
+import { isMeaningful, refineQuery, queryIntent, coreKeywords } from './surf.ts';
 
 describe('isMeaningful · 挡掉导航站和百科首页', () => {
   it('实测抓到的真实垃圾全部被挡', () => {
@@ -118,5 +118,24 @@ describe('视频型话题走 B 站（M36）', () => {
     for (const t of ['咖啡', '读书 书单', 'AI 技术', '把小事讲得很慢的散文和随笔']) {
       expect(re.test(t), `「${t}」不该走 B 站`).toBe(false);
     }
+  });
+});
+
+describe('coreKeywords · 口语化长话题提取核心词（M36）', () => {
+  it('「把小事讲得很慢的散文和随笔」→ 散文 随笔（否则会搜出单字字典页）', () => {
+    // 实测事故：整句拿去搜，搜索引擎拆成单字「把」，
+    // 返回「把的意思,把的解释-汉语国学」—— 完全无关。
+    expect(coreKeywords('把小事讲得很慢的散文和随笔')).toBe('散文 随笔');
+  });
+
+  it('短话题原样返回（不该动）', () => {
+    for (const t of ['读书 书单', '咖啡', 'AI 技术', '游戏 新作']) {
+      expect(coreKeywords(t), t).toBe(t);
+    }
+  });
+
+  it('不含口语虚词的长句也不动', () => {
+    const t = '机器学习模型部署与推理优化实践';
+    expect(coreKeywords(t)).toBe(t);
   });
 });

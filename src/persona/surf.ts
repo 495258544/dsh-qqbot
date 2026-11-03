@@ -154,8 +154,38 @@ function biliHot(topic: string, timeoutMs: number): Array<{ title: string; bvid:
  * 原则：只加"人写的东西"的标记词，不改原意。
  * 如果一个词已经有这类修饰，就不重复加。
  */
-export function refineQuery(topic: string): string {
+/**
+ * 从"口语化长话题"里提取可搜索的核心词（M36）。
+ *
+ * 踩过的坑（2026-11-03）：她的兴趣被记成「把小事讲得很慢的散文和随笔」，
+ * 拿去搜索时，搜索引擎把整句拆成单字「把」，返回的是
+ * 「把的意思,把的解释,把的拼音-汉语国学」—— 完全无关的字典页。
+ *
+ * 判据：话题超过 12 字且含口语连接词（的/和/很/把/讲/…) 时，
+ * 提取其中的**名词性实词**（散文、随笔），丢掉修饰和虚词。
+ */
+export function coreKeywords(topic: string): string {
   const t = String(topic ?? '').trim();
+  if ([...t].length <= 12) return t;   // 短话题不用处理
+
+  // 口语虚词：整句里出现这些，说明不是术语而是描述
+  const COLLOQUIAL = /(?:把|讲得|得很|那种|的事儿|东西)/;
+  if (!COLLOQUIAL.test(t)) return t;
+
+  // 按虚词/连接词切开，留下实词块
+  const parts = t
+    .split(/[的把和与讲得了是很那种]+/)
+    .map((w) => w.trim())
+    .filter((w) => [...w].length >= 2);
+
+  // 只留最后 2 个（口语描述里核心名词通常在后半段：散文、随笔）
+  const core = parts.slice(-2);
+  return core.length > 0 ? core.join(' ') : t;
+}
+
+export function refineQuery(topic: string): string {
+  // M36：先把口语化长句压成核心词，否则会搜出单字字典页
+  const t = coreKeywords(String(topic ?? '').trim());
   if (!t) return t;
   // 概念型查询**不加**"经验 心得" —— 否则会把百科挤掉，
   // 而查"什么是X"时百科恰恰是最佳来源（用户指出过这个坑）。

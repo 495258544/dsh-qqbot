@@ -642,10 +642,20 @@ export class PersonaService {
     const log = this.deps.logger;
 
     const tick = (): void => {
-      if (!inSurfWindow(new Date(), cfg.surfFromHour, cfg.surfToHour)) return;
+      // M36：每次 tick 都留痕。
+      // 起因：03:36 重启后 05:36 那轮本应冲浪却没跑，查不到原因 ——
+      // 因为所有早退分支都是静默 return，日志里只有"武装"那一行。
+      const now = Date.now();
+      const prev = this.self.snapshot().lastSurfAt ?? 0;
+      const gapH = prev ? (now - prev) / 3600_000 : 999;
+      const inWin = inSurfWindow(new Date(), cfg.surfFromHour, cfg.surfToHour);
+      log.debug(`persona: surf tick · 窗口=${inWin} 距上次=${gapH.toFixed(2)}h`);
+      if (!inWin) return;
       // 同一冲浪时段内只跑一轮（2 小时内已冲过就跳过）
-      const last = this.self.snapshot().lastSurfAt ?? 0;
-      if (Date.now() - last < 2 * 3600_000) return;
+      if (gapH < 2) {
+        log.debug(`persona: surf 跳过（距上次 ${gapH.toFixed(2)}h < 2h）`);
+        return;
+      }
       try {
         log.info('persona: 冲浪开始');
         const results = runSurfRound(this.self, {

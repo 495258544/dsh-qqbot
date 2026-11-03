@@ -271,3 +271,25 @@ describe('M33 · 口癖产出的表达性（线上 48 条样本的真实教训�
     expect(svc.renderSection()).toContain('说实话');
   });
 });
+
+describe('PENDING_TTL · 口癖样本必须有足够存活时间（M36）', () => {
+  it('她说的话在 30 分钟后仍可被判定（原来 5 分钟就丢）', async () => {
+    // 实测：线上 48 条样本、最新停在 11-02 12:07，40 小时没有新样本，
+    // 但期间有 10 轮对话。根因是 TTL=5min，而真实对话间隔平均 12.1 分钟。
+    const { mkdtempSync } = await import('node:fs');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
+    const dir = mkdtempSync(join(tmpdir(), 'voice-ttl-'));
+    const { VoiceService } = await import('./voice.ts');
+    const v = new VoiceService(dir);
+
+    expect(v.recordUtterance('t1', 'k1', '翻了下那个系列，看它还更不更新。')).toBe(true);
+    // 模拟 30 分钟过去
+    const pending = (v as unknown as { data: { pending: Array<{ at: number }> } }).data.pending;
+    pending[0]!.at = Date.now() - 30 * 60_000;
+
+    // 30 分钟后仍应能判定（不该被 TTL 丢掉）
+    const caught = v.judgeIncoming('k1', '确实是这样');
+    expect(caught.length).toBe(1);
+  });
+});
