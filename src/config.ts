@@ -119,6 +119,11 @@ export interface PersonaConfig {
   ownLifeIntervalMs: number;
   /** 静默唤醒每天最多几次 */
   ownLifeMaxPerDay: number;
+  /**
+   * 静默时段（小时的 [from, to) 区间，用北京时区）。
+   * 默认 [23, 8] = 深夜到清晨不叫；改成 [22, 8] 就是只在她白天醒着时活动。
+   */
+  ownLifeQuietHours: number[];
   /** 自主冲浪开关（低峰时段上网搜集她感兴趣的内容） */
   surfEnabled: boolean;
   /** 冲浪时段起（小时，默认3） */
@@ -398,6 +403,10 @@ export const ConfigSchema: Schema<ImQQBotConfig> = Schema.object({
     ownLifeEnabled: Schema.boolean().default(false).description('own-life 静默唤醒（给她自己的时间）'),
     ownLifeIntervalMs: Schema.number().default(2.5 * 3600 * 1000).description('静默唤醒间隔(ms)，默认 2.5h'),
     ownLifeMaxPerDay: Schema.number().default(6).description('静默唤醒每天最多几次'),
+    ownLifeQuietHours: Schema
+      .array(Schema.number())
+      .default([23, 8])
+      .description('静默时段 [from,to) 小时（北京时区）：这段时间不叫醒她。默认 [23,8]；填 [22,8] 就只在 08:00-22:00 活动'),
     surfEnabled: Schema.boolean().default(false).description('自主冲浪：低峰时段上网搜集她感兴趣的内容'),
     surfFromHour: Schema.number().default(3).description('冲浪时段起（小时，默认3点）'),
     surfToHour: Schema.number().default(7).description('冲浪时段止（小时，默认7点）'),
@@ -442,6 +451,7 @@ export const ConfigSchema: Schema<ImQQBotConfig> = Schema.object({
     ownLifeEnabled: false,
     ownLifeIntervalMs: 2.5 * 3600 * 1000,
     ownLifeMaxPerDay: 6,
+    ownLifeQuietHours: [23, 8],
     surfEnabled: false,
     surfFromHour: 3,
     surfToHour: 7,
