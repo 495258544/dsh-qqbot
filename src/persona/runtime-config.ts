@@ -11,6 +11,7 @@
  *     "names": ["小深"],           // 追加到 profile 的 names
  *     "keywords": ["打刀"],         // 追加到 profile 的 keywords
  *     "otherNames": ["刘宗锴"]      // 追加到"别人名字"表（判断这句在叫谁）
+ *     "selfIds": ["<32位openid>"]   // 追加到"自己人"openid 表（这些号的群昵称不算"别人"）
  *   }
  *
  * 语义一律是**追加**，不是替换：profile 里那份是基线，这里只往上加。
@@ -22,6 +23,13 @@ export interface PersonaRuntime {
   names?: string[];
   keywords?: string[];
   otherNames?: string[];
+  /**
+   * 追加到"自己人"openid 表（owner / bot 之外，本人的小号、备用号等）。
+   * 这些 openid 在 people.json 里的群昵称**不会**进"别人名字"表——
+   * 否则他用小号说一句"你觉得我开小号打得怎么样"，"小号"会被判成"在叫别人"，
+   * 把这句本该接的话压掉（knownNames 的 excludeIds，见 wake-gate）。
+   */
+  selfIds?: string[];
 }
 
 /** 只保留非空字符串，去重，保持原顺序 */
@@ -86,6 +94,7 @@ export class RuntimeConfig {
         names: sanitizeList(parsed.names),
         keywords: sanitizeList(parsed.keywords),
         otherNames: sanitizeList(parsed.otherNames),
+        selfIds: sanitizeList(parsed.selfIds),
       };
     } catch (err) {
       // 写坏了不该让她直接变哑巴：降级为空，用 profile 的基线继续跑
@@ -107,13 +116,20 @@ export class RuntimeConfig {
     return this.get().otherNames ?? [];
   }
 
+  /** 自己人的 openid（owner / bot 之外补充的小号、备用号） */
+  selfIds(): string[] {
+    return this.get().selfIds ?? [];
+  }
+
   /** 落盘（给工具用：把新名字/关键词写进去，下一轮就生效） */
   update(patch: Partial<PersonaRuntime>): PersonaRuntime {
     const current = { ...this.get(), ...patch };
+    // 四份都得写：漏一份，工具的一次 update 就会把没提的那份静默清空
     const payload: PersonaRuntime = {
       names: sanitizeList(current.names),
       keywords: sanitizeList(current.keywords),
       otherNames: sanitizeList(current.otherNames),
+      selfIds: sanitizeList(current.selfIds),
     };
     const tmp = `${this.file}.tmp`;
     fs.writeFileSync(tmp, JSON.stringify(payload, null, 2), 'utf8');

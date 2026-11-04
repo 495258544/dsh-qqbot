@@ -79,6 +79,7 @@ persona:
 | 绑 Steam（加人/解绑/改称呼） | `~/.dsh-qqbot/steam/bindings.json` | **立即**（按 mtime 热重读） |
 | Steam Key / 主人账号 | `~/.dsh-qqbot/steam/settings.json` | **立即** |
 | 她的名字、关键词、群友称呼 | `<personaDataDir>/runtime.json` | **立即** |
+| 自己的小号/备用号（这些号的群昵称不算"别人"） | 同上，`selfIds` | **立即** |
 | 她接受的称呼 / 兴趣 / 话痨度 | `<personaDataDir>/self.json` | **立即** |
 | 群友昵称记忆 | `<personaDataDir>/memory/people.json` | **立即**（30s 缓存） |
 | profile 里其它配置（时段、概率、开关） | `~/.dsh/profiles/web/cordis.patch.yml` | 重启 |
@@ -94,12 +95,19 @@ persona:
 {
   "names": ["小深", "阿深"],
   "keywords": ["打刀", "开黑"],
-  "otherNames": ["刘宗锴"]
+  "otherNames": ["刘宗锴"],
+  "selfIds": ["DAE485A31F332848D7D9C17CC0999941"]
 }
 ```
 
 语义是**追加**：profile 里那份是基线，这里只往上加，两边不用惦记对方。
 写坏了会降级为空并记一条 warn，不会让她变哑巴。
+
+`selfIds` 是**自己人的 openid**（小号、备用号）。为什么需要它：QQ 里同一个人的
+群成员 openid 和私聊 openid 是两个值，所以主人换小号在群里说话，他的群昵称
+（people.json 里那条）会被当成"别人的名字"，于是"你觉得我开小号打得怎么样"
+这种本该接的话被压掉（knownNames 判成"在叫别人"）。把那个号的 openid 填进来就排除掉。
+当前说话人自己已由代码自动排除，不用登记；这里登记的是**不在场时**也要认的号。
 
 改完不用做任何事，下一轮对话就按新的来。想加个人：
 
