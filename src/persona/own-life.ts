@@ -17,6 +17,8 @@ import { DEFAULT_TZ, hourInTz, dayInTz, clockInTz, isHourInRange } from './clock
 import path from 'node:path';
 
 const HOUR = 3600 * 1000;
+/** 错过锚点后的补掷宽限：45 分钟内仍算"到点"（进程重启/掉线的容错）。 */
+const GRACE_MS = 45 * 60_000;
 
 /**
  * 白天版提示（M24 改写，2026-11-02）
@@ -111,6 +113,20 @@ export interface OwnLifeOptions {
   statePath?: string;
   intervalMs?: number;
   /**
+   * 时段锚点模式（2026-11-04 修订）：如 ['10:00','14:00','18:00','21:00']。
+   *
+   * 为什么不用 intervalMs 的相对间隔（实测分布问题）：
+   *   相对间隔是"距上次触发 ≥4h 就开始每分钟掷骰"，触发时间随机游走——
+   *   可能上午连掷两次把当天额度烧掉，晚上反而沉默。
+   *   时段锚点把活动窗口切成固定槽，每次到点掷骰一次（没中作废该槽，下个槽再来），
+   *   分布稳定：槽本身就是设计好的安全时段，不会撞静默边界。
+   *
+   * 与 intervalMs 互斥：设置了 daySlots 就走锚点，intervalMs 被忽略。
+   * 槽时刻是**北京时区**（同 midnightAt）。每个槽带 45 分钟宽限：
+   * 进程重启/掉线错过了锚点，宽限内到点仍会掷骰补上，宽限外该槽作废。
+   */
+  daySlots?: string[];
+  /**
    * 到点后掷一次本地骰子，通过才真的开口（M25）。
    *
    * 借鉴 dsh-speak-up（Yuuyuko-uu，207 star）的做法：掷骰子在本地算，
@@ -145,6 +161,13 @@ export interface OwnLifeState {
   firedToday: number;
   lastMidnightDay: string;
   /**
+   * 时段锚点模式（daySlots）当天已消耗的槽下标集合。
+   * 键是日期（北京），跨天自动作废； JSON 里存数组，运行时用 Set。
+   * 只记"到点掷过骰"的槽（不管掷中没中）——没中的槽当天不再补掷，
+   * 否则锚点的"分布稳定"就退化回相对间隔的随机游走。
+   */
+  usedSlots?: { day: string; idx: number[] };
+  /**
    * 最近几次自由时间她做了什么（M24）。
    *
    * 为什么需要（开源调研结论，own-life-research.md §6.3）：
@@ -168,7 +191,7 @@ export interface OwnLifeHandle {
   stop(): void;
   tick(nowTs?: number): Promise<OwnLifeTickResult>;
   fireNow(): Promise<OwnLifeTickResult>;
-  snapshot(): OwnLifeState & { enabled: boolean; intervalMs: number };
+  snapshot(): OwnLifeState & { enabled: boolean; intervalMs: number; daySlots?: string[] };
   /** 记录这次自由时间做了什么（供 agent 回报；只留最近 8 条） */
   noteActivity(text: string): void;
 }
@@ -178,6 +201,7 @@ export function createOwnLife(opts: OwnLifeOptions): OwnLifeHandle {
     deliver,
     statePath,
     intervalMs = 2.5 * HOUR,
+    daySlots,
     quiet = [3, 8],
     tz = DEFAULT_TZ,
     midnightAt = '23:30',
@@ -219,6 +243,44 @@ export function createOwnLife(opts: OwnLifeOptions): OwnLifeHandle {
     const h = hourInTz(new Date(now), tz);
     const [from, to] = quiet;
     return isHourInRange(h, from, to);
+  }
+
+  /** 槽时刻 "HH:mm"（北京）→ 当天该时刻的 UTC ms。 */
+  function slotTime(now: number, hhmmStr: string): number {
+    const [hh, mm] = String(hhmmStr).split(':').map(Number);
+    const d = new Date(now);
+    const dayStart = Date.UTC(
+      Number(dayInTz(d).slice(0, 4)),
+      Number(dayInTz(d).slice(5, 7)) - 1,
+      Number(dayInTz(d).slice(8, 10)),
+    ) - 8 * 3600_000;
+    return dayStart + ((hh ?? 0) * 60 + (mm ?? 0)) * 60_000;
+  }
+
+  /**
+   * 槽判定（2026-11-04 修订）。
+   * 返回当前 tick 该不该为槽 i 掷骰：
+   *   - now >= slotTime && now < slotTime + GRACE_MS → 到点（含宽限）
+   *   - 槽没被消耗过（state.usedSlots 不含今天的 i）
+   * 到点掷完（无论中不中）就消耗该槽。宽限外 = 该槽作废，等下一个。
+   */
+  function dueSlot(now: number): number | undefined {
+    const slots = daySlots;
+    if (!slots || slots.length === 0) return undefined;
+    const today = dayKey(now);
+    const used = state.usedSlots?.day === today ? state.usedSlots.idx : [];
+    for (let i = 0; i < slots.length; i++) {
+      if (used.includes(i)) continue;
+      const t = slotTime(now, slots[i] ?? '');
+      if (now >= t && now < t + GRACE_MS) return i;
+    }
+    return undefined;
+  }
+
+  function consumeSlot(idx: number, now: number): void {
+    const today = dayKey(now);
+    if (state.usedSlots?.day !== today) state.usedSlots = { day: today, idx: [] };
+    state.usedSlots.idx.push(idx);
   }
 
   function pastMidnightSlot(now: number): boolean {
@@ -309,6 +371,27 @@ export function createOwnLife(opts: OwnLifeOptions): OwnLifeHandle {
       return fire('midnight', nowTs);
     }
 
+    // ── 时段锚点模式（daySlots）─────────────────────────────
+    // 2026-11-04 修订：相对间隔（intervalMs）的触发时间是随机游走，
+    // 上午可能连掷两次烧掉额度，晚上沉默。改成固定槽：到点掷一次，
+    // 没中作废该槽（不重掷——重掷就退化回随机游走），下个槽再试。
+    // 与 intervalMs 互斥：配了 daySlots 就走这条，interval 被忽略。
+    const slot = dueSlot(nowTs);
+    if (slot !== undefined) {
+      consumeSlot(slot, nowTs);
+      save();
+      const p = Math.max(0, Math.min(1, rollProbability * (moodFactor?.() ?? 1)));
+      if (rollProbability < 1 && Math.random() >= p) {
+        log(`槽 ${daySlots?.[slot]} 掷骰未中（${(p * 100).toFixed(0)}%），该槽作废，等下个槽`);
+        return { ok: false, skipped: 'roll-missed' };
+      }
+      return fire('day', nowTs);
+    }
+    if (daySlots && daySlots.length > 0) {
+      // 锚点模式下不走下面的 interval 分支（互斥）
+      return { ok: false, skipped: 'not-yet' };
+    }
+
     if (nowTs - Number(state.lastFiredAt || 0) >= intervalMs) {
       // 到点了先掷骰子（本地 Math.random，零 token）
       // intervalMs=0 是"每次 tick 都算到点"的测试/调试配置，这种情况不掷骰
@@ -334,7 +417,10 @@ export function createOwnLife(opts: OwnLifeOptions): OwnLifeHandle {
       void tick().catch(() => {});
     }, 60 * 1000);
     timer.unref?.();
-    log(`已武装 · 每 ${(intervalMs / HOUR).toFixed(1)}h 一次 · 安静时段 ${quiet[0]}:00–${quiet[1]}:00 · 半夜 ${midnightAt} · 每天最多 ${maxPerDay} 次`);
+    const mode = daySlots && daySlots.length > 0
+      ? `时段锚点 ${daySlots.join('/')}`
+      : `每 ${(intervalMs / HOUR).toFixed(1)}h 一次`;
+    log(`已武装 · ${mode} · 安静时段 ${quiet[0]}:00–${quiet[1]}:00 · 半夜 ${midnightAt} · 每天最多 ${maxPerDay} 次`);
     // 启动后 90 秒先看一眼（别和开机时的会话创建抢）
     setTimeout(() => {
       void tick().catch(() => {});
@@ -352,7 +438,7 @@ export function createOwnLife(opts: OwnLifeOptions): OwnLifeHandle {
     stop,
     tick,
     fireNow: () => fire('day'),
-    snapshot: () => ({ ...state, enabled, intervalMs }),
+    snapshot: () => ({ ...state, enabled, intervalMs, daySlots }),
     noteActivity,
   };
 }

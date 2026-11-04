@@ -124,6 +124,13 @@ export interface PersonaConfig {
    * 默认 [23, 8] = 深夜到清晨不叫；改成 [22, 8] 就是只在她白天醒着时活动。
    */
   ownLifeQuietHours: number[];
+  /**
+   * own-life 时段锚点（2026-11-04 修订）。如 ['10:00','14:00','18:00','21:00']。
+   * 设置后走"固定槽到点掷骰"模式，ownLifeIntervalMs 被忽略；
+   * 槽没掷中当天作废（不重掷），下个槽再试。空数组 = 用 intervalMs 相对间隔。
+   * 北京时区。分布比相对间隔稳定，不会出现"上午烧光额度晚上沉默"。
+   */
+  ownLifeDaySlots: string[];
   /** 自主冲浪开关（低峰时段上网搜集她感兴趣的内容） */
   surfEnabled: boolean;
   /** 冲浪时段起（小时，默认3） */
@@ -407,6 +414,7 @@ export const ConfigSchema: Schema<ImQQBotConfig> = Schema.object({
       .array(Schema.number())
       .default([23, 8])
       .description('静默时段 [from,to) 小时（北京时区）：这段时间不叫醒她。默认 [23,8]；填 [22,8] 就只在 08:00-22:00 活动'),
+    ownLifeDaySlots: Schema.array(Schema.string()).default([]).description('时段锚点（北京时刻，如 10:00/14:00/18:00/21:00）：到点掷骰一次决定是否自由活动，没中该槽作废等下个槽。设置后忽略上面的间隔配置；留空 = 用旧的相对间隔模式'),
     surfEnabled: Schema.boolean().default(false).description('自主冲浪：低峰时段上网搜集她感兴趣的内容'),
     surfFromHour: Schema.number().default(3).description('冲浪时段起（小时，默认3点）'),
     surfToHour: Schema.number().default(7).description('冲浪时段止（小时，默认7点）'),
@@ -452,6 +460,7 @@ export const ConfigSchema: Schema<ImQQBotConfig> = Schema.object({
     ownLifeIntervalMs: 2.5 * 3600 * 1000,
     ownLifeMaxPerDay: 6,
     ownLifeQuietHours: [23, 8],
+    ownLifeDaySlots: [],
     surfEnabled: false,
     surfFromHour: 3,
     surfToHour: 7,

@@ -577,6 +577,9 @@ export class PersonaService {
       deliver,
       statePath: path.join(this.deps.dataDir, 'state', 'own-life.json'),
       intervalMs: this.deps.config.ownLifeIntervalMs,
+      // 2026-11-04 修订：时段锚点模式（互斥）。配置了槽就走固定时刻掷骰，
+      // 触发分布稳定（不会"上午烧光额度晚上沉默"）；空数组走旧 interval 路径。
+      daySlots: this.deps.config.ownLifeDaySlots?.length ? this.deps.config.ownLifeDaySlots : undefined,
       // M31 闸门④：心情影响"想不想主动说话"
       moodFactor: () => speakWillingness(this.emotion.current()),
       maxPerDay: this.deps.config.ownLifeMaxPerDay,
