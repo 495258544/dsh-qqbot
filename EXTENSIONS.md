@@ -21,6 +21,7 @@
 | 配置扩展 | `src/config.ts` 的 `steam`、`dota`、`persona.dotaDigest*`、`persona.dotaKeywords` | 上述功能的开关与参数 | **高**（上游常加字段，同文件必合） |
 | 接线 | `src/gateway/bootstrap.ts` | 构造/启动 Steam、Dota、digest、群活跃度 | **中** |
 | CLI | `scripts/steam-config.mjs`、`scripts/steam-friends-export.mjs` | 管理 Steam 凭据/主人账号；导出好友对照表 | 低 |
+| 小黑盒只读 | `src/xhh/{sign,client,images,tools,index}.ts` | 搜帖/刷首页/读正文与评论/把图收进表情库；匿名接口，不碰账号 | 低（全新目录，上游不碰） |
 | 安装引导 | `SETUP.md` | 给其他用户/agent 的安装配置说明 | 低 |
 
 ## 二、新增配置项（都在 profile 的 `im-qqbot.config` 下）
@@ -35,6 +36,12 @@ steam:            # apiKey / ownerSteamId 只作首次采纳，真正生效值�
 dota:
   enabled: true
   includeWinLoss: true
+xhh:                 # 小黑盒只读（搜索/首页/读帖/收图；不需要账号与 Cookie）
+  enabled: true
+  throttleWindowMs: 600000   # 实测：同一签名请求总量超标会弹人机验证
+  throttleMaxCalls: 6
+  defaultLimit: 8
+  commentLimit: 12
 persona:
   dotaDigestEnabled: true
   dotaDigestGroupId: ''

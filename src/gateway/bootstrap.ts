@@ -35,6 +35,7 @@ import { registerPersonaTools } from '../persona/tools.ts';
 import { checkBiliHealth, formatHealthIssues } from '../persona/bili-health.ts';
 import { SteamService, registerSteamTools } from '../steam/index.ts';
 import { createDotaService, registerDotaTools, type DotaService } from '../dota/index.ts';
+import { createXhhClient, registerXhhTools } from '../xhh/index.ts';
 import { createBridgeProbe, renderScreenNudge } from '../persona/screen-watch.ts';
 import { createDotaDigest } from '../persona/dota-digest.ts';
 import { configureGroupActivity, pickBestGroup } from '../features/group-activity.ts';
@@ -306,6 +307,17 @@ export async function bootstrapGateway(
   // ── Dota2 工具（qq_dota_recent）──
   if (dota) {
     registerDotaTools(ctx, dota, logger);
+  }
+
+  // ── 小黑盒只读工具（qq_xhh_search / qq_xhh_read / qq_xhh_save_sticker）──
+  // 匿名接口，不需要账号与 Cookie；所以这里没有"凭据没配就跳过"的分支，
+  // 只要开关开着就一定注册（失败也只影响单次调用，不影响启动）。
+  if (config.xhh?.enabled) {
+    try {
+      registerXhhTools(ctx, createXhhClient(config.xhh, logger), config, logger);
+    } catch (err) {
+      logger.warn(`xhh: 初始化失败，小黑盒功能已跳过: ${err instanceof Error ? err.message : String(err)}`);
+    }
   }
 
   // ── own-life 静默唤醒：只投递给**存活**的 owner c2c 会话（peek 不重建），
