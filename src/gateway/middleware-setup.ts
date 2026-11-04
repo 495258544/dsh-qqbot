@@ -153,6 +153,12 @@ export function setupMiddlewares(
             .map((n) => n.trim())
             .filter((n) => n !== '')),
       ])],
+      // 自己人的静态 id：owner + bot，knownNames 据此把他们的群昵称剔出"别人名字"表。
+      // 只填静态的这两个，"当前说话人自己"由门内并入 msg.senderId。
+      selfIds: () => [...new Set([
+        ...config.persona.ownerOpenids,
+        ...(config.persona.botOpenid !== '' ? [config.persona.botOpenid] : []),
+      ])],
     }));
   }
 

@@ -388,8 +388,11 @@ export class Memory {
     return { people: this.readAll(), turns: this.recentTurns(1e9) };
   }
 
-  /** 昵称缓存：唤醒判定每条消息都要用，不能每次都读 people.json */
-  private namesCache: { at: number; names: string[] } | undefined;
+  /**
+   * 昵称缓存：唤醒判定每条消息都要用，不能每次都读 people.json
+   * key 含排除集，避免"换了说话人就命中旧缓存"（缓存的是全量，按 excludeIds 现算）
+   */
+  private namesCache: { at: number; all: string[] } | undefined;
 
   /**
    * 已知群友的昵称列表（给"这句话在叫别人"的判定用）。
@@ -399,26 +402,37 @@ export class Memory {
    * 等于那条保护从没生效过。群友之间是真会直呼昵称的（"芋头你今天打不打"），
    * 这里把见过的昵称都收集起来喂过去。
    *
-   * 30 秒缓存：这是每条群消息都会走的路径，读盘太贵。
+   * excludeIds：**自己人不该进"别人名字"表**。owner / bot 各自的 openid、
+   * 以及当前说话人自己，都要排除——否则主人用自己的群昵称说了句
+   * "jmx这名字谁取的"，会被 `knownNames` 里的 "jmx" 判成"在叫别人"而压掉她。
+   * 传进来的是 openid 集合（QQ 群成员 openid ≠ 私聊 openid，调用方给全）。
+   *
+   * 30 秒缓存的是**全量表**，按 excludeIds 现算过滤（读盘才是贵的那步）。
    */
-  knownNames(): string[] {
+  knownNames(excludeIds?: ReadonlySet<string>): string[] {
     const now = Date.now();
-    if (this.namesCache !== undefined && now - this.namesCache.at < 30_000) {
-      return this.namesCache.names;
+    if (this.namesCache === undefined || now - this.namesCache.at >= 30_000) {
+      const names = new Set<string>();
+      for (const [id, ledger] of Object.entries(this.readAll())) {
+        const name = String((ledger as PersonLedger).name ?? '').trim();
+        // 过滤明显不是昵称的：空、单字（"小"这种太容易误命中）、过长、纯 openid
+        if (name.length < 2 || name.length > 12) continue;
+        // 纯符号的昵称（QQ 里有人就叫"……"）当名字用只会误伤，至少得有一个字母或数字
+        if (!/[\p{L}\p{N}]/u.test(name)) continue;
+        if (name === id) continue;
+        if (/^[0-9a-f]{16,}$/i.test(name)) continue;
+        names.add(`${id}\u0000${name}`);
+      }
+      this.namesCache = { at: now, all: [...names] };
     }
-    const names = new Set<string>();
-    for (const [id, ledger] of Object.entries(this.readAll())) {
-      const name = String((ledger as PersonLedger).name ?? '').trim();
-      // 过滤明显不是昵称的：空、单字（"小"这种太容易误命中）、过长、纯 openid
-      if (name.length < 2 || name.length > 12) continue;
-      // 纯符号的昵称（QQ 里有人就叫"……"）当名字用只会误伤，至少得有一个字母或数字
-      if (!/[\p{L}\p{N}]/u.test(name)) continue;
-      if (name === id) continue;
-      if (/^[0-9a-f]{16,}$/i.test(name)) continue;
-      names.add(name);
+    // 缓存里按 `id\0name` 存是为了能做排除；吐出去前再按名字去重回旧版语义
+    // （同一个人私聊/群两个 openid 撞同名，不该在表里出现两次）
+    const out = new Set<string>();
+    for (const x of this.namesCache.all) {
+      const sep = x.indexOf('\u0000');
+      if (excludeIds !== undefined && excludeIds.size > 0 && excludeIds.has(x.slice(0, sep))) continue;
+      out.add(x.slice(sep + 1));
     }
-    const list = [...names];
-    this.namesCache = { at: now, names: list };
-    return list;
+    return [...out];
   }
 }

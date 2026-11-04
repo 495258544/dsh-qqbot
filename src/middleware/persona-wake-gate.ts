@@ -83,6 +83,16 @@ export function personaWakeGate(
      * 「芋头你今晚打不打」就会被她当成省略主语的问句抢着接。
      */
     extraNames?: () => string[];
+    /**
+     * 自己人的 openid（owner + bot）。这些账号的群昵称不该进「别人名字」表。
+     *
+     * 坑：QQ 里同一个人的**群成员 openid 和私聊 openid 是两个值**（profile 注释也写了）。
+     * 所以光过滤 `ownerOpenids` 那个私聊 id 是空操作——主人在群里用的是群成员 id，
+     * 它进的是 people.json 的 name，会原样进 knownNames，然后他一句
+     * 「jmx这名字谁取的」就被判成「在叫别人」而压掉她。**当前说话人自己**这一路
+     * 由门内并入（senderId 现成），调用方只管填静态的那批（owner / bot）。
+     */
+    selfIds?: () => Iterable<string>;
   } = {},
 ): Middleware {
   const fromBotAtMeAllowed = opts.fromBotAtMeAllowed !== false;
@@ -160,8 +170,15 @@ export function personaWakeGate(
             isAtMe: ctx.state.mention?.wasMentioned === true,
             // @ 了别人 → 活跃期内也不该抢话（详见 mentionsOtherPeople 的注释）
             atSomeoneElse: mentionsOtherPeople(msg.content ?? '', ctx.state.mention?.wasMentioned === true),
-            // 群友的昵称（带 30s 缓存 + 绑定表补全）：用来识别"这句话是在叫别人"
-            otherNames: [...persona.memory.knownNames(), ...(opts.extraNames?.() ?? [])],
+            // 群友的昵称（带 30s 缓存 + 绑定表补全）：用来识别"这句话是在叫别人"。
+            // 排除"自己人"：owner / bot 的静态 id（opts.selfIds）+ 当前说话人自己
+            // （msg.senderId）。少了这一步，主人用自己的群昵称说"jmx这名字谁取的"，
+            // knownNames 会把"jmx"当成"别人"→ 这句本该她接的话被压掉（群成员 id
+            // ≠ 私聊 owner id，所以只过滤 ownerOpenids 修不掉，见 selfIds 注释）。
+            otherNames: [
+              ...persona.memory.knownNames(new Set([msg.senderId, ...(opts.selfIds?.() ?? [])])),
+              ...(opts.extraNames?.() ?? []),
+            ],
             // 活跃期内按概率接话，避免变成应答器
             inActiveWindow: waker.isSpeakerActive(key, msg.senderId),
           })
