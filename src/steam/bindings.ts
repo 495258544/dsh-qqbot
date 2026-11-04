@@ -44,8 +44,8 @@ export class BindingStore {
   private readonly file: string;
   private readonly logger: { info(msg: string): void; warn(msg: string): void };
   private cache: Record<string, SteamBinding> | undefined;
-  /** 上次读盘时的 mtime，用判断"外面改过没有" */
-  private mtimeAt: number | undefined;
+  /** 上次读盘时的文件版本号（mtimeMs:size），用判断"外面改过没有" */
+  private mtimeAt: string | undefined;
 
   constructor(dir: string, logger: { info(msg: string): void; warn(msg: string): void }) {
     fs.mkdirSync(dir, { recursive: true });
@@ -53,9 +53,17 @@ export class BindingStore {
     this.logger = logger;
   }
 
-  private statMtime(): number | undefined {
+  /**
+   * 文件版本号 = `mtimeMs:size`。
+   *
+   * 只看 mtime 不够：本机文件系统 mtime 精度约 4ms（实测 40 次连续写只产生
+   * 3 个不同值），同一毫秒内改完再读就会被判成"没变"，热重读静默失效。
+   * 与 persona/runtime-config.ts 用同一套判断，两处别长歪。
+   */
+  private statVersion(): string | undefined {
     try {
-      return fs.statSync(this.file).mtimeMs;
+      const st = fs.statSync(this.file);
+      return `${st.mtimeMs}:${st.size}`;
     } catch {
       return undefined;
     }
@@ -66,10 +74,10 @@ export class BindingStore {
    *
    * 热重读：命令行脚本、或者对话里临时跑的改表脚本都是**另一个写入方**，
    * 它们改完盘之后本进程必须立刻看到 —— 绑人、改称呼、加名字表都不该要求重启。
-   * 只在 mtime 变了才重新解析，正常路径上多一次 stat 的代价可以忽略。
+   * 只在版本变了才重新解析，正常路径上多一次 stat 的代价可以忽略。
    */
   private read(): Record<string, SteamBinding> {
-    const mtime = this.statMtime();
+    const mtime = this.statVersion();
     if (this.cache !== undefined) {
       // 文件还在且没动过 → 直接用缓存
       if (mtime !== undefined && mtime === this.mtimeAt) return this.cache;
@@ -116,8 +124,8 @@ export class BindingStore {
     fs.writeFileSync(tmp, JSON.stringify(payload, null, 2), 'utf8');
     fs.renameSync(tmp, this.file);
     this.cache = bindings;
-    // 自己写的也要把 mtime 记下，免得下次读又白解析一遍
-    this.mtimeAt = this.statMtime();
+    // 自己写的也要把版本号记下，免得下次读又白解析一遍
+    this.mtimeAt = this.statVersion();
   }
 
   list(): Array<{ openid: string; binding: SteamBinding }> {

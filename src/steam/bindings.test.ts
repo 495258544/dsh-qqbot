@@ -86,12 +86,11 @@ describe('BindingStore · 热重读（改完不用重启）', () => {
     store.set('openid-a', { steamId: '76561198205711847', alias: '小周、周星宇', boundAt: 1, source: 'self' })
     expect(store.size()).toBe(1)
 
-    // 模拟另一个进程写文件
+    // 模拟另一个进程写文件（不推 mtime：真实现场就是外部脚本改完立刻生效，
+    // 靠 utimesSync 造时间差会让生产路径没被覆盖。版本号含 size，见 bindings.ts）
     const raw = JSON.parse(fs.readFileSync(file, 'utf8'))
     raw.bindings['openid-b'] = { steamId: '76561198189818115', alias: '芋头、王运琦', boundAt: 2, source: 'self' }
     fs.writeFileSync(file, JSON.stringify(raw, null, 2), 'utf8')
-    const future = new Date(Date.now() + 1000)
-    fs.utimesSync(file, future, future)
 
     expect(store.size()).toBe(2)
     expect(store.find('王运琦').map((h) => h.openid)).toEqual(['openid-b'])
@@ -105,8 +104,6 @@ describe('BindingStore · 热重读（改完不用重启）', () => {
     const raw = JSON.parse(fs.readFileSync(file, 'utf8'))
     raw.bindings['openid-a'].alias = '小周、周星宇'
     fs.writeFileSync(file, JSON.stringify(raw, null, 2), 'utf8')
-    const future = new Date(Date.now() + 1000)
-    fs.utimesSync(file, future, future)
 
     expect(store.find('周星宇').map((h) => h.openid)).toEqual(['openid-a'])
   })

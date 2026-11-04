@@ -25,11 +25,15 @@ afterEach(() => {
 
 const make = () => new RuntimeConfig(file, (m) => logs.push(m))
 
-/** 写文件并把 mtime 明确往前推，避免 Windows 上同毫秒导致不触发重读 */
+/**
+ * 直接写文件，不推 mtime。
+ *
+ * 这里刻意**不**用 utimesSync 造时间差：真实现场就是外部脚本改完立刻生效，
+ * 靠推 mtime 会让测试通过而生产路径没被覆盖。RuntimeConfig 的版本号是
+ * mtimeMs:size，同毫秒的写入也能靠长度变化识别（见 runtime-config.ts）。
+ */
 function writeExternal(content: string): void {
   fs.writeFileSync(file, content, 'utf8')
-  const future = new Date(Date.now() + 1000)
-  fs.utimesSync(file, future, future)
 }
 
 describe('RuntimeConfig · 基础读取', () => {
