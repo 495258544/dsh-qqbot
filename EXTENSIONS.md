@@ -38,7 +38,7 @@ dota:
   includeWinLoss: true
 xhh:                 # 小黑盒只读（搜索/首页/读帖/收图；不需要账号与 Cookie）
   enabled: true
-  throttleWindowMs: 600000   # 实测：同一签名请求总量超标会弹人机验证
+  throttleWindowMs: 1800000  # 实测：link/tree 连打 3 次即封，封禁超 1 小时
   throttleMaxCalls: 6
   defaultLimit: 8
   commentLimit: 12

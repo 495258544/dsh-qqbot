@@ -7,7 +7,7 @@
  */
 import { describe, expect, it } from 'vitest';
 import { hkeyOf, signatureOf } from './sign.ts';
-import { hashFromShareUrl, normalizePostRef, parseRichText, XhhError } from './client.ts';
+import { hashFromShareUrl, normalizePostRef, parseRichText, webUrlOf, XhhError } from './client.ts';
 import { isAllowedImageUrl, filterAllowedImageUrls } from './images.ts';
 
 describe('签名（sign.ts）', () => {
@@ -62,6 +62,19 @@ describe('share_url → 分享哈希', () => {
     expect(hashFromShareUrl('https://example.com/x?a=1')).toBeUndefined();
     expect(hashFromShareUrl(undefined)).toBeUndefined();
     expect(hashFromShareUrl('')).toBeUndefined();
+  });
+});
+
+describe('webUrlOf（API 被封时的浏览器出路）', () => {
+  /**
+   * 为什么这个函数单独存在并单独测：
+   * 实测 API 的 link/tree 被小黑盒按 HTTP/TLS 指纹风控，而真实浏览器打开
+   * 同一个帖子完全不受影响（同一时刻 API=show_captcha、浏览器连读 6 篇 0 验证，
+   * 同一个端点、浏览器也没带登录 Cookie）。
+   * 所以"被拦了去浏览器读"是**唯一可行的替代路径**，这个 URL 必须拼对。
+   */
+  it('分享哈希 → 网页版帖子地址', () => {
+    expect(webUrlOf('4e4372c114cb')).toBe('https://www.xiaoheihe.cn/app/bbs/link/4e4372c114cb');
   });
 });
 

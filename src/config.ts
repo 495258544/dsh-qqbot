@@ -524,7 +524,7 @@ export const ConfigSchema: Schema<ImQQBotConfig> = Schema.object({
   xhh: Schema.object({
     enabled: Schema.boolean().default(DEFAULT_XHH_CONFIG.enabled).description('小黑盒只读工具总开关（关=不注册 qq_xhh_* 三个工具）'),
     timeoutMs: Schema.natural().default(DEFAULT_XHH_CONFIG.timeoutMs).description('单次请求超时(ms)'),
-    throttleWindowMs: Schema.natural().default(DEFAULT_XHH_CONFIG.throttleWindowMs).description('节流窗口长度(ms)：实测同一签名短时间请求总量超标就弹人机验证'),
+    throttleWindowMs: Schema.natural().default(DEFAULT_XHH_CONFIG.throttleWindowMs).description('节流窗口长度(ms)：实测 link/tree 连打 3 次即被风控、且封禁超 1 小时，故取 30 分钟'),
     throttleMaxCalls: Schema.natural().default(DEFAULT_XHH_CONFIG.throttleMaxCalls).description('窗口内最多几次请求（搜索与读帖共用这个额度；实测约 10 次连续请求就进验证码，别调高）'),
     defaultLimit: Schema.natural().default(DEFAULT_XHH_CONFIG.defaultLimit).description('搜索默认返回几条'),
     maxLimit: Schema.natural().default(DEFAULT_XHH_CONFIG.maxLimit).description('单次搜索上限'),

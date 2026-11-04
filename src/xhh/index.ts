@@ -22,7 +22,7 @@ import type { XhhComment, XhhErrorKind, XhhHotGroup, XhhParagraph, XhhPost, XhhP
 export const DEFAULT_XHH_CONFIG: XhhConfig = {
   enabled: true,
   timeoutMs: 10_000,
-  throttleWindowMs: 10 * 60_000,
+  throttleWindowMs: 30 * 60_000,
   throttleMaxCalls: 5,
   defaultLimit: 8,
   maxLimit: 20,

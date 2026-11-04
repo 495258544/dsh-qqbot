@@ -18,6 +18,71 @@
 
 结论：**只要那两个接口 + 一段签名**，不需要引入任何运行时。
 
+## 人机验证（show_captcha）：它是什么、能不能过
+
+### 它是什么
+
+小黑盒的风控。表现是 HTTP **仍然 200**，但 body 变成
+`{"msg":"","result":{},"status":"show_captcha"}`。
+
+它不是"频率太快"这么简单。两轮实测：
+
+| 观察 | 数据 |
+|---|---|
+| 连续探测后首次被拦 | 约 10 次 |
+| 封禁时长 | **连试 1 小时以上仍未解除** |
+| 解除后再测 `link/tree`（1 秒间隔） | **3 次成功，第 4 次就挂** |
+| 间隔 60 秒慢速打第 1 次 | **也挂** |
+
+最后一条很关键：**慢发救不回来**，它记的是累计痕迹，不是单纯速率。
+
+### 有没有办法绕过（查了）
+
+GitHub 上唯一正面处理这个问题的项目是 `Insect-rippler/XIAOHEIHE_MCP`（MIT），
+它的 `src/services/captcha.ts` 做法是：**熔断 5 分钟 + 提示用户去浏览器手动过验证**，
+并明确写着「持续重试会延长风控时间」。和我这里的实现是同一个思路。
+**没有可用的绕过库。**
+
+### 但有一条真能用的替代路：走浏览器
+
+这是实测出来的，不是推测：
+
+| 同一时刻 | `link/tree` API | 真实浏览器打开帖子页 |
+|---|---|---|
+| 结果 | `show_captcha` | **正常，连读 6 篇 0 次验证** |
+| 带登录 Cookie? | 无 | **也没有**（只有匿名 `smidV2`） |
+| 调的端点 | `/bbs/app/link/tree` | **同一个端点** |
+| 带 `smidV2` cookie 打 API | 仍然 `show_captcha` | — |
+
+浏览器和我的请求**走同一个端点、同样没有登录态**，差别只在
+**HTTP/TLS 指纹**（真实 Chrome vs curl/node-fetch）。所以：
+
+- **Cookie 不是钥匙**（实测带 `smidV2` 照样被拦）
+- **参数也不是钥匙**（换成浏览器那套 `web_version=3.0 / x_os_type=Mac / dw=628` 照样被拦）
+- **指纹才是**，而指纹没法在代码里伪造
+
+所以 `qq_xhh_read` 被拦时的正确做法不是重试，是让**她自己**用 `ego_navigate`：
+
+```
+1. ego_navigate("https://www.xiaoheihe.cn/app/bbs/link/<ref>")
+2. ego_js("document.body.innerText")   ← 正文 + 评论都在里面
+3. 图片在 document.querySelectorAll('img') 的 src 里（*.max-c.com）
+```
+
+实测浏览器读出来的内容：正文 2651 字、9~25 张图、评论区和楼中楼都在。
+纯 HTTP 抓 HTML 只有 3918 字节的空壳（SPA 靠 JS 渲染），所以**必须是真浏览器**。
+
+工具层已经把这条写进 `show_captcha` 的错误提示里了 —— 她看到报错会直接被指到浏览器，
+而不是在 API 上反复试。
+
+### 代价
+
+浏览器路径比 API 慢（要起页面、等渲染），但**不会被封**。
+API 路径快，但撞上就是 1 小时起步。
+
+对"她现在正想读某篇帖子"这种场景，浏览器是对的；
+对"批量刷几十篇"，两条路都不合适（API 会封、浏览器太慢）。
+
 ## 实测事实（都是跑出来的，不是查文档得来的）
 
 ### 能用、且不需要登录的接口
@@ -109,8 +174,8 @@ search     → 10 条帖子（limit=30 时）
 xhh:
   enabled: true
   timeoutMs: 10000
-  throttleWindowMs: 600000   # 10 分钟
-  throttleMaxCalls: 6        # 窗口内最多 6 次（搜索与读帖共用）
+  throttleWindowMs: 1800000  # 30 分钟（实测 link/tree 连打 3 次即被封，封超 1 小时）
+  throttleMaxCalls: 5        # 窗口内最多 5 次（搜索与读帖共用，比实测安全线 3 次留余量）
   defaultLimit: 8
   maxLimit: 20
   commentLimit: 12
