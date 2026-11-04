@@ -78,6 +78,41 @@ describe('webUrlOf（API 被封时的浏览器出路）', () => {
   });
 });
 
+describe('被风控时的提示（关键：必须给出具体地址）', () => {
+  /**
+   * 这条测的是**可用性**，不是字符串美观。
+   * 早先的提示里只给了模板 `.../link/<ref>`，她还得自己把 ref 拼进去 ——
+   * 多一步就可能拼错或干脆放弃去浏览器，那就等于把唯一可行的替代路径浪费掉。
+   * 所以钉住：提示里必须出现这一篇的**完整可点地址**。
+   */
+  it('captcha 错误文本包含这一篇的真实地址，而不是占位符', async () => {
+    const { registerXhhTools } = await import('./tools.ts');
+    const { XhhClient } = await import('./client.ts');
+    // 关键：用注入的 fetch 替身把它**固定**在"一定返回 show_captcha"的状态。
+    // 早期版本这里是真发网络请求的 —— 那会让测试结果随（实测很不稳定的）平台风控漂移，
+    // 属于"测试给自己发合格证"那一类，不能留。
+    const fetchImpl = (async () =>
+      new Response(JSON.stringify({ msg: '', result: {}, status: 'show_captcha' }), { status: 200 })) as unknown as typeof fetch;
+    const client = new XhhClient({ logger: { info: () => {}, warn: () => {}, debug: () => {}, error: () => {} } as never, fetchImpl });
+
+    const tools: { name: string; execute: (a: unknown) => Promise<unknown>; output: { render: (a: unknown, v: unknown) => { text: string }[] } }[] = [];
+    const ctx = { get: (k: string) => (k === 'tools' ? { register: (d: unknown) => tools.push(d as never) } : undefined) };
+    const logger = { info: () => {}, warn: () => {}, debug: () => {}, error: () => {} };
+    registerXhhTools(ctx as never, client, {} as never, logger as never);
+
+    const readTool = tools.find((t) => t.name === 'qq_xhh_read')!;
+    const res = await readTool.execute({ ref: '3f1572c4aabe' });
+    const text = readTool.output.render({}, res)[0]!.text;
+
+    // 必须能直接点进去，不能是模板占位符
+    expect(text).toContain('https://www.xiaoheihe.cn/app/bbs/link/3f1572c4aabe');
+    expect(text).not.toContain('<ref>');
+    expect(text).toContain('ego_navigate');
+    // 也必须明确劝阻重试（实测重试会把封禁拉长）
+    expect(text).toContain('别在接口上重试');
+  });
+});
+
 describe('normalizePostRef', () => {
   it('纯哈希原样通过', () => {
     expect(normalizePostRef('ba9b72b0316e')).toBe('ba9b72b0316e');

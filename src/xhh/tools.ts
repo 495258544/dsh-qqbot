@@ -18,16 +18,13 @@ import type { ContentBlock } from '@deepseek-ai/dsh-llm';
 import type { Logger } from '../types.ts';
 import type { ImQQBotConfig } from '../config.ts';
 import { resolveLibraryRoot } from '../media/sticker-tool.ts';
-import { XhhError, type XhhClient, type XhhPost } from './client.ts';
+import { XhhError, normalizePostRef, webUrlOf, type XhhClient, type XhhPost } from './client.ts';
 import { fetchIntoStickerLibrary, isAllowedImageUrl } from './images.ts';
 import { resolveXhhConfig, type XhhConfig } from './index.ts';
 
 interface ToolsRegistryLike {
   register(definition: unknown): unknown;
 }
-
-/** 被风控时给她的浏览器出路（实测有效，见 images.ts 与 XIAOHEIHE.md） */
-const WEB_HINT = `https://www.xiaoheihe.cn/app/bbs/link/<ref>`;
 
 export const XHH_TOOL_NAMES = {
   search: 'qq_xhh_search',
@@ -37,7 +34,7 @@ export const XHH_TOOL_NAMES = {
 } as const;
 
 /** 错误 → 给模型看的一句话（不泄内部细节，但要能据此决定下一步） */
-function explain(err: unknown): string {
+function explain(err: unknown, webUrl?: string): string {
   if (err instanceof XhhError) {
     switch (err.kind) {
       case 'captcha':
@@ -45,10 +42,13 @@ function explain(err: unknown): string {
         // 完全不受影响**（同一时刻 API 返回 show_captcha、浏览器连读 6 篇 0 次验证，
         // 同一个端点、浏览器也没带登录 Cookie —— 差别只在 HTTP/TLS 指纹）。
         // 所以这里必须直接指路到浏览器，而不是让她在 API 上反复试（重试会延长风控）。
+        // 必须给出**这一篇的实际地址**，不能只给占位符：
+        // 让她自己去把 ref 拼进模板，多一步就可能拼错或干脆放弃去浏览器。
         return `小黑盒的接口这次被风控拦了（它按请求指纹判定，不是你的问题）。`
           + `**别在接口上重试**——实测重试会把封禁拉长到一个多小时。`
-          + `要现在就看内容，用 ego_navigate 打开网页版帖子地址（` + WEB_HINT + `），`
-          + `真实浏览器不受这个风控影响，然后用 ego_js 读 document.body.innerText。`;
+          + (webUrl
+            ? `要现在就看这篇，用 ego_navigate 打开 ${webUrl} ，再 ego_js 读 document.body.innerText（正文和评论都在里面，图片在 img 的 src 里）。真实浏览器不受这个风控影响。`
+            : `要现在就看内容，用 ego_navigate 打开 https://www.xiaoheihe.cn/app/bbs/link/<ref> （把 <ref> 换成分享哈希），再 ego_js 读 document.body.innerText。真实浏览器不受这个风控影响。`);
       case 'rate-limited':
         return `${err.message}（小黑盒按请求总量限流，别连着打。）`;
       case 'network':
@@ -371,7 +371,14 @@ export function registerXhhTools(
         };
       } catch (err) {
         logger.warn(`im-qqbot: qq_xhh_read 失败: ${err instanceof Error ? err.message : String(err)}`);
-        return { ...empty, error: explain(err) };
+        // 尽力把这一篇的真实网页地址给她（ref 可能本身就是坏的，那就退回不给）
+        let webUrl: string | undefined;
+        try {
+          webUrl = webUrlOf(normalizePostRef(String(a.ref ?? '')));
+        } catch {
+          webUrl = undefined;
+        }
+        return { ...empty, error: explain(err, webUrl) };
       }
     },
   });
