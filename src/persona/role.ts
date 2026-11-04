@@ -10,8 +10,44 @@
  *   3. 产出一个 section 文本，由 session-manager 注入
  *      `system-prompt/assemble`（order 60，在 qqbot:scope-prompt 之前）
  * 记忆账本 / 最近对话 / 日记各有独立 section（persona 装配器统一产出）。
+ *
+ * cardPath 三种写法都支持（见 resolveCardPath）：
+ *   - 绝对路径：原样使用
+ *   - `~/` 开头：展开为用户主目录（此前写 `~` 会静默读不到）
+ *   - 其余按相对**仓库根**解析：`persona/rolecard-xiaoyu.md` 这类路径
+ *     从此不依赖进程 cwd，仓库搬家也不用改配置。
  */
 import fs from 'node:fs';
+import { homedir } from 'node:os';
+import { join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+/**
+ * 仓库根：本文件编译后位于 <repo>/lib/persona/，向上两级即仓库根
+ * （与 sticker-tool 的 repoRoot 同一套办法）。
+ * 用 fileURLToPath 而非手搓 pathname：Windows 上 pathname 形如
+ * /C:/foo/lib/persona/（前导斜杠 + 反斜杠缺失），existsSync 会全部失败。
+ */
+function repoRoot(): string {
+  try {
+    return fileURLToPath(new URL('../../', import.meta.url)).replace(/[\\/]+$/, '');
+  } catch {
+    return process.cwd();
+  }
+}
+
+/**
+ * 解析角色卡路径：绝对路径原样；`~` 展开主目录；其余按相对仓库根。
+ * 符号链接（如 rolecard-default.md → persona/rolecard-xiaoyu.md）由
+ * readFileSync 自然穿透，5 秒热重读语义不变。
+ */
+export function resolveCardPath(cardPath: string): string {
+  if (cardPath === '') return '';
+  if (cardPath.startsWith('/') || /^[a-zA-Z]:[\\/]/.test(cardPath)) return cardPath;
+  if (cardPath === '~') return homedir();
+  if (cardPath.startsWith('~/') || cardPath.startsWith('~\\')) return join(homedir(), cardPath.slice(2));
+  return resolve(repoRoot(), cardPath);
+}
 
 /** 无论角色卡怎么写，都该守住的东西（作为 persona 的固定尾巴） */
 export const BASE_RULES = `【基本规矩】
@@ -48,15 +84,19 @@ export const POST_HISTORY_ANCHOR = `【此刻提醒（这些是硬线，不因�
 export class Role {
   private cache: string | null = null;
   private cacheAt = 0;
+  /** 解析后的实际读取路径（绝对）；解析失败不致命，读不到时 lint 会报 */
+  readonly resolvedPath: string;
 
-  constructor(private readonly opts: { cardPath: string; maxChars?: number }) {}
+  constructor(private readonly opts: { cardPath: string; maxChars?: number }) {
+    this.resolvedPath = resolveCardPath(opts.cardPath);
+  }
 
   /** 读角色卡（带 5 秒缓存，方便边调边改） */
   read(): string {
     const now = Date.now();
     if (this.cache !== null && now - this.cacheAt < 5000) return this.cache;
     try {
-      this.cache = fs.readFileSync(this.opts.cardPath, 'utf8');
+      this.cache = fs.readFileSync(this.resolvedPath, 'utf8');
       this.cacheAt = now;
     } catch {
       this.cache = '';
@@ -89,7 +129,7 @@ export class Role {
   lint(): { ok: boolean; warn: string[] } {
     const card = this.read();
     const warn: string[] = [];
-    if (!card) return { ok: false, warn: ['角色卡读不到：' + this.opts.cardPath] };
+    if (!card) return { ok: false, warn: [`角色卡读不到：${this.opts.cardPath}（解析为 ${this.resolvedPath}）`] };
     if (card.length > (this.opts.maxChars ?? 12000)) {
       warn.push(`角色卡 ${card.length} 字，超过注入上限 ${this.opts.maxChars ?? 12000}，会被截断`);
     }

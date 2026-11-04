@@ -22,6 +22,7 @@
 | 接线 | `src/gateway/bootstrap.ts` | 构造/启动 Steam、Dota、digest、群活跃度 | **中** |
 | CLI | `scripts/steam-config.mjs`、`scripts/steam-friends-export.mjs` | 管理 Steam 凭据/主人账号；导出好友对照表 | 低 |
 | 小黑盒只读 | `src/xhh/{sign,client,images,tools,index}.ts` | 搜帖/刷首页/读正文与评论/把图收进表情库；匿名接口，不碰账号 | 低（全新目录，上游不碰） |
+| 人格资产 | `persona/rolecard-xiaoyu.md`（角色卡正本，线上 `rolecard-default.md` 是它的软链）、`persona/PERSONA-CHANGELOG.md`（人设变更日志） | 小羽的人设入库；`roleCardPath` 支持绝对/`~/`/相对仓库根三种路径写法 | 低（上游不碰 `persona/`；**并行会话改卡只改这个正本**，改完 5 秒生效不用重启） |
 | 安装引导 | `SETUP.md` | 给其他用户/agent 的安装配置说明 | 低 |
 
 ## 二、新增配置项（都在 profile 的 `im-qqbot.config` 下）

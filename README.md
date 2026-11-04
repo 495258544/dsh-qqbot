@@ -158,7 +158,7 @@ npx @deepseek-ai/dsh web --patch /path/to/dsh-qqbot/cordis.dev.yml
 |------|------|--------|------|
 | `persona.enabled` | boolean | `false` | 总开关 |
 | `persona.dataDir` | string | `~/.dsh-qqbot/persona` | 记忆/日记/状态落盘目录 |
-| `persona.roleCardPath` | string | `''` | 角色卡 .md 路径（空=不注入人格），见 `persona/role.example.md` |
+| `persona.roleCardPath` | string | `''` | 角色卡 .md 路径（空=不注入人格）。绝对路径 / `~/` 开头 / 相对**仓库根**三种写法都支持（如 `persona/rolecard-xiaoyu.md`）。通用模板见 `persona/role.example.md`；改卡 5 秒内热生效，不用重启 |
 | `persona.roleMaxChars` | number | `12000` | 角色卡注入上限 |
 | `persona.wakeEnabled` | boolean | `true` | 唤醒判定接管群聊门控（关=维持 requireMention 行为） |
 | `persona.names` | string[] | `[]` | 她的名字/昵称（被叫到才醒） |

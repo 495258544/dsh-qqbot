@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { Memory } from './memory.ts';
 import { Diary } from './diary.ts';
-import { Role } from './role.ts';
+import { Role, resolveCardPath } from './role.ts';
 import { Waker } from './wake.ts';
 import { Humanizer } from './humanize.ts';
 import { createOwnLife } from './own-life.ts';
@@ -117,6 +117,34 @@ describe('Role · 角色卡', () => {
     expect(role.renderAnchor()).toContain('此刻提醒');
     expect(role.renderAnchor()).toContain('不是 AI 助手');
   });
+
+  it('resolveCardPath：绝对路径原样 / ~ 展开 / 相对仓库根', () => {
+    // 绝对路径（POSIX + Windows 盘符）不改动
+    expect(resolveCardPath('/a/b.md')).toBe('/a/b.md');
+    expect(resolveCardPath('C:\\users\\a\\b.md')).toBe('C:\\users\\a\\b.md');
+    expect(resolveCardPath('')).toBe('');
+    // ~ 展开到主目录（此前按字面文件名读，必然 ENOENT 且静默）
+    expect(resolveCardPath('~')).toBe(os.homedir());
+    expect(resolveCardPath('~/.dsh-qqbot/persona/rolecard-default.md'))
+      .toBe(path.join(os.homedir(), '.dsh-qqbot/persona/rolecard-default.md'));
+    // 相对路径按仓库根解析，不依赖进程 cwd —— 指向仓库里真实入库的角色卡
+    const abs = resolveCardPath('persona/rolecard-xiaoyu.md');
+    expect(path.isAbsolute(abs)).toBe(true);
+    expect(fs.existsSync(abs)).toBe(true);
+  });
+
+  it('Role 经符号链接读角色卡：改目标即改内容（readFileSync 穿透软链）', () => {
+    const real = path.join(dir, 'real.md');
+    const link = path.join(dir, 'link.md');
+    fs.writeFileSync(real, '# 角色卡\n你说话很直。别装。');
+    fs.symlinkSync(real, link);
+    const role = new Role({ cardPath: link });
+    expect(role.read()).toContain('你说话很直');
+    // 改真实文件后新建实例读到新内容（模拟 5s 缓存过期后的热重读）
+    fs.writeFileSync(real, '# 角色卡\n你说话很直。别装。现在加了一节。');
+    const fresh = new Role({ cardPath: link });
+    expect(fresh.read()).toContain('加了一节');
+  });
 });
 
 describe('Waker · 该不该说话', () => {
@@ -128,7 +156,8 @@ describe('Waker · 该不该说话', () => {
   });
 
   it('@ 必醒 / 名字必醒 / owner 不@也潜水', () => {
-    const w = new Waker({ names: ['小鱼'], ownerIds: ['boss'] });
+    // probability: 0 → 关掉随机放行，断言才可重复（默认 0.05 会让"随便一句"偶尔醒，实测约 7% 翻车）
+    const w = new Waker({ names: ['小鱼'], ownerIds: ['boss'], probability: 0 });
     expect(w.shouldWake({ key: 'group:1', userId: 'u2', text: '@小鱼 在吗', isAtMe: true }).reason).toBe('atMention');
     expect(w.shouldWake({ key: 'group:1', userId: 'u2', text: '小鱼你看' }).reason).toContain('name:');
     // 方案A：潜水优先——owner 说话不再强制必醒，不@ 就走潜水
