@@ -17,7 +17,7 @@
  */
 import type { Logger } from '../types.ts';
 import { heroName } from './heroes.ts';
-import { parseAbilities, describeAbilityMix, type ParsedAbility } from './abilities.ts';
+import { parseAbilities, parseAbilityUpgrades, describeAbilityMix, type ParsedAbility } from './abilities.ts';
 import { AbilityRecordStore } from './ability-records.ts';
 import {
   OpenDotaApi,
@@ -383,37 +383,54 @@ export class DotaService {
     try {
       const me = raw.players.find((p) => p.account_id === accountId);
       const uses = me?.ability_uses;
+      let abilities: ParsedAbility[] = [];
+      let basis: 'uses' | 'levels' = 'uses';
+
       if (uses !== undefined && uses !== null) {
         const meta = await this.api.abilityMeta();
-        const abilities = parseAbilities(uses, meta);
-        if (abilities.length > 0) {
-          form.player.abilities = abilities;
-          const mix = describeAbilityMix(abilities);
-          if (mix !== '') form.player.abilityMix = mix;
-          // 接进"可直接发群"的摘要 —— OMG 局里技能恰恰是最该说的部分，
-          // 只放在结构化字段里的话她很可能压根不去看。
-          form.summaryText += `\n技能｜${abilities.map((a) => `${a.name}×${a.uses}`).join(' / ')}`;
-          if (mix !== '') form.summaryText += `\n路子｜${mix}`;
-
-          // 落一份记录（同一场重复解析就覆盖，幂等）—— 隔几天再问"他上把拿了什么"就有据可查
-          this.abilityRecords.put({
-            matchId,
-            at: Date.now(),
-            gameMode: form.gameMode,
-            players: [{
-              accountId,
-              heroName: form.player.heroName,
-              win: form.player.win,
-              abilities: abilities.map((a) => ({
-                name: a.name,
-                uses: a.uses,
-                ...(a.behavior !== undefined ? { behavior: a.behavior } : {}),
-                ...(a.damageType !== undefined ? { damageType: a.damageType } : {}),
-              })),
-              ...(mix !== '' ? { mix } : {}),
-            }],
-          });
+        abilities = parseAbilities(uses, meta);
+      } else {
+        // 兜底：OpenDota 对不少局处于半解析状态 —— ability_uses / teamfights 都还没算，
+        // 但加点顺序（原始终端数据）一直在。只认 ability_uses 的话这种局整个拿不到技能。
+        // （2026-11-05 实测：局后 12 小时的 9075953759 仍是这个状态。）
+        const upgrades = me?.ability_upgrades_arr;
+        if (Array.isArray(upgrades) && upgrades.length > 0) {
+          const [ids, meta] = await Promise.all([this.api.abilityIds(), this.api.abilityMeta()]);
+          abilities = parseAbilityUpgrades(upgrades, ids, meta);
+          basis = 'levels';
         }
+      }
+
+      if (abilities.length > 0) {
+        form.player.abilities = abilities;
+        const mix = describeAbilityMix(abilities);
+        if (mix !== '') form.player.abilityMix = mix;
+        // 接进"可直接发群"的摘要 —— OMG 局里技能恰恰是最该说的部分，
+        // 只放在结构化字段里的话她很可能压根不去看。
+        // 兜底路径的次数口径不同（加点数 ≠ 使用数），措辞必须分开，别让人以为他按了 126 次。
+        const label = basis === 'levels' ? '技能（按加点）' : '技能';
+        form.summaryText += `\n${label}｜${abilities.map((a) => `${a.name}×${a.uses}`).join(' / ')}`;
+        if (mix !== '') form.summaryText += `\n路子｜${mix}`;
+
+        // 落一份记录（同一场重复解析就覆盖，幂等）—— 隔几天再问"他上把拿了什么"就有据可查
+        this.abilityRecords.put({
+          matchId,
+          at: Date.now(),
+          gameMode: form.gameMode,
+          basis,
+          players: [{
+            accountId,
+            heroName: form.player.heroName,
+            win: form.player.win,
+            abilities: abilities.map((a) => ({
+              name: a.name,
+              uses: a.uses,
+              ...(a.behavior !== undefined ? { behavior: a.behavior } : {}),
+              ...(a.damageType !== undefined ? { damageType: a.damageType } : {}),
+            })),
+            ...(mix !== '' ? { mix } : {}),
+          }],
+        });
       }
     } catch (err) {
       form.notes.push(`技能没解析出来：${err instanceof Error ? err.message : String(err)}`);

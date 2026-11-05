@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { isNoiseAbility, parseAbilities, describeAbilityMix } from './abilities.ts'
+import { isNoiseAbility, parseAbilities, parseAbilityUpgrades, describeAbilityMix } from './abilities.ts'
 import type { AbilityMeta } from './opendota.ts'
 
 const meta = new Map<string, AbilityMeta>([
@@ -97,16 +97,17 @@ describe('parseAbilities · 从 ability_uses 提技能', () => {
 })
 
 describe('describeAbilityMix · 给个「怎么看」的起点', () => {
-  it('指向性技能多 → 提示带控', () => {
+  it('选目标/选点的技能多 → 提示控场味重（Point Target 也算指向类）', () => {
     const got = parseAbilities(
-      { a1: 10, a2: 9, a3: 8 },
+      { a1: 10, a2: 9, a3: 8, a4: 7 },
       new Map<string, AbilityMeta>([
         ['a1', { dname: 'X', behavior: 'Unit Target' }],
-        ['a2', { dname: 'Y', behavior: 'Unit Target' }],
+        ['a2', { dname: 'Y', behavior: 'Point Target' }],
         ['a3', { dname: 'Z', behavior: 'Unit Target' }],
+        ['a4', { dname: 'W', behavior: 'Point Target' }],
       ]),
     )
-    expect(describeAbilityMix(got)).toContain('指向性')
+    expect(describeAbilityMix(got)).toContain('选目标/选点')
   })
 
   it('用得最多的那个会被点出来', () => {
@@ -120,5 +121,64 @@ describe('describeAbilityMix · 给个「怎么看」的起点', () => {
 
   it('空列表返回空串（不要硬编一坨话）', () => {
     expect(describeAbilityMix([])).toBe('')
+  })
+})
+
+describe('parseAbilityUpgrades · ability_uses 缺失时的兜底', () => {
+  // 2026-11-05 实测：matchId 9075953759（小周 PA，技能征召）局后 12 小时，
+  // OpenDota 仍是半解析状态 —— ability_uses / teamfights 都没有，
+  // 但 ability_upgrades_arr 一直在。只认 ability_uses 的话这种局整个拿不到技能。
+  const ids = new Map<number, string>([
+    [5190, 'phantom_assassin_stifling_dagger'],
+    [5255, 'dark_seer_vacuum'],
+    [5298, 'jakiro_ice_path'],
+    [5258, 'dark_seer_wall_of_replica'],
+    [559, 'special_bonus_unique_phantom_assassin_7'],
+    [491, 'special_bonus_unique_phantom_assassin_5'],
+  ])
+  const meta = new Map<string, AbilityMeta>([
+    ['phantom_assassin_stifling_dagger', { dname: 'Stifling Dagger', behavior: 'Unit Target' }],
+    ['dark_seer_vacuum', { dname: 'Vacuum', behavior: 'Point Target' }],
+    ['jakiro_ice_path', { dname: 'Ice Path', behavior: 'Point Target', dmgType: 'Magical' }],
+    ['dark_seer_wall_of_replica', { dname: 'Wall of Replica', behavior: 'Point Target' }],
+  ])
+  // 这场的真实加点顺序（4 级窒息之刃 + 4 级真空 + 4 级冰路 + 3 级幻影墙 + 2 个天赋）
+  const realUpgrades = [5190,5255,5190,5298,5190,5258,5190,5255,5255,5298,559,5298,5258,5298,5255,491,5258]
+
+  it('能从加点顺序还原技能组合，天赋被剔掉', () => {
+    const got = parseAbilityUpgrades(realUpgrades, ids, meta)
+    expect(got.map((a) => a.name)).toEqual(['Stifling Dagger', 'Vacuum', 'Ice Path', 'Wall of Replica'])
+    // 加点次数：窒息之刃 4 / 真空 4 / 冰路 4 / 幻影墙 3（手数：5190×4、5255×4、5298×4、5258×3）
+    expect(got.map((a) => a.uses)).toEqual([4, 4, 4, 3])
+    expect(got.some((a) => a.key.startsWith('special_bonus'))).toBe(false)
+  })
+
+  it('排序按加点次数，同数按首次出现稳定', () => {
+    const got = parseAbilityUpgrades(realUpgrades, ids, meta)
+    for (let i = 1; i < got.length; i++) expect(got[i - 1].uses).toBeGreaterThanOrEqual(got[i].uses)
+  })
+
+  it('未知 id（表没更新的新技能）跳过不炸', () => {
+    const got = parseAbilityUpgrades([99999, 5190], ids, meta)
+    expect(got).toHaveLength(1)
+    expect(got[0].name).toBe('Stifling Dagger')
+  })
+
+  it('脏输入不炸', () => {
+    expect(parseAbilityUpgrades(undefined, ids, meta)).toEqual([])
+    expect(parseAbilityUpgrades(null, ids, meta)).toEqual([])
+    expect(parseAbilityUpgrades([], ids, meta)).toEqual([])
+    expect(parseAbilityUpgrades([0, -5, 'x'] as unknown as number[], ids, meta)).toEqual([])
+  })
+
+  it('两个解析器口径不同：同样 4 次，一个是用了 4 次、一个是点了 4 级', () => {
+    // 这是 basis 字段存在的原因 —— 措辞必须区分「按使用」和「按加点」
+    const fromUses = parseAbilities({ dark_seer_vacuum: 4 }, meta)
+    const fromUpgrades = parseAbilityUpgrades([5255, 5255, 5255, 5255], ids, meta)
+    expect(fromUses[0].name).toBe('Vacuum')
+    expect(fromUpgrades[0].name).toBe('Vacuum')
+    expect(fromUses[0].uses).toBe(4)
+    expect(fromUpgrades[0].uses).toBe(4)
+    // 但语义不同 —— service 层用 basis 标注，summary 措辞分别为「技能」/「技能（按加点）」
   })
 })

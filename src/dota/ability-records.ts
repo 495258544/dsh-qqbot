@@ -41,6 +41,13 @@ export interface AbilityRecord {
   /** Dota 的 game_mode（18 = 技能征召） */
   gameMode: number;
   players: AbilityRecordPlayer[];
+  /**
+   * 技能次数的口径：
+   *   'uses'   = 实际使用次数（OpenDota 完整解析的局）
+   *   'levels' = 加点次数（OpenDota 半解析、ability_uses 缺失时的兜底）
+   * 口径不同不能混着比大小 —— 「用了 126 次」和「点了 4 级」是两回事。
+   */
+  basis?: 'uses' | 'levels';
 }
 
 interface RecordFile {
