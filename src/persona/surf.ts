@@ -120,9 +120,14 @@ function stripXml(s: string): string {
 export async function searchViaWeb(
   web: WebSearchLike | undefined,
   topic: string,
-  opts: { maxResults?: number; intent?: QueryIntent; timeoutMs?: number } = {},
+  opts: { maxResults?: number; intent?: QueryIntent; timeoutMs?: number; log?: (m: string) => void } = {},
 ): Promise<RssItem[] | null> {
-  if (!web || typeof web.search !== 'function') return null;
+  const log = opts.log ?? (() => {});
+  if (!web || typeof web.search !== 'function') {
+    // 这一行以前是静默 return —— 结果连续三轮都没定位到"web 层压根没被调用"。
+    log('surf: web 搜索不可用（ctx.web.search 缺失）→ 退回 Bing');
+    return null;
+  }
   const maxResults = opts.maxResults ?? 10;
   const intent = opts.intent ?? 'experience';
   const timeoutMs = opts.timeoutMs ?? 15000;
@@ -134,7 +139,10 @@ export async function searchViaWeb(
     const res = await web.search({ query: topic, maxResults, engine: 'auto' }, timer.signal);
     clearTimeout(t);
     const sources = res?.sources ?? [];
-    if (sources.length === 0) return null;
+    if (sources.length === 0) {
+      log(`surf: web 搜索返回 0 条（query=${topic}）→ 退回 Bing`);
+      return null;
+    }
     const items: RssItem[] = sources
       .filter((s) => typeof s?.url === 'string' && s.url !== '')
       .map((s) => ({
@@ -146,9 +154,16 @@ export async function searchViaWeb(
     // 阈值用 web 口径（12 字）：ctx.web 的 snippet 是短摘要，不是 RSS 的整段富文本，
     // 沿用 40 会把所有结果误杀（实测导致本层恒返回 null，白白退回 Bing）。
     const kept = items.filter((it) => isMeaningful(it, intent, 12));
-    return kept.length > 0 ? kept : null;
-  } catch {
-    // 宿主没装 provider / provider 报错 → 交给下一层，不影响冲浪
+    if (kept.length === 0) {
+      // 这条最隐蔽：provider 明明返回了东西，却被质量闸全滤掉。
+      log(`surf: web 返回 ${items.length} 条但全被质量闸滤掉（首条=${items[0]?.title.slice(0, 30) ?? ''}）`);
+      return null;
+    }
+    return kept;
+  } catch (err) {
+    // ⚠️ 以前这里是裸 catch { return null } —— 错误被彻底吞掉，
+    // 连续三轮排查都卡在"到底失败在哪"，只能靠猜。失败必须留痕。
+    log(`surf: web 搜索抛错，退回 Bing —— ${err instanceof Error ? err.message : String(err)}`);
     return null;
   }
 }
@@ -411,7 +426,7 @@ function abstract(text: string, max = 100): string {
  */
 export async function surfTopic(
   topic: string,
-  opts: { deep?: boolean; maxFindings?: number; web?: WebSearchLike } = {},
+  opts: { deep?: boolean; maxFindings?: number; web?: WebSearchLike; log?: (m: string) => void } = {},
 ): Promise<SurfResult> {
   const maxFindings = opts.maxFindings ?? 2;
   try {
@@ -439,7 +454,7 @@ export async function surfTopic(
 
     // Layer 0：宿主 web 搜索（27 引擎 + 自动 fallback）。
     // 放在 Bing RSS 之前，专治「手冲咖啡」被断成「手」的字典页问题。
-    const viaWeb = await searchViaWeb(opts.web, refined, { maxResults: 10, intent });
+    const viaWeb = await searchViaWeb(opts.web, refined, { maxResults: 10, intent, log: opts.log });
     if (viaWeb !== null && viaWeb.length > 0) {
       const findings: SurfFinding[] = viaWeb.slice(0, maxFindings).map((it) => ({
         title: it.title,

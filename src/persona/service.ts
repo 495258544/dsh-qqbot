@@ -662,7 +662,14 @@ export class PersonaService {
     const t = String(topic ?? '').trim();
     if (!t) return undefined;
     try {
-      const r = await surfTopic(t, { deep: opts.deep === true, maxFindings: 5, web: this.webSearch });
+      const r = await surfTopic(t, {
+        deep: opts.deep === true,
+        maxFindings: 5,
+        web: this.webSearch,
+        // 把 logger 透传进 searchViaWeb：失败（缺失/0 条/被质量闸滤光/抛错）
+        // 以前全是静默 return null，三轮排查都只能靠猜。现在必须留痕。
+        log: (m) => this.deps.logger.info(`persona: ${m}`),
+      });
       return r;
     } catch (err) {
       this.deps.logger.warn(`persona: 按需冲浪失败 ${err instanceof Error ? err.message : String(err)}`);
