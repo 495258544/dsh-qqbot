@@ -153,6 +153,7 @@ export async function handleInbound(
           return hit ? { id: hit.senderId, name: hit.senderName } : {};
         }
       : undefined,
+    config.persona?.ownerOpenids,
   );
 
   // 把"先发的图"补进 agentBody，否则 agent 不知道这几张图的存在
@@ -265,6 +266,8 @@ function assembleAgentBody(
   lookupSender?: (quotedText: string) => { id?: string; name?: string },
   /** 按图片 MD5 反查（QQ 的图片文件名就是内容 MD5，无需下载图片） */
   lookupImage?: (md5s: string[]) => { id?: string; name?: string },
+  /** 主人 openid 列表（命中时说话人标签带「·主人」—— 否则主人用小号说话她认不出来） */
+  ownerIds?: readonly string[],
 ): string | null {
   const isGroup = scope === 'group';
   const wasMentioned = state.mention?.wasMentioned ?? false;
@@ -280,7 +283,7 @@ function assembleAgentBody(
     lookupSender,
     lookupImage,
   );
-  const userMessage = buildUserMessage(userContent, quotePart, msg.senderId, msg.senderName, isGroup, wasMentioned);
+  const userMessage = buildUserMessage(userContent, quotePart, msg.senderId, msg.senderName, isGroup, wasMentioned, ownerIds);
 
   const dynamicCtx = buildDynamicCtx(msg, state);
 
@@ -527,6 +530,7 @@ function buildUserMessage(
   senderName: string | undefined,
   isGroup: boolean,
   wasMentioned: boolean,
+  ownerIds: readonly string[] = [],
 ): string {
   if (!isGroup) {
     return `${quotePart}${userContent}`;
@@ -534,7 +538,11 @@ function buildUserMessage(
 
   const mentionTag = wasMentioned ? ' (@you)' : '';
   const displayName = senderName ?? shortSenderId(senderId);
-  const senderTag = `[${displayName} (${senderId})]`;
+  // 主人标注：主人可能用小号在群里说话，而模型只看得到群昵称 ——
+  // 昵称不帶"江铭鑫"三个字时，她就把主人的小号当普通群友（2026-11-05 实测）。
+  // openid 本来就在标签里，但没有任何地方告诉模型哪个 openid 是主人。
+  const ownerTag = ownerIds.includes(senderId) ? '·主人' : '';
+  const senderTag = `[${displayName}${ownerTag} (${senderId})]`;
   return `${quotePart}${senderTag} ${userContent}${mentionTag}`;
 }
 
