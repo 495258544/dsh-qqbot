@@ -31,7 +31,7 @@ import { registerSendFileTool, type MediaSenderLike } from '../media/send-file-t
 import { registerStickerTool, registerArchiveTool } from '../media/sticker-tool.ts';
 import { DeliverablesDeliverer } from '../transport/deliverables.ts';
 import { PersonaService } from '../persona/service.ts';
-import type { WebSearchLike } from '../persona/surf.ts';
+import { bindPersonaWeb } from '../persona/web-wiring.ts';
 import { registerPersonaTools } from '../persona/tools.ts';
 import { checkBiliHealth, formatHealthIssues } from '../persona/bili-health.ts';
 import { SteamService, registerSteamTools } from '../steam/index.ts';
@@ -101,19 +101,24 @@ export async function bootstrapGateway(
     // 宿主 web 搜索服务（dsh-free-search 注册的 provider 都挂在它后面）。
     // 给到 persona 之后，冲浪与 qq_browse 走 27 个引擎 + 空结果自动 fallback，
     // 不再被 Bing 的中文断词坑影响（实测「手冲咖啡的细节参数」→ 10 条全是「手」的字典页）。
-    // 取不到就传 undefined：surf.ts 自动退回 Bing RSS 兜底，行为与改动前一致。
-    let webSearch: WebSearchLike | undefined;
-    try {
-      webSearch = (ctx as unknown as Record<string, unknown>).web as WebSearchLike | undefined;
-    } catch {
-      webSearch = undefined;
-    }
-    persona = new PersonaService({ config: config.persona, dataDir, logger, web: webSearch });
+    //
+    // ⚠️ 2026-11-05 修的根因：这里原来是
+    //   `(ctx as unknown as Record<string, unknown>).web`
+    // 而 `export const inject` 里只有 'agents' —— cordis 的访问守卫要求服务
+    // **声明在 inject 里**才允许读 ctx 属性，所以这个属性读每次都抛、被 catch
+    // 吞成 undefined → persona 永远拿不到 web → 冲浪永远走 Bing RSS 兜底。
+    // 诊断日志 debug-surf.jsonl 里一串 `{"stage":"no-web","hasWeb":false}` 就是它。
+    //
+    // 改走 cordis 的软注入：`ctx.inject(['web'], cb)` 在服务就绪/替换时跑 cb、
+    // 卸载时清理，且**服务缺席不会把插件卡在 PENDING**（顶层 inject 是硬依赖，
+    // 仓库自带的 cordis.yml 没有 web 行，硬依赖会让 bot 整个起不来）。
+    persona = new PersonaService({ config: config.persona, dataDir, logger });
     manager.persona = persona;
     logger.info(`persona: 已启用（dataDir=${dataDir}）`);
-    if (webSearch === undefined) {
-      logger.warn('persona: 宿主 web 搜索服务不可用 → 冲浪退回 Bing RSS（中文长尾查询可能出字典页）');
-    }
+
+    // 闭包内收窄（persona 是 let，闭包里不保留控制流窄化）
+    const svc = persona;
+    bindPersonaWeb(ctx, (web) => svc.attachWeb(web));
   }
 
   // ── Steam 集成（查群友状态/最近游戏）──

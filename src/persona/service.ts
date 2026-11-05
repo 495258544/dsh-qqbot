@@ -19,7 +19,7 @@ import { SelfProfileService } from './self.ts';
 import { VoiceService } from './voice.ts';
 import { SelfNoteService } from './self-note.ts';
 import { EmotionService, speakWillingness, typingSpeedFactor, burstLimit, describeEmotion } from './emotion.ts';
-import { runSurfRound, inSurfWindow, surfTopic, type SurfResult, type WebSearchLike } from './surf.ts';
+import { runSurfRound, inSurfWindow, surfTopic, surfWiringDbg, type SurfResult, type WebSearchLike } from './surf.ts';
 import { clockInTz, weekdayInTz, dayInTz, hourInTz, DEFAULT_TZ } from './clock.ts';
 import { prunePendingAttachments } from '../features/pending-attachments.ts';
 import { Humanizer } from './humanize.ts';
@@ -227,8 +227,17 @@ export class PersonaService {
    * 放在数据目录而不是 profile —— 改 profile 要重启，这三样却是最常改的。
    */
   public readonly runtime: RuntimeConfig;
-  /** 宿主 web 搜索（可为空：没有就退回 Bing RSS 兜底） */
-  private readonly webSearch: WebSearchLike | undefined;
+  /**
+   * 宿主 web 搜索（可为空：没有就退回 Bing RSS 兜底）。
+   *
+   * **可变**，不是 readonly —— 2026-11-05 实测的接线坑：
+   * cordis 的 `export const inject = ['web']` 是**硬依赖**，服务缺失时插件整只停在
+   * PENDING、apply 根本不跑（仓库自带的 cordis.yml 没有 web 行 → bot 直接起不来）。
+   * 而 `ctx.inject(['web'], cb)` 是软注入：web 晚于 apply 就绪时会再跑一遍 cb。
+   * 所以实例在 apply 里先以 undefined 构造（persona 立刻可用），等服务就绪后
+   * 由 `attachWeb()` 回填 —— 冲浪/qq_browse 到那时才改走宿主搜索。
+   */
+  private webSearch: WebSearchLike | undefined;
   public readonly humanizer: Humanizer;
   public readonly budget: ProactiveBudget;
   public ownLife: OwnLifeHandle | undefined;
@@ -278,6 +287,32 @@ export class PersonaService {
     } catch (err) {
       this.deps.logger.warn(`persona: 写入 last-turn 失败: ${err instanceof Error ? err.message : String(err)}`);
     }
+  }
+
+  /**
+   * 回填宿主 web 搜索服务（soft-inject 的落点）。
+   *
+   * 由 bootstrap 的 `ctx.inject(['web'], ...)` 回调调用；服务就绪、被替换时
+   * 会（重新）调一次，服务卸载时调用方传 undefined 把引用清回去 —— 这样冲浪
+   * 不会攥着一个已经 dispose 的 provider 继续用。
+   *
+   * 之所以不在构造时就固定：apply 是 bootstrap → PersonaService 这条同步链，
+   * 那时 web 可能还没挂（cordis 服务激活顺序由依赖驱动，不保证早于本插件）。
+   */
+  attachWeb(web: WebSearchLike | undefined): void {
+    this.webSearch = web;
+    if (web === undefined) {
+      this.deps.logger.warn('persona: 宿主 web 搜索服务已卸载 → 冲浪退回 Bing RSS');
+      surfWiringDbg('web-detached', { hasWeb: false });
+    } else {
+      this.deps.logger.info('persona: 宿主 web 搜索服务已接入 → 冲浪/qq_browse 走 web 层');
+      surfWiringDbg('web-attached', { hasWeb: true, hasSearch: typeof web.search === 'function' });
+    }
+  }
+
+  /** 宿主 web 搜索当前是否可用（诊断用；不改变行为） */
+  hasWeb(): boolean {
+    return this.webSearch !== undefined && typeof this.webSearch.search === 'function';
   }
 
   constructor(private readonly deps: PersonaDeps) {
