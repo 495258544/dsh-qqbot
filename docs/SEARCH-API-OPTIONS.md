@@ -153,12 +153,21 @@ doubao → tinyfish → jina → bing → anysearch → ddg → ddg-lite → sea
 ### 最终配置（已写入 profile）
 
 ```yaml
+# ⚠️ searchProvider 必须写【已注册的 provider id】，不是引擎名！
+# free-search 只注册了一个 id：`ddg`（它内部才是多引擎容器，靠 request.engine 选引擎）。
+# 我一开始写成 auto，结果抛 WEB_PROVIDER_CONFIGURED_MISSING
+# → ctx.web.search 失败 → searchViaWeb 返回 null → 静默退回 Bing → 又是字典页。
 - id: web
   config:
-    searchProvider: auto          # 修掉不可达的 ddg
+    searchProvider: ddg           # 必须是 ddg（provider id）
+    fetchProvider: fs-quality-fetch
 - id: web-search-free
   config:
     doubaoApiKey: '<32 位联网搜索 key，已配置在 profile，不入库>'
 ```
+
+**真正的引擎选择靠代码里的 `request.engine: 'auto'`**（surf.ts 的 searchViaWeb），
+它优先于 `cfg.provider`，走智能路由 + 全引擎 fallback 链。
+两个都得对：provider id 必须合法，engine 必须显式传 auto。
 
 生效方式：profile 是 `patchReload: startup`，**改完要重启**。
