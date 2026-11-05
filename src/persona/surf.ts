@@ -49,7 +49,17 @@ const EGO_CHROME =
  */
 export interface WebSearchLike {
   search(
-    request: { query: string; maxResults?: number },
+    /**
+     * `engine` 是 dsh-free-search 认的字段：它**优先于 profile 的 `cfg.provider`**。
+     *
+     * 为什么必须显式传（2026-11-05 实测踩的坑）：
+     *   profile 里写的是 `web.searchProvider: ddg`，而 ddg 在这台机器上**完全不可达**
+     *   （curl 两条路都 0 字节）。只传 query 时，free-search 回落到 `cfg.provider`=ddg
+     *   → 失败退到 Bing → 返回的全是「手」的字典页，跟没改一样。
+     *   传 `engine: 'auto'` 走它的智能路由（语言/时间规则分组 + 全引擎 fallback 链），
+     *   才会像 web_search 工具那样自动绕到能通的引擎（实测 exa 可用）。
+     */
+    request: { query: string; maxResults?: number; engine?: string },
     signal?: AbortSignal,
   ): Promise<{ sources: Array<{ url: string; title?: string; snippet?: string; publishedAt?: string }> }>;
 }
@@ -119,7 +129,9 @@ export async function searchViaWeb(
   try {
     const timer = new AbortController();
     const t = setTimeout(() => timer.abort(), timeoutMs);
-    const res = await web.search({ query: topic, maxResults }, timer.signal);
+    // engine:'auto' 是关键 —— 见 WebSearchLike 的注释：
+    // 不传就会回落到 profile 的 cfg.provider（本机是 ddg，不可达）→ 退回 Bing → 字典页。
+    const res = await web.search({ query: topic, maxResults, engine: 'auto' }, timer.signal);
     clearTimeout(t);
     const sources = res?.sources ?? [];
     if (sources.length === 0) return null;
