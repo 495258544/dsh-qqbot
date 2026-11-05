@@ -19,7 +19,7 @@ import { SelfProfileService } from './self.ts';
 import { VoiceService } from './voice.ts';
 import { SelfNoteService } from './self-note.ts';
 import { EmotionService, speakWillingness, typingSpeedFactor, burstLimit, describeEmotion } from './emotion.ts';
-import { runSurfRound, inSurfWindow, surfTopic, type SurfResult } from './surf.ts';
+import { runSurfRound, inSurfWindow, surfTopic, type SurfResult, type WebSearchLike } from './surf.ts';
 import { clockInTz, weekdayInTz, dayInTz, hourInTz, DEFAULT_TZ } from './clock.ts';
 import { prunePendingAttachments } from '../features/pending-attachments.ts';
 import { Humanizer } from './humanize.ts';
@@ -196,6 +196,17 @@ export interface PersonaDeps {
   /** persona 数据根目录（bootstrap 解析默认 ~/.dsh-qqbot/persona） */
   dataDir: string;
   logger: Logger;
+  /**
+   * 宿主的 web 搜索服务（`ctx.web`）。
+   *
+   * 给了它，冲浪/qq_browse 就走 dsh-free-search 注册的 provider
+   * （27 个引擎 + 空结果自动 fallback）；不给则退回 Bing RSS 兜底。
+   * 为什么要用它：Bing 的中文长尾查询会被断成单字，返回全是该字的字典释义
+   * （2026-11-05 实测「手冲咖啡的细节参数」→ 10 条全是「手」的字典页），
+   * 而且那些页面形态正常、isMeaningful 拦不住 → 只能换搜索源。
+   * 可选注入：单测/纯 CLI 环境没有 web 服务时行为与原来一致。
+   */
+  web?: WebSearchLike;
 }
 
 export class PersonaService {
@@ -216,6 +227,8 @@ export class PersonaService {
    * 放在数据目录而不是 profile —— 改 profile 要重启，这三样却是最常改的。
    */
   public readonly runtime: RuntimeConfig;
+  /** 宿主 web 搜索（可为空：没有就退回 Bing RSS 兜底） */
+  private readonly webSearch: WebSearchLike | undefined;
   public readonly humanizer: Humanizer;
   public readonly budget: ProactiveBudget;
   public ownLife: OwnLifeHandle | undefined;
@@ -270,6 +283,7 @@ export class PersonaService {
   constructor(private readonly deps: PersonaDeps) {
     const { config, dataDir, logger } = deps;
     this.lastTurnFile = path.join(dataDir, 'state', 'last-turn.json');
+    this.webSearch = deps.web;
     this.memory = new Memory({ dir: path.join(dataDir, 'memory') });
     this.diary = new Diary(path.join(dataDir, 'diary'));
     this.self = new SelfProfileService(dataDir, (m) => logger.info(m));
@@ -644,11 +658,11 @@ export class PersonaService {
    * 结果**编造了具体文章**（"散文吧有篇《修鞋摊子收起来了》"）。
    * 有了这个入口，她就能真的查，查不到也如实说查不到。
    */
-  surf(topic: string, opts: { deep?: boolean } = {}): SurfResult | undefined {
+  async surf(topic: string, opts: { deep?: boolean } = {}): Promise<SurfResult | undefined> {
     const t = String(topic ?? '').trim();
     if (!t) return undefined;
     try {
-      const r = surfTopic(t, { deep: opts.deep === true, maxFindings: 5 });
+      const r = await surfTopic(t, { deep: opts.deep === true, maxFindings: 5, web: this.webSearch });
       return r;
     } catch (err) {
       this.deps.logger.warn(`persona: 按需冲浪失败 ${err instanceof Error ? err.message : String(err)}`);
@@ -667,7 +681,7 @@ export class PersonaService {
     if (!cfg.surfEnabled) return;
     const log = this.deps.logger;
 
-    const tick = (): void => {
+    const tick = async (): Promise<void> => {
       // M36：每次 tick 都留痕。
       // 起因：03:36 重启后 05:36 那轮本应冲浪却没跑，查不到原因 ——
       // 因为所有早退分支都是静默 return，日志里只有"武装"那一行。
@@ -687,10 +701,11 @@ export class PersonaService {
       }
       try {
         log.info('persona: 冲浪开始');
-        const results = runSurfRound(this.self, {
+        const results = await runSurfRound(this.self, {
           maxTopics: cfg.surfMaxTopics,
           deep: cfg.surfDeep,
           log: (m) => log.info(`persona: ${m}`),
+          web: this.webSearch,
         });
         const total = results.reduce((a, r) => a + r.findings.length, 0);
         log.info(`persona: 冲浪完成，${results.length} 个话题 / ${total} 条见闻`);
@@ -701,7 +716,13 @@ export class PersonaService {
       }
     };
 
-    this.surfTimer = setInterval(tick, 30 * 60 * 1000);   // 每 30 分钟检查
+    // async tick 的 rejection 必须自己兜住：setInterval 会把它变成 unhandledRejection，
+    // 在 Node 24 直接可能把进程带下去。tick 内部已有 try/catch，这里再兜一层。
+    this.surfTimer = setInterval(() => {
+      tick().catch((err: unknown) => {
+        log.warn(`persona: 冲浪 tick 异常 ${err instanceof Error ? err.message : String(err)}`);
+      });
+    }, 30 * 60 * 1000);   // 每 30 分钟检查
     if (typeof this.surfTimer.unref === 'function') this.surfTimer.unref();
     log.info(`persona: 冲浪已武装 · 时段 ${cfg.surfFromHour}:00-${cfg.surfToHour}:00 · 每轮最多 ${cfg.surfMaxTopics} 话题`);
   }

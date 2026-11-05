@@ -630,7 +630,8 @@ export function registerPersonaTools(
     async execute(args: unknown): Promise<Record<string, unknown>> {
       const { topic, deep } = args as { topic: string; deep?: boolean };
       try {
-        const r = persona.surf?.(topic, { deep: deep === true });
+        // surf 现在是 async（内部优先走宿主 web 搜索，见 surf.ts 的断词坑说明）
+        const r = await persona.surf?.(topic, { deep: deep === true });
         if (!r || r.findings.length === 0) return { topic, findings: [], ok: false };
         return {
           topic,
