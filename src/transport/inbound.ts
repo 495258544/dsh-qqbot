@@ -285,7 +285,14 @@ function assembleAgentBody(
   const dynamicCtx = buildDynamicCtx(msg, state);
 
   const base = dynamicCtx ? `${dynamicCtx}${userMessage}` : userMessage;
-  const agentBody = buildAgentBody(base, state.history, isGroup, wasMentioned, anchor);
+  // A+B：群历史只留近 10 分钟、且剔掉她自己的发言。
+  // selfIds 用解析后的 selfId（config.persona.botOpenid 或从历史探测到的）；
+  // 主人自己的 openid 也一并剔除——他发的话属于"群聊上下文"，但会和白名单上的
+  // "在问她"重复，且偶尔被他自己的群昵称干扰（见 knownNames 那轮修复）。
+  const selfIds = new Set<string>();
+  const resolvedSelf = botOpenid || detectBotSelfId(state.history);
+  if (resolvedSelf) selfIds.add(resolvedSelf);
+  const agentBody = buildAgentBody(base, state.history, isGroup, wasMentioned, anchor, { selfIds });
 
   return agentBody;
 }
@@ -618,15 +625,58 @@ function renderMediaLine(
 }
 
 /**
+ * 群历史注入的时间窗（A）：超过这个时长的旧聊天不注入。
+ *
+ * 为什么需要：`historyBuffer` 只在"回复之后"才清空（inbound 末尾）——她没被唤醒
+ * 的那些群消息只进缓冲、不清空，于是一小时后 @ 她，缓冲里还挂着上个小时的闲聊，
+ * 她连带着别人的旧话题一起回答（2026-11-05 实测：@ 她问一句，她把 10 条别的
+ * 对话全带上）。时间窗把"翻旧账"这条路关掉，同时保留近期追问的上下文。
+ */
+export const GROUP_HISTORY_WINDOW_MS = 10 * 60 * 1000;
+
+/**
+ * 从群历史里挑出"该注入"的那几条：只留窗口内的，且剔掉她自己的发言（B）。
+ *
+ * 剔自己的话为什么要紧：`appendBotHistory` 把她的回复也写进了群历史（为的是
+ * 引用她自己的话时能认出来），但这些条目下一轮会被当成"群聊上下文"再喂回去，
+ * 她看到 `[小羽 (...)] ...` 混在别人的对话里，会分不清哪句是她自己说的。
+ *
+ * 引用场景不受影响：引用她的话由 quote 链路（归属索引）单独处理，不走这里。
+ *
+ * @param selfId 她自己（或主人）的 openid；命中即剔除
+ * @param now    当前时间（测试可注入）
+ */
+export function selectHistoryForPrompt(
+  history: HistoryEntry[] | undefined,
+  selfIds: ReadonlySet<string>,
+  now: number = Date.now(),
+  windowMs: number = GROUP_HISTORY_WINDOW_MS,
+): HistoryEntry[] {
+  if (!history || history.length === 0) return [];
+  const out: HistoryEntry[] = [];
+  for (const h of history) {
+    // B：她自己的话不进"群聊上下文"
+    if (selfIds.has(h.senderId)) continue;
+    // A：超出时间窗的旧消息不注入（timestamp 缺失的条目按"旧"处理，宁可少带）
+    const at = typeof h.timestamp === 'number' ? h.timestamp : 0;
+    if (at <= 0 || now - at > windowMs) continue;
+    out.push(h);
+  }
+  return out;
+}
+
+/**
  * Layer 5: 最终 agentBody 拼合
  */
-function buildAgentBody(
+export function buildAgentBody(
   base: string,
   history: HistoryEntry[] | undefined,
   isGroup: boolean,
   wasMentioned: boolean,
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   _anchor?: string,
+  // A+B 的筛选参数：selfIds 要剔的自己人；now 便于测试注入
+  opts: { selfIds?: ReadonlySet<string>; now?: number; windowMs?: number } = {},
 ): string {
   // 注意：anchor 不再拼进 user message。
   // 拼进去会污染上下文，且模型可能复述出"你是小羽…"这类系统指令（思考泄漏）。
@@ -635,7 +685,13 @@ function buildAgentBody(
     return base;
   }
 
-  const historyLines = history.map(h => {
+  // A+B：只留窗口内、且不是她自己说的话
+  const picked = selectHistoryForPrompt(history, opts.selfIds ?? new Set(), opts.now, opts.windowMs);
+
+  // 筛完为空 → 不带历史段（避免给她一个空的 [Chat history begins] 反而误导）
+  if (picked.length === 0) return base;
+
+  const historyLines = picked.map(h => {
     const name = h.senderName ?? shortSenderId(h.senderId);
     return `[${name} (${h.senderId})] ${h.content}`;
   });
