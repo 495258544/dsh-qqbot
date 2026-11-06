@@ -270,23 +270,35 @@ function AreaRow({ label, help, value, rows, onChange }: {
 }
 
 /** 下拉选择行（数据源来自 /models、/presets；含"自定义"手输兜底） */
+/**
+ * 下拉选择行（可切换"手动输入"）。
+ *
+ * ## 模式切换是显式的（2026-11-06 修）
+ *
+ * 旧版根据"当前值是否在候选里"自动决定显示下拉还是输入框 —— 用户切换
+ * Provider 后原 Model 不在新候选里，控件会**自动跳成输入框**，视觉上像
+ * 同时出现两个控件（用户反馈"显示了两个"）。
+ * 新版：模式由用户点按钮显式切换，值的归属不改变控件形态。
+ * 值不在候选里时下拉会显示为空选中态，但值仍保留、提交不受影响。
+ */
 function SelectRow({ label, help, value, options, allowCustom, placeholder, onChange }: {
   label: string; help?: string; value: string;
   options: ReadonlyArray<{ value: string; label: string }>;
   allowCustom?: boolean; placeholder?: string;
   onChange: (next: string) => void;
 }): ReactNode {
+  const [custom, setCustom] = useState(false);
   const known = options.some((o) => o.value === value);
-  const isCustom = allowCustom === true && value !== '' && !known;
-  // 当前值不在列表里（或为空）→ 显示自定义输入；否则下拉
-  if (isCustom || (options.length === 0 && allowCustom === true)) {
+  // 空值 + 有候选 → 下拉（继承默认是合法选择）；显式点过"手动输入"→ 输入框
+  const showInput = custom || (allowCustom === true && options.length === 0);
+  if (showInput) {
     return createElement('div', { className: 'imqb2-field' },
       createElement('div', { className: 'imqb2-head' },
         createElement('span', { className: 'imqb2-label' }, label),
         options.length > 0
           ? createElement('button', {
               type: 'button', className: 'imqb2-link', style: { flex: 'none' },
-              onClick: () => { onChange(''); },
+              onClick: () => { setCustom(false); onChange(''); },
             }, '改用下拉选择')
           : null,
       ),
@@ -303,15 +315,15 @@ function SelectRow({ label, help, value, options, allowCustom, placeholder, onCh
       allowCustom === true
         ? createElement('button', {
             type: 'button', className: 'imqb2-link', style: { flex: 'none' },
-            onClick: () => { onChange(value === '' ? ' ' : value); },
+            onClick: () => { setCustom(true); },
           }, '手动输入')
         : null,
     ),
     createElement('select', {
-      className: 'imqb2-input imqb2-select', value,
+      className: 'imqb2-input imqb2-select', value: known ? value : '',
       onChange: (event: ChangeEvent<HTMLSelectElement>) => { onChange(event.currentTarget.value); },
     },
-      createElement('option', { value: '' }, placeholder ?? '（继承宿主默认）'),
+      createElement('option', { value: '' }, known && value !== '' ? `（当前：${value}）` : placeholder ?? '（继承宿主默认）'),
       options.map((o) => createElement('option', { key: o.value, value: o.value }, o.label)),
     ),
     help === undefined ? null : createElement('p', { className: 'imqb2-hint' }, help),
@@ -330,27 +342,41 @@ function FallbackRoutes({ routes, models, onChange }: {
     list.push(m);
     byProvider.set(m.provider, list);
   }
-  const update = (i: number, key: 'provider' | 'model', v: string): void => {
-    const next = routes.map((r, idx) => idx === i ? { ...r, [key]: v } : r);
+  // 一次改多个字段：必须在**同一次** onChange 里完成。连续两次调用 update
+  // 会有 stale-props 问题 —— 第二次拿到的 routes 还是本次 render 的旧值，
+  // 会把第一次的修改覆盖掉（React 状态更新不是同步可见的）。
+  const update = (i: number, patchItem: Partial<{ provider: string; model: string }>): void => {
+    const next = routes.map((r, idx) => idx === i ? { ...r, ...patchItem } : r);
     onChange(next);
   };
+  const providers = [...byProvider.keys()];
   return createElement('div', { className: 'imqb2-field' },
     createElement('span', { className: 'imqb2-label' }, '备用模型通道'),
     routes.length === 0
       ? createElement('p', { className: 'imqb2-hint' }, '未启用（主通道不可用时也不会切换）')
       : routes.map((r, i) => createElement('div', { key: i, className: 'imqb2-fb-row' },
-          createElement('input', {
-            className: 'imqb2-input imqb2-fb-provider', value: r.provider,
-            placeholder: 'provider', list: `imqb2-dl-provider-${i}`, spellCheck: false,
-            onChange: (e: ChangeEvent<HTMLInputElement>) => { update(i, 'provider', e.currentTarget.value); },
-          }),
-          createElement('datalist', { id: `imqb2-dl-provider-${i}` },
-            [...byProvider.keys()].map((p) => createElement('option', { key: p, value: p }))),
+          // provider 下拉（候选来自 /models 的实际 provider），换 provider 清 model
+          createElement('select', {
+            className: 'imqb2-input imqb2-fb-provider',
+            value: providers.includes(r.provider) ? r.provider : '',
+            onChange: (e: ChangeEvent<HTMLSelectElement>) => {
+              const nextProvider = e.currentTarget.value;
+              // provider 变了，model 大概率不属于新 provider → 一并清掉（一次 setState）
+              const keepModel = byProvider.get(nextProvider)?.some((m) => m.id === r.model) === true;
+              update(i, keepModel ? { provider: nextProvider } : { provider: nextProvider, model: '' });
+            },
+          },
+            createElement('option', { value: '' }, r.provider === '' ? '选择 provider' : `（自定义：${r.provider}）`),
+            providers.map((p) => createElement('option', { key: p, value: p }, p)),
+          ),
           createElement('input', {
             className: 'imqb2-input imqb2-fb-model', value: r.model,
-            placeholder: 'model', spellCheck: false,
-            onChange: (e: ChangeEvent<HTMLInputElement>) => { update(i, 'model', e.currentTarget.value); },
+            placeholder: 'model', list: `imqb2-dl-model-${i}`, spellCheck: false,
+            onChange: (e: ChangeEvent<HTMLInputElement>) => { update(i, { model: e.currentTarget.value }); },
           }),
+          // model 用 datalist：既可下拉选也可手输（model 多，纯下拉太长）
+          createElement('datalist', { id: `imqb2-dl-model-${i}` },
+            (byProvider.get(r.provider) ?? []).map((m) => createElement('option', { key: m.id, value: m.id }))),
           createElement('button', {
             type: 'button', className: 'imqb2-fb-del', 'aria-label': `删除第${i + 1}条备用通道`,
             onClick: () => { onChange(routes.filter((_, idx) => idx !== i)); },
@@ -358,7 +384,7 @@ function FallbackRoutes({ routes, models, onChange }: {
         )),
     createElement('button', {
       type: 'button', className: 'imqb2-fb-add',
-      onClick: () => { onChange([...routes, { provider: '', model: '' }]); },
+      onClick: () => { onChange([...routes, { provider: providers[0] ?? '', model: '' }]); },
     }, '+ 添加备用通道'),
     createElement('p', { className: 'imqb2-hint' },
       '主通道限流/不可用时按顺序自动切换。切换时会私聊告知你（可关）。'),
@@ -467,8 +493,8 @@ export function ConfigPanel(props?: { bindPhase?: string }): ReactNode {
     return () => { stopped = true; };
   }, [bindPhase]);
 
-  const patch = useCallback(<K extends keyof ConfigWire>(key: K, value: ConfigWire[K]): void => {
-    setForm((current) => current === null ? current : { ...current, [key]: value });
+  const patch = useCallback(<K extends keyof ConfigWire>(key: K, value: ConfigWire[K], extra?: Partial<ConfigWire>): void => {
+    setForm((current) => current === null ? current : { ...current, [key]: value, ...extra });
     setResult(null);
   }, []);
 
@@ -597,7 +623,15 @@ export function ConfigPanel(props?: { bindPhase?: string }): ReactNode {
       options: [...new Set(models.map((m) => m.provider))].map((p) => ({ value: p, label: p })),
       allowCustom: true,
       placeholder: '留空继承宿主默认',
-      onChange: (v) => { patch('provider', v.trim() === '' ? '' : v); },
+      onChange: (v) => {
+        const next = v.trim();
+        // 换 Provider 后，原 Model 多半不属于新 Provider 的候选 —— 留着会让
+        // Model 下拉跳进"自定义"模式，看起来像出现两个控件。换就一起清掉，
+        // 让 Model 回到"继承宿主默认"，选了新 Provider 再选 Model。
+        patch('provider', next,
+          // patch 的第二参：provider 变化时同时重置 model（见下方 patch 签名扩展）
+          next !== (form.provider ?? '') ? { model: '' } : undefined);
+      },
     }),
     // Model 下拉的候选随 Provider 过滤
     createElement(SelectRow, {
