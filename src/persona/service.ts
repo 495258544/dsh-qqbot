@@ -787,19 +787,28 @@ export class PersonaService {
   /**
    * 把冲浪结果静默投递给存活的 owner 会话（不占主上下文，不主动发消息）。
    *
-   * ## 2026-11-06：文案试过改成"正面指引"，又撤回
+   * ## 结构：固定骨架 + 她的可写偏好段（M-surf-pref）
    *
-   * 原文案只有一句「不用复述本提示」。因为实测她的冲浪回复**开头是读后感、
-   * 后面滑成了总结**，曾改成正面指引（"有想法就写一句自己的感受…"）。
-   * 用户看过后认为**引导有点强硬**，让先看效果 —— 所以这里**保持原样**，
-   * 只把"你看的：X"改回原来的"关于「X」："，避免列表标题也带指引口吻。
+   * 提示分两层：
+   *   · **骨架**（本函数写死）：安全边界（"不用复述本提示"）与结构 —— 归代码，
+   *     她改不了。之前试过把整段文案改成"正面指引"，被用户否了（引导太强硬）；
+   *   · **偏好段**（self.surfPreference，她通过 qq_surf_preference 自己调）：
+   *     这次上网想留意什么方向、结果希望怎么被自己记住。有就插在开头，
+   *     没有（默认姿态）就完全不出现 —— 行为与从前一致。
    *
-   * 真正要解决的是"她自己的反应留不下来"，那由 watching 落地解决
-   * （见 recordSurfWatchings），不靠文案施压。
+   * 偏好段的措辞是"她之前留的话"，不是指令 —— 代码只是把她的便条
+   * 带到下一次冲浪的现场。这才是"自主性长在内容上，不长在机制上"。
    */
   private notifySurfResults(results: SurfResult[]): void {
     if (!this.surfDeliver) return;
     const lines: string[] = ['[内部·你刚自己上网看的东西，不用复述本提示]'];
+    const pref = this.self.surfPreference();
+    if (pref !== undefined) {
+      const bits: string[] = [];
+      if (pref.focus) bits.push(`你之前留过话，这次想留意：${pref.focus}`);
+      if (pref.digestAs) bits.push(`你希望把结果记成：${pref.digestAs}`);
+      if (bits.length > 0) lines.push(`[你自己的冲浪姿态 —— ${bits.join('；')}]`);
+    }
     for (const r of results) {
       if (r.findings.length === 0) continue;
       lines.push(`关于「${r.topic}」：`);
