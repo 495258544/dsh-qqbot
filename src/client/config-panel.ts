@@ -677,16 +677,6 @@ export function ConfigPanel(props?: { bindPhase?: string }): ReactNode {
             onChange: (v) => { setPersonaRt({ ...personaRt, names: v.split('\n').map((x) => x.trim()) }); setPersonaRtDirty(true); },
           }),
           createElement(AreaRow, {
-            key: 'keywords', label: '唤醒关键词（消息里出现这些词就必应，与兴趣无关）', rows: 2,
-            value: (personaRt.keywords ?? []).join('\n'),
-            onChange: (v) => { setPersonaRt({ ...personaRt, keywords: v.split('\n').map((x) => x.trim()) }); setPersonaRtDirty(true); },
-          }),
-          createElement(AreaRow, {
-            key: 'other', label: '别人的称呼（告诉机器人"这些词是人名，不是在叫它"——仅记忆里没有的人需要填）', rows: 2,
-            value: (personaRt.otherNames ?? []).join('\n'),
-            onChange: (v) => { setPersonaRt({ ...personaRt, otherNames: v.split('\n').map((x) => x.trim()) }); setPersonaRtDirty(true); },
-          }),
-          createElement(AreaRow, {
             key: 'self', label: '自己人的 openid（小号/备用号，这些 id 不算"别人"）', rows: 2,
             value: (personaRt.selfIds ?? []).join('\n'),
             onChange: (v) => { setPersonaRt({ ...personaRt, selfIds: v.split('\n').map((x) => x.trim()) }); setPersonaRtDirty(true); },
@@ -701,10 +691,10 @@ export function ConfigPanel(props?: { bindPhase?: string }): ReactNode {
               setPersonaRtMsg(null);
               void fetch(BIND_PERSONA_PATH, {
                 method: 'POST', headers: { 'content-type': 'application/json' },
+                // 只提交面板上有的两键；keywords/otherNames 不在面板上，
+                // 不提交（后端语义：undefined = 保持不动，不会清空线上值）
                 body: JSON.stringify({
                   names: personaRt.names ?? [],
-                  keywords: personaRt.keywords ?? [],
-                  otherNames: personaRt.otherNames ?? [],
                   selfIds: personaRt.selfIds ?? [],
                 }),
               }).then(async (res) => {

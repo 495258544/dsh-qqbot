@@ -311,12 +311,19 @@ export async function bootstrapGateway(
               const diff = (submitted: string[] | undefined, baseline: string[]): string[] | undefined =>
                 submitted === undefined ? undefined
                   : submitted.map((s) => s.trim()).filter((s) => s !== '' && !baseline.includes(s));
-              persona.runtime.update({
-                names: diff(patch.names as string[] | undefined, baselineNames),
-                keywords: diff(patch.keywords as string[] | undefined, baselineKeywords),
-                otherNames: diff(patch.otherNames as string[] | undefined, baselineOtherNames),
-                selfIds: diff(patch.selfIds as string[] | undefined, baselineSelfIds),
-              });
+              // ⚠️ 只放进有值的键：update 的 {...current, ...patch} 里，
+              // 显式 undefined 会覆盖掉现值，然后 sanitizeList(undefined)=[] ——
+              // 面板没提交的键（keywords/otherNames）会被**静默清空**。
+              const updatePatch: Record<string, string[]> = {};
+              const namesD = diff(patch.names as string[] | undefined, baselineNames);
+              if (namesD !== undefined) updatePatch.names = namesD;
+              const keywordsD = diff(patch.keywords as string[] | undefined, baselineKeywords);
+              if (keywordsD !== undefined) updatePatch.keywords = keywordsD;
+              const otherD = diff(patch.otherNames as string[] | undefined, baselineOtherNames);
+              if (otherD !== undefined) updatePatch.otherNames = otherD;
+              const selfD = diff(patch.selfIds as string[] | undefined, baselineSelfIds);
+              if (selfD !== undefined) updatePatch.selfIds = selfD;
+              persona.runtime.update(updatePatch as { names?: string[] });
               return { ok: true };
             } catch (err) {
               return { ok: false, error: err instanceof Error ? err.message : String(err) };
