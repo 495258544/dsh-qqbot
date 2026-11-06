@@ -53,10 +53,28 @@ describe('Humanizer.split · 超出条数上限时不再拼成一坨', () => {
 
   it('内容不丢：分条后拼起来覆盖原文的每一段', () => {
     const parts = new Humanizer({ burstMax: 2 }).split(REAL_CASE, 2);
-    const joined = parts.join('\n');
+    // 注意：新算法会在句号处切，所以比对时要忽略分隔符
+    const norm = (s: string) => s.replace(/[\s\n]/g, '');
+    const joined = norm(parts.join(''));
     for (const para of REAL_CASE.split('\n\n')) {
-      expect(joined).toContain(para.slice(0, 12));
+      expect(joined).toContain(norm(para).slice(0, 12));
     }
+  });
+
+  it('语义边界（第三轮的核心）：每条都结束在句末标点上，绝不切在句子中间', () => {
+    const parts = new Humanizer({ burstMax: 2 }).split(REAL_CASE, 2);
+    for (const p of parts) {
+      expect(p.trim()).toMatch(/[。！？!?…~]$/);
+    }
+  });
+
+  it('引导句不被拆开（「两条对胃口的：」要和她引出的内容在一起）', () => {
+    const msg = '冲浪回来了。这回搜到的是正经东西，不再是字典页。\n\n两条对胃口的：一条是澎湃上的《花式咖啡、小甜水的快乐》。';
+    const parts = new Humanizer({ burstMax: 2 }).split(msg, 2);
+    // 引导句与它引出的内容必须在同一条里
+    const withLead = parts.find((p) => p.includes('两条对胃口的'));
+    expect(withLead).toBeDefined();
+    expect(withLead!.includes('花式咖啡')).toBe(true);
   });
 
   it('max=1（情绪低/慢速）时也保留换行，而不是空格拼接', () => {
