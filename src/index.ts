@@ -5,6 +5,7 @@
  * 网关组装（中间件编排 + 事件 + 出站 + 生命周期）见 src/gateway/；
  * 凭据绑定编排（扫码状态机 + 端内绑定页路由）见 src/setup/。
  */
+import { appendFileSync } from 'node:fs';
 import type { Context } from '@deepseek-ai/cordis';
 import { ConfigSchema, type ImQQBotConfig } from './config.ts';
 import { bootstrapGateway } from './gateway/index.ts';
@@ -22,6 +23,19 @@ export type { ImQQBotConfig } from './config.ts';
 
 // ── 插件主体 ──
 export async function apply(ctx: Context, config: ImQQBotConfig): Promise<void> {
+  // 无条件启动标记（2026-11-06 加，纯诊断）。
+  // 用途：区分「插件压根没 apply」和「apply 了但 web 服务没挂上」——
+  // 之前 debug-surf.jsonl 里只有 06:24 的接线记录、之后再无，无法判定是哪种。
+  // 这条不看任何依赖，进 apply 就写，是链路最早的锚点。
+  try {
+    appendFileSync(
+      '/root/.dsh-qqbot/debug-surf.jsonl',
+      `${JSON.stringify({ t: new Date().toISOString(), src: 'plugin-apply', stage: 'apply-entered' })}\n`,
+    );
+  } catch {
+    /* 诊断失败绝不能影响插件启动 */
+  }
+
   const agents = (ctx as unknown as Record<string, unknown>).agents as DshAgentRegistry;
   const logger: Logger = ((ctx as unknown as Record<string, unknown>).logger as Logger) ?? console;
 

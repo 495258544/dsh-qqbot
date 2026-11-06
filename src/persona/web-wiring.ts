@@ -17,7 +17,7 @@
  * 拿真实 cordis Context 测它，而不是再靠手写假对象自证。
  */
 import type { Context } from '@deepseek-ai/cordis';
-import type { WebSearchLike } from './surf.ts';
+import { surfWiringDbg, type WebSearchLike } from './surf.ts';
 
 /** 接线回调：web 就绪时给服务，卸载时给 undefined */
 export type AttachWeb = (web: WebSearchLike | undefined) => void;
@@ -44,8 +44,15 @@ interface EffectScope {
  */
 export function bindPersonaWeb(ctx: Context, attach: AttachWeb): void {
   const injectable = ctx as unknown as InjectableContext;
-  if (typeof injectable.inject !== 'function') return;
+  // 静默 return 是这个函数最危险的分支：以前它连一行痕迹都不留，
+  // 排查时无法区分「没走到这」「inject 不可用」「web 一直不就绪」。
+  if (typeof injectable.inject !== 'function') {
+    surfWiringDbg('no-inject', { reason: 'ctx.inject 不是函数' });
+    return;
+  }
+  surfWiringDbg('inject-registered', {});
   injectable.inject(['web'], (scoped) => {
+    surfWiringDbg('inject-callback', {});
     const web = (scoped as unknown as { get(name: string): unknown }).get('web') as
       | WebSearchLike
       | undefined;
