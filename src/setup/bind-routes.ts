@@ -23,8 +23,12 @@ import { AccessControlSchema } from '../config.ts';
 import {
   BIND_CONFIG_PATH,
   BIND_MANUAL_PATH,
+  BIND_MODELS_PATH,
+  BIND_PERSONA_PATH,
+  BIND_PRESETS_PATH,
   BIND_REFRESH_PATH,
   BIND_STATE_PATH,
+  BIND_STATUS_PATH,
   BIND_UNBIND_PATH,
   type BindStateWire,
 } from '../shared/bind-protocol.ts';
@@ -85,6 +89,29 @@ export interface BindRoutesOptions {
    * 配置写入处理（默认：最小合并写入 profile patch）。
    */
   onUpdateConfig?: (config: Record<string, unknown>) => boolean;
+  /**
+   * 模型列表（设置面板下拉菜单数据源）。由 bootstrap 注入
+   * ModelResolver.listModels 的闭包；不提供时 /models 返回 503。
+   * 动态发现可能耗时几百 ms（逐 provider 探测），前端应做 loading 态。
+   */
+  listModels?: () => Promise<Array<{ provider: string; id: string; name?: string }>>;
+  /**
+   * Agent preset 列表（Preset 下拉数据源）。由 bootstrap 注入；
+   * 不提供时 /presets 返回 503（部署不支持 agent preset）。
+   */
+  listPresets?: () => Array<{ id: string; name?: string }>;
+  /**
+   * 运行时状态快照（状态总览区数据源）。由 bootstrap 注入；
+   * 不提供时 /status 返回 503。返回的是**只读事实**，不含机密。
+   */
+  runtimeStatus?: () => Record<string, unknown>;
+  /**
+   * 人格热区读写（runtime.json 四件套：names/keywords/otherNames/selfIds）。
+   * GET 回显 / POST 保存，均由 PersonaService 的 RuntimeConfig 承载；
+   * 不提供时 /persona-runtime 返回 503。
+   */
+  readPersonaRuntime?: () => Record<string, unknown>;
+  writePersonaRuntime?: (patch: Record<string, unknown>) => { ok: boolean; error?: string };
 }
 
 /** 可经 UI 编辑的配置键（白名单：只收用户必要的字段，其余走 patch/env） */
@@ -92,7 +119,7 @@ const EDITABLE_CONFIG_KEYS = new Set([
   'requireMention', 'streaming', 'showToolResults', 'debug',
   'provider', 'model', 'preset',
   'groupPrompt', 'directPrompt',
-  'access',
+  'access', 'fallbackRoutes',
 ]);
 
 /** 白名单键的子 Schema（服务端校验：客户端校验仅为体验，安全边界在宿主） */
@@ -107,6 +134,22 @@ const EDITABLE_CONFIG_SCHEMAS: Record<string, (value: unknown) => unknown> = {
   groupPrompt: stringSchema('groupPrompt'),
   directPrompt: stringSchema('directPrompt'),
   access: (v) => AccessControlSchema(v as never),
+  // 备用模型通道：数组，每项 {provider, model} 都是非空字符串，上限 8 条
+  // （官方没有条数限制，这里防误操作把手填崩；真需要更多走 profile patch）
+  fallbackRoutes: (v) => {
+    if (!Array.isArray(v)) throw new TypeError('fallbackRoutes 必须是数组');
+    if (v.length > 8) throw new TypeError('fallbackRoutes 最多 8 条（更多请走 profile patch）');
+    return v.map((item, i) => {
+      if (item === null || typeof item !== 'object') throw new TypeError(`fallbackRoutes[${i}] 必须是对象`);
+      const rec = item as Record<string, unknown>;
+      const provider = rec.provider;
+      const model = rec.model;
+      if (typeof provider !== 'string' || provider.trim() === '') throw new TypeError(`fallbackRoutes[${i}].provider 必须是非空字符串`);
+      if (typeof model !== 'string' || model.trim() === '') throw new TypeError(`fallbackRoutes[${i}].model 必须是非空字符串`);
+      if (provider.length > 200 || model.length > 200) throw new TypeError(`fallbackRoutes[${i}] 字段过长`);
+      return { provider: provider.trim(), model: model.trim() };
+    });
+  },
 };
 
 function booleanSchema(value: unknown, name: string): boolean {
@@ -179,9 +222,146 @@ export function registerBindRoutes(
       path: BIND_CONFIG_PATH,
       handler: (req, res) => handleConfig(req, res, options),
     }),
+    webServer.register({
+      kind: 'exact',
+      path: BIND_MODELS_PATH,
+      handler: (req, res) => { void handleModels(req, res, options); },
+    }),
+    webServer.register({
+      kind: 'exact',
+      path: BIND_PRESETS_PATH,
+      handler: (req, res) => handlePresets(req, res, options),
+    }),
+    webServer.register({
+      kind: 'exact',
+      path: BIND_STATUS_PATH,
+      handler: (req, res) => handleRuntimeStatus(req, res, options),
+    }),
+    webServer.register({
+      kind: 'exact',
+      path: BIND_PERSONA_PATH,
+      handler: (req, res) => { void handlePersonaRuntime(req, res, options); },
+    }),
   ];
   logger.info(`im-qqbot: 端内绑定页已就绪: ${BIND_STATE_PATH}`);
   return () => { for (const dispose of disposers) dispose(); };
+}
+
+/**
+ * GET /models —— 模型下拉菜单数据源。
+ * 动态发现可能耗时几百 ms，异步处理；失败返回 502 带原因。
+ */
+async function handleModels(
+  req: IncomingMessage,
+  res: ServerResponse,
+  options: BindRoutesOptions,
+): Promise<void> {
+  if (!trusted(req)) { sendJson(res, 403, { error: 'forbidden' }); return; }
+  if (req.method !== 'GET' && req.method !== 'HEAD') {
+    sendJson(res, 405, { error: 'method not allowed' });
+    return;
+  }
+  if (options.listModels === undefined) {
+    sendJson(res, 503, { error: '模型列表服务不可用（ModelResolver 未注入）' });
+    return;
+  }
+  try {
+    const models = await options.listModels();
+    sendJson(res, 200, { ok: true, models });
+  } catch (err) {
+    sendJson(res, 502, { error: `模型列表获取失败: ${err instanceof Error ? err.message : String(err)}` });
+  }
+}
+
+/** GET /presets —— Preset 下拉数据源。 */
+function handlePresets(
+  req: IncomingMessage,
+  res: ServerResponse,
+  options: BindRoutesOptions,
+): void {
+  if (!trusted(req)) { sendJson(res, 403, { error: 'forbidden' }); return; }
+  if (req.method !== 'GET' && req.method !== 'HEAD') {
+    sendJson(res, 405, { error: 'method not allowed' });
+    return;
+  }
+  if (options.listPresets === undefined) {
+    sendJson(res, 503, { error: 'agent preset 服务不可用' });
+    return;
+  }
+  sendJson(res, 200, { ok: true, presets: options.listPresets() });
+}
+
+/** GET /status —— 状态总览快照（只读事实，不含机密）。 */
+function handleRuntimeStatus(
+  req: IncomingMessage,
+  res: ServerResponse,
+  options: BindRoutesOptions,
+): void {
+  if (!trusted(req)) { sendJson(res, 403, { error: 'forbidden' }); return; }
+  if (req.method !== 'GET' && req.method !== 'HEAD') {
+    sendJson(res, 405, { error: 'method not allowed' });
+    return;
+  }
+  if (options.runtimeStatus === undefined) {
+    sendJson(res, 503, { error: '运行时状态服务不可用' });
+    return;
+  }
+  try {
+    sendJson(res, 200, { ok: true, status: options.runtimeStatus() });
+  } catch (err) {
+    sendJson(res, 502, { error: `状态读取失败: ${err instanceof Error ? err.message : String(err)}` });
+  }
+}
+
+/**
+ * GET/POST /persona-runtime —— 人格热区（runtime.json 四件套）。
+ * GET 回显当前值；POST 保存（热生效，不用重启插件）。
+ */
+async function handlePersonaRuntime(
+  req: IncomingMessage,
+  res: ServerResponse,
+  options: BindRoutesOptions,
+): Promise<void> {
+  if (!trusted(req)) { sendJson(res, 403, { error: 'forbidden' }); return; }
+  const method = (req.method ?? 'GET').toUpperCase();
+  if (method === 'GET' || method === 'HEAD') {
+    if (options.readPersonaRuntime === undefined) {
+      sendJson(res, 503, { error: '人格热区服务不可用' });
+      return;
+    }
+    try {
+      sendJson(res, 200, { ok: true, runtime: options.readPersonaRuntime() });
+    } catch (err) {
+      sendJson(res, 502, { error: `读取失败: ${err instanceof Error ? err.message : String(err)}` });
+    }
+    return;
+  }
+  if (method !== 'POST') {
+    sendJson(res, 405, { error: 'method not allowed' });
+    return;
+  }
+  if (options.writePersonaRuntime === undefined) {
+    sendJson(res, 503, { error: '人格热区服务不可用' });
+    return;
+  }
+  const body = await readJsonBody(req);
+  if (body === null || typeof body !== 'object') {
+    sendJson(res, 400, { error: 'invalid body' });
+    return;
+  }
+  // 只收四个已知键（白名单，防把任意键写进 runtime.json）
+  const ALLOWED = new Set(['names', 'keywords', 'otherNames', 'selfIds']);
+  const patch: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(body)) {
+    if (ALLOWED.has(k)) patch[k] = v;
+  }
+  if (Object.keys(patch).length === 0) {
+    sendJson(res, 400, { error: '没有可写的字段（只接受 names/keywords/otherNames/selfIds）' });
+    return;
+  }
+  const result = options.writePersonaRuntime(patch);
+  if (result.ok) sendJson(res, 200, { ok: true, message: '已保存，热生效' });
+  else sendJson(res, 502, { error: result.error ?? '写入失败' });
 }
 
 /**

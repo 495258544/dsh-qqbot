@@ -15,7 +15,14 @@
  * 类字段走 profile patch / 环境变量。
  */
 import { createElement, useCallback, useEffect, useState, type CSSProperties, type ChangeEvent, type FormEvent, type ReactNode } from 'react';
-import { BIND_CONFIG_PATH } from '../shared/bind-protocol.ts';
+import {
+  BIND_CONFIG_PATH,
+  BIND_MODELS_PATH,
+  BIND_PERSONA_PATH,
+  BIND_PRESETS_PATH,
+  BIND_STATUS_PATH,
+  type ModelOptionWire,
+} from '../shared/bind-protocol.ts';
 
 /** 访问控制配置（与 src/config.ts 的 AccessControlConfig 对应的局部投影） */
 interface AccessControlWire {
@@ -38,7 +45,27 @@ type ConfigWire = {
   directPrompt?: string;
   access?: AccessControlWire;
   cwd?: string;
+  fallbackRoutes?: Array<{ provider: string; model: string }>;
 };
+
+/** 状态快照（GET /status 返回的只读事实） */
+interface StatusWire {
+  qqConnected?: boolean;
+  appId?: string;
+  activeSessions?: number;
+  webSearchAvailable?: boolean;
+  fallbackRoutes?: string[];
+  notifyOwnerOnFailover?: boolean;
+  [k: string]: unknown;
+}
+
+/** 人格热区（runtime.json 四件套） */
+interface PersonaRuntimeWire {
+  names?: string[];
+  keywords?: string[];
+  otherNames?: string[];
+  selfIds?: string[];
+}
 
 /** 样式注入标记（幂等） */
 const STYLE_ID = 'im-qqbot-config-panel-styles';
@@ -66,6 +93,29 @@ function useConfigPanelStyles(): void {
 .imqb2-help { margin: 0; font-size: 12px; line-height: 1.6; color: var(--dsw-alias-label-secondary); }
 .imqb2-hint { margin: 0; font-size: 12px; line-height: 1.5; color: var(--dsw-alias-label-tertiary); }
 /* Switch（aria-checked 驱动，视觉态与无障碍态同源） */
+.imqb2-select { appearance: auto; }
+.imqb2-link {
+  border: 0; background: none; padding: 2px 6px; font: inherit; font-size: 12px;
+  color: var(--dsw-alias-brand-primary); cursor: pointer; border-radius: 6px;
+}
+.imqb2-link:hover { background: var(--dsw-alias-fill-l1, rgba(128,128,128,.1)); }
+.imqb2-fb-row { display: flex; gap: 6px; align-items: center; }
+.imqb2-fb-provider { flex: 2; min-width: 0; }
+.imqb2-fb-model { flex: 3; min-width: 0; }
+.imqb2-fb-del {
+  flex: none; width: 26px; height: 26px; border: 0; border-radius: 6px;
+  background: var(--dsw-alias-fill-l1, rgba(128,128,128,.12));
+  color: var(--dsw-alias-label-secondary); font: inherit; cursor: pointer;
+}
+.imqb2-fb-del:hover { color: var(--dsw-alias-label-primary); }
+.imqb2-fb-add {
+  align-self: flex-start; border: 0.5px solid var(--dsw-alias-border-l2);
+  border-radius: 8px; background: transparent; padding: 5px 12px;
+  font: inherit; font-size: 12px; color: var(--dsw-alias-label-primary); cursor: pointer;
+}
+.imqb2-fb-add:hover { background: var(--dsw-alias-fill-l1, rgba(128,128,128,.1)); }
+.imqb2-fb-add:disabled { opacity: .5; cursor: default; }
+.imqb2-status-val { font-size: 13px; color: var(--dsw-alias-label-secondary); }
 .imqb2-switch {
   box-sizing: border-box; position: relative; flex: 0 0 auto;
   width: 36px; height: 20px; padding: 2px; border: 0; border-radius: 999px;
@@ -219,6 +269,112 @@ function AreaRow({ label, help, value, rows, onChange }: {
   );
 }
 
+/** 下拉选择行（数据源来自 /models、/presets；含"自定义"手输兜底） */
+function SelectRow({ label, help, value, options, allowCustom, placeholder, onChange }: {
+  label: string; help?: string; value: string;
+  options: ReadonlyArray<{ value: string; label: string }>;
+  allowCustom?: boolean; placeholder?: string;
+  onChange: (next: string) => void;
+}): ReactNode {
+  const known = options.some((o) => o.value === value);
+  const isCustom = allowCustom === true && value !== '' && !known;
+  // 当前值不在列表里（或为空）→ 显示自定义输入；否则下拉
+  if (isCustom || (options.length === 0 && allowCustom === true)) {
+    return createElement('div', { className: 'imqb2-field' },
+      createElement('div', { className: 'imqb2-head' },
+        createElement('span', { className: 'imqb2-label' }, label),
+        options.length > 0
+          ? createElement('button', {
+              type: 'button', className: 'imqb2-link', style: { flex: 'none' },
+              onClick: () => { onChange(''); },
+            }, '改用下拉选择')
+          : null,
+      ),
+      createElement('input', {
+        className: 'imqb2-input', value, placeholder: placeholder ?? '留空继承宿主默认', spellCheck: false,
+        onChange: (event: ChangeEvent<HTMLInputElement>) => { onChange(event.currentTarget.value); },
+      }),
+      help === undefined ? null : createElement('p', { className: 'imqb2-hint' }, help),
+    );
+  }
+  return createElement('div', { className: 'imqb2-field' },
+    createElement('div', { className: 'imqb2-head' },
+      createElement('span', { className: 'imqb2-label' }, label),
+      allowCustom === true
+        ? createElement('button', {
+            type: 'button', className: 'imqb2-link', style: { flex: 'none' },
+            onClick: () => { onChange(value === '' ? ' ' : value); },
+          }, '手动输入')
+        : null,
+    ),
+    createElement('select', {
+      className: 'imqb2-input imqb2-select', value,
+      onChange: (event: ChangeEvent<HTMLSelectElement>) => { onChange(event.currentTarget.value); },
+    },
+      createElement('option', { value: '' }, placeholder ?? '（继承宿主默认）'),
+      options.map((o) => createElement('option', { key: o.value, value: o.value }, o.label)),
+    ),
+    help === undefined ? null : createElement('p', { className: 'imqb2-hint' }, help),
+  );
+}
+
+/** 备用模型列表（可增删的多行条目） */
+function FallbackRoutes({ routes, models, onChange }: {
+  routes: Array<{ provider: string; model: string }>;
+  models: ReadonlyArray<ModelOptionWire>;
+  onChange: (next: Array<{ provider: string; model: string }>) => void;
+}): ReactNode {
+  const byProvider = new Map<string, ModelOptionWire[]>();
+  for (const m of models) {
+    const list = byProvider.get(m.provider) ?? [];
+    list.push(m);
+    byProvider.set(m.provider, list);
+  }
+  const update = (i: number, key: 'provider' | 'model', v: string): void => {
+    const next = routes.map((r, idx) => idx === i ? { ...r, [key]: v } : r);
+    onChange(next);
+  };
+  return createElement('div', { className: 'imqb2-field' },
+    createElement('span', { className: 'imqb2-label' }, '备用模型通道'),
+    routes.length === 0
+      ? createElement('p', { className: 'imqb2-hint' }, '未启用（主通道不可用时也不会切换）')
+      : routes.map((r, i) => createElement('div', { key: i, className: 'imqb2-fb-row' },
+          createElement('input', {
+            className: 'imqb2-input imqb2-fb-provider', value: r.provider,
+            placeholder: 'provider', list: `imqb2-dl-provider-${i}`, spellCheck: false,
+            onChange: (e: ChangeEvent<HTMLInputElement>) => { update(i, 'provider', e.currentTarget.value); },
+          }),
+          createElement('datalist', { id: `imqb2-dl-provider-${i}` },
+            [...byProvider.keys()].map((p) => createElement('option', { key: p, value: p }))),
+          createElement('input', {
+            className: 'imqb2-input imqb2-fb-model', value: r.model,
+            placeholder: 'model', spellCheck: false,
+            onChange: (e: ChangeEvent<HTMLInputElement>) => { update(i, 'model', e.currentTarget.value); },
+          }),
+          createElement('button', {
+            type: 'button', className: 'imqb2-fb-del', 'aria-label': `删除第${i + 1}条备用通道`,
+            onClick: () => { onChange(routes.filter((_, idx) => idx !== i)); },
+          }, '×'),
+        )),
+    createElement('button', {
+      type: 'button', className: 'imqb2-fb-add',
+      onClick: () => { onChange([...routes, { provider: '', model: '' }]); },
+    }, '+ 添加备用通道'),
+    createElement('p', { className: 'imqb2-hint' },
+      '主通道限流/不可用时按顺序自动切换。切换时会私聊告知你（可关）。'),
+  );
+}
+
+/** 状态总览行（只读） */
+function StatusRow({ label, value }: { label: string; value: string }): ReactNode {
+  return createElement('div', { className: 'imqb2-field' },
+    createElement('div', { className: 'imqb2-head' },
+      createElement('span', { className: 'imqb2-label' }, label),
+      createElement('span', { className: 'imqb2-status-val' }, value),
+    ),
+  );
+}
+
 /** 访问模式分段选择行 */
 function SegmentedRow({ label, help, value, options, onChange }: {
   label: string; help?: string; value: AccessMode;
@@ -258,6 +414,39 @@ export function ConfigPanel(props?: { bindPhase?: string }): ReactNode {
   const [form, setForm] = useState<ConfigWire | null>(null);
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<{ ok: boolean; message: string } | null>(null);
+  // 模型/预置下拉数据源（加载失败不阻塞面板，只是退化为手输）
+  const [models, setModels] = useState<ReadonlyArray<ModelOptionWire>>([]);
+  const [presets, setPresets] = useState<ReadonlyArray<{ id: string; name?: string }>>([]);
+  const [status, setStatus] = useState<StatusWire | null>(null);
+  const [personaRt, setPersonaRt] = useState<PersonaRuntimeWire | null>(null);
+  const [personaRtDirty, setPersonaRtDirty] = useState(false);
+  const [personaRtBusy, setPersonaRtBusy] = useState(false);
+  const [personaRtMsg, setPersonaRtMsg] = useState<{ ok: boolean; text: string } | null>(null);
+
+  useEffect(() => {
+    void (async () => {
+      try {
+        const res = await fetch(BIND_MODELS_PATH, { cache: 'no-store' });
+        const body = (await res.json().catch(() => ({}))) as { ok?: boolean; models?: ModelOptionWire[] };
+        if (res.ok && body.ok === true && Array.isArray(body.models)) setModels(body.models);
+      } catch { /* 下拉退化手输 */ }
+      try {
+        const res = await fetch(BIND_PRESETS_PATH, { cache: 'no-store' });
+        const body = (await res.json().catch(() => ({}))) as { ok?: boolean; presets?: Array<{ id: string; name?: string }> };
+        if (res.ok && body.ok === true && Array.isArray(body.presets)) setPresets(body.presets);
+      } catch { /* 同上 */ }
+      try {
+        const res = await fetch(BIND_STATUS_PATH, { cache: 'no-store' });
+        const body = (await res.json().catch(() => ({}))) as { ok?: boolean; status?: StatusWire };
+        if (res.ok && body.ok === true && body.status) setStatus(body.status);
+      } catch { /* 状态区隐藏 */ }
+      try {
+        const res = await fetch(BIND_PERSONA_PATH, { cache: 'no-store' });
+        const body = (await res.json().catch(() => ({}))) as { ok?: boolean; runtime?: PersonaRuntimeWire };
+        if (res.ok && body.ok === true && body.runtime) setPersonaRt(body.runtime);
+      } catch { /* 人格区隐藏 */ }
+    })();
+  }, []);
   const [loadError, setLoadError] = useState<string | null>(null);
   // 绑定相位变化时重拉配置（扫码落库的白名单等新值）
   const bindPhase = props?.bindPhase;
@@ -378,18 +567,54 @@ export function ConfigPanel(props?: { bindPhase?: string }): ReactNode {
       onChange: (v) => { patch('showToolResults', v); },
     }),
 
+    createElement('div', { className: 'imqb2-group-title' }, '状态'),
+    status === null
+      ? createElement('p', { className: 'imqb2-hint' }, '运行状态不可用（网关未启动或服务未就绪）')
+      : [
+          createElement(StatusRow, { key: 'qq', label: 'QQ 连接', value: status.qqConnected === true ? '已连接' : '未连接' }),
+          createElement(StatusRow, { key: 'sess', label: '活跃会话', value: String(status.activeSessions ?? 0) }),
+          createElement(StatusRow, {
+            key: 'web', label: '联网搜索',
+            value: status.webSearchAvailable === true ? '可用（宿主 web 通道）' : '不可用（走 Bing RSS 兜底）',
+          }),
+          createElement(StatusRow, {
+            key: 'route', label: '备用通道',
+            value: (status.fallbackRoutes?.length ?? 0) > 0 ? status.fallbackRoutes!.join(' → ') : '未配置',
+          }),
+        ],
+
     createElement('div', { className: 'imqb2-group-title' }, '模型'),
-    createElement(FieldRow, {
-      label: 'Provider', value: form.provider ?? '', placeholder: '留空继承宿主默认',
-      onChange: (v) => { patch('provider', v); },
+    createElement(SelectRow, {
+      label: 'Provider',
+      value: form.provider ?? '',
+      options: [...new Set(models.map((m) => m.provider))].map((p) => ({ value: p, label: p })),
+      allowCustom: true,
+      placeholder: '留空继承宿主默认',
+      onChange: (v) => { patch('provider', v.trim() === '' ? '' : v); },
     }),
-    createElement(FieldRow, {
-      label: 'Model', value: form.model ?? '', placeholder: '留空继承宿主默认',
-      onChange: (v) => { patch('model', v); },
+    // Model 下拉的候选随 Provider 过滤
+    createElement(SelectRow, {
+      label: 'Model',
+      value: form.model ?? '',
+      options: models
+        .filter((m) => form.provider === undefined || form.provider === '' || m.provider === form.provider)
+        .map((m) => ({ value: m.id, label: m.name !== undefined && m.name !== m.id ? `${m.name}（${m.id}）` : m.id })),
+      allowCustom: true,
+      placeholder: '留空继承宿主默认',
+      onChange: (v) => { patch('model', v.trim() === '' ? '' : v); },
     }),
-    createElement(FieldRow, {
-      label: 'Preset', value: form.preset ?? '', placeholder: 'Agent preset id',
-      onChange: (v) => { patch('preset', v); },
+    createElement(SelectRow, {
+      label: 'Preset',
+      value: form.preset ?? '',
+      options: presets.map((p) => ({ value: p.id, label: p.name !== undefined && p.name !== p.id ? `${p.name}（${p.id}）` : p.id })),
+      allowCustom: true,
+      placeholder: '留空继承宿主默认',
+      onChange: (v) => { patch('preset', v.trim() === '' ? '' : v); },
+    }),
+    createElement(FallbackRoutes, {
+      routes: form.fallbackRoutes ?? [],
+      models,
+      onChange: (next) => { patch('fallbackRoutes', next.filter((r) => r.provider.trim() !== '' && r.model.trim() !== '')); },
     }),
 
     createElement('div', { className: 'imqb2-group-title' }, '个性化提示词'),
@@ -401,6 +626,67 @@ export function ConfigPanel(props?: { bindPhase?: string }): ReactNode {
       label: '私聊额外 system prompt', value: form.directPrompt ?? '',
       onChange: (v) => { patch('directPrompt', v); },
     }),
+
+    createElement('div', { className: 'imqb2-group-title' }, '人格热区（改完立即生效，不用重启）'),
+    personaRt === null
+      ? createElement('p', { className: 'imqb2-hint' }, '人格热区不可用（persona 未启用或网关未启动）')
+      : [
+          createElement(AreaRow, {
+            key: 'names', label: '唤醒名（叫这些名字会醒）', rows: 2,
+            value: (personaRt.names ?? []).join('\n'),
+            onChange: (v) => { setPersonaRt({ ...personaRt, names: v.split('\n').map((x) => x.trim()) }); setPersonaRtDirty(true); },
+          }),
+          createElement(AreaRow, {
+            key: 'keywords', label: '兴趣关键词（命中更容易接话）', rows: 2,
+            value: (personaRt.keywords ?? []).join('\n'),
+            onChange: (v) => { setPersonaRt({ ...personaRt, keywords: v.split('\n').map((x) => x.trim()) }); setPersonaRtDirty(true); },
+          }),
+          createElement(AreaRow, {
+            key: 'other', label: '别人的称呼（用于判断"在叫谁"，一行一个）', rows: 2,
+            value: (personaRt.otherNames ?? []).join('\n'),
+            onChange: (v) => { setPersonaRt({ ...personaRt, otherNames: v.split('\n').map((x) => x.trim()) }); setPersonaRtDirty(true); },
+          }),
+          createElement(AreaRow, {
+            key: 'self', label: '自己人的 openid（小号/备用号，这些 id 不算"别人"）', rows: 2,
+            value: (personaRt.selfIds ?? []).join('\n'),
+            onChange: (v) => { setPersonaRt({ ...personaRt, selfIds: v.split('\n').map((x) => x.trim()) }); setPersonaRtDirty(true); },
+          }),
+          createElement('button', {
+            key: 'save-rt', type: 'button', className: 'imqb2-fb-add',
+            disabled: personaRtBusy || !personaRtDirty,
+            style: personaRtDirty ? undefined : { opacity: 0.5, cursor: 'default' },
+            onClick: () => {
+              if (personaRtBusy || !personaRtDirty) return;
+              setPersonaRtBusy(true);
+              setPersonaRtMsg(null);
+              void fetch(BIND_PERSONA_PATH, {
+                method: 'POST', headers: { 'content-type': 'application/json' },
+                body: JSON.stringify({
+                  names: personaRt.names ?? [],
+                  keywords: personaRt.keywords ?? [],
+                  otherNames: personaRt.otherNames ?? [],
+                  selfIds: personaRt.selfIds ?? [],
+                }),
+              }).then(async (res) => {
+                const body = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string; message?: string };
+                setPersonaRtMsg(res.ok && body.ok === true
+                  ? { ok: true, text: body.message ?? '已保存，热生效' }
+                  : { ok: false, text: body.error ?? `保存失败（HTTP ${res.status}）` });
+                if (res.ok && body.ok === true) setPersonaRtDirty(false);
+              }).catch((err: unknown) => {
+                setPersonaRtMsg({ ok: false, text: err instanceof Error ? err.message : String(err) });
+              }).finally(() => { setPersonaRtBusy(false); });
+            },
+          }, personaRtBusy ? '保存中…' : personaRtDirty ? '保存人格热区' : '已保存'),
+          personaRtMsg !== null
+            ? createElement('p', {
+                key: 'rt-msg',
+                className: `imqb2-note${personaRtMsg.ok ? ' imqb2-note--ok' : ' imqb2-note--error'}`,
+              }, (personaRtMsg.ok ? '' : '⚠️ ') + personaRtMsg.text)
+            : null,
+          createElement('p', { key: 'rt-hint', className: 'imqb2-hint' },
+            '这几项存在 runtime.json，保存后立即生效，不重启插件、不断会话。'),
+        ],
 
     form.cwd !== undefined
       ? createElement('div', { className: 'imqb2-field' },

@@ -33,6 +33,7 @@ import { DeliverablesDeliverer } from '../transport/deliverables.ts';
 import { PersonaService } from '../persona/service.ts';
 import { bindPersonaWeb } from '../persona/web-wiring.ts';
 import { registerPersonaTools } from '../persona/tools.ts';
+import { bindPersonaRuntimeProviders } from '../setup/index.ts';
 import { checkBiliHealth, formatHealthIssues } from '../persona/bili-health.ts';
 import { SteamService, registerSteamTools } from '../steam/index.ts';
 import { createDotaService, registerDotaTools, type DotaService } from '../dota/index.ts';
@@ -268,6 +269,40 @@ export async function bootstrapGateway(
 
   bot.on('ready', () => {
     console.log(`[im-qqbot] Bot ready! appId=${config.appId}`);
+    // 设置面板扩展：回填「人格热区 / 状态快照」的延迟绑定实现。
+    // registerBoundCredentialRoutes 跑在本函数之前，PersonaService 那时还不存在，
+    // 所以用 bindPersonaRuntimeProviders 在这里回填（见 setup/index.ts 的说明）。
+    try {
+      bindPersonaRuntimeProviders(ctx, {
+        persona: {
+          read: () => ({
+            names: persona?.runtime.names() ?? [],
+            keywords: persona?.runtime.keywords() ?? [],
+            otherNames: persona?.runtime.otherNames() ?? [],
+            selfIds: persona?.runtime.selfIds() ?? [],
+          }),
+          write: (patch) => {
+            if (persona === undefined) return { ok: false, error: 'persona 未启用' };
+            try {
+              persona.runtime.update(patch as { names?: string[]; keywords?: string[]; otherNames?: string[]; selfIds?: string[] });
+              return { ok: true };
+            } catch (err) {
+              return { ok: false, error: err instanceof Error ? err.message : String(err) };
+            }
+          },
+        },
+        status: () => ({
+          qqConnected: true, // 能执行到这里说明 bot ready 已触发
+          appId: config.appId,
+          activeSessions: manager.size,
+          webSearchAvailable: persona?.hasWeb() ?? false,
+          fallbackRoutes: (config.persona?.fallbackRoutes ?? []).map((r) => `${r.provider}/${r.model}`),
+          notifyOwnerOnFailover: config.persona?.notifyOwnerOnFailover ?? true,
+        }),
+      });
+    } catch (err) {
+      logger.warn(`设置面板扩展回填失败（面板上对应区会显示不可用）: ${err instanceof Error ? err.message : String(err)}`);
+    }
   });
 
   // ── 富媒体过期清理 ──
