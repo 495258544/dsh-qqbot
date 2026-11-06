@@ -492,6 +492,13 @@ export function ConfigPanel(props?: { bindPhase?: string }): ReactNode {
         groupAllow: a.groupAllow.map((s) => s.trim()).filter(Boolean),
       };
     }
+    // 备用通道同样：编辑态保留未填完的行，提交时才丢掉不完整条目
+    // （后端校验也会拒绝 provider/model 为空的条目，这里提前清洗给更好的体验）
+    if (changed.fallbackRoutes !== undefined) {
+      changed.fallbackRoutes = (changed.fallbackRoutes as Array<{ provider: string; model: string }>)
+        .filter((r) => r.provider.trim() !== '' && r.model.trim() !== '');
+      if (changed.fallbackRoutes.length === 0) changed.fallbackRoutes = [];
+    }
 
     setBusy(true);
     void fetch(BIND_CONFIG_PATH, {
@@ -614,7 +621,10 @@ export function ConfigPanel(props?: { bindPhase?: string }): ReactNode {
     createElement(FallbackRoutes, {
       routes: form.fallbackRoutes ?? [],
       models,
-      onChange: (next) => { patch('fallbackRoutes', next.filter((r) => r.provider.trim() !== '' && r.model.trim() !== '')); },
+      // 编辑态不过滤：空行是"正在填"的合法中间态，滤了会出现两个 bug——
+      // ①「添加」push 的是空行，立即被滤 → 界面无反应；②填了一半的行消失。
+      // 清洗放在 submit（与 access 白名单"编辑保留空行、提交才规范化"同一模式）。
+      onChange: (next) => { patch('fallbackRoutes', next); },
     }),
 
     createElement('div', { className: 'imqb2-group-title' }, '个性化提示词'),
