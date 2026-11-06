@@ -116,7 +116,7 @@ export interface PersonaConfig {
   humanizeEnabled: boolean;
   /** 每字打字毫秒（ai-companion 作者实测真人值 110） */
   msPerChar: number;
-  /** 一次最多分几条（官方被动回复限额，建议 ≤2） */
+  /** 一次最多分几条（官方被动回复上限：单聊 4 / 群聊 5，建议 ≤2 留额度） */
   burstMax: number;
   /** 条间停顿范围(ms) */
   gapMinMs: number;
@@ -415,7 +415,7 @@ export const ConfigSchema: Schema<ImQQBotConfig> = Schema.object({
     fromBotAtMeAllowed: Schema.boolean().default(true).description('其他机器人@她时是否回应（默认true；其他bot的普通消息一律只进历史不回复，防互聊死循环）'),
     humanizeEnabled: Schema.boolean().default(true).description('拟人化发送（分条+停顿）'),
     msPerChar: Schema.number().default(110).description('每字打字毫秒（真人实测约110）'),
-    burstMax: Schema.number().default(2).description('一次最多分几条（官方被动回复限额，建议≤2）'),
+    burstMax: Schema.number().default(2).description('一次最多分几条（官方被动回复上限：单聊4/群聊5，建议≤2 留额度）'),
     gapMinMs: Schema.number().default(700).description('条间停顿下限(ms)'),
     gapMaxMs: Schema.number().default(2600).description('条间停顿上限(ms)'),
     ownLifeEnabled: Schema.boolean().default(false).description('own-life 静默唤醒（给她自己的时间）'),
