@@ -610,10 +610,6 @@ export function ConfigPanel(props?: { bindPhase?: string }): ReactNode {
             key: 'web', label: '联网搜索',
             value: status.webSearchAvailable === true ? '可用（宿主 web 通道）' : '不可用（走 Bing RSS 兜底）',
           }),
-          createElement(StatusRow, {
-            key: 'route', label: '备用通道',
-            value: (status.fallbackRoutes?.length ?? 0) > 0 ? status.fallbackRoutes!.join(' → ') : '未配置',
-          }),
         ],
 
     createElement('div', { className: 'imqb2-group-title' }, '模型'),
@@ -681,12 +677,12 @@ export function ConfigPanel(props?: { bindPhase?: string }): ReactNode {
             onChange: (v) => { setPersonaRt({ ...personaRt, names: v.split('\n').map((x) => x.trim()) }); setPersonaRtDirty(true); },
           }),
           createElement(AreaRow, {
-            key: 'keywords', label: '兴趣关键词（命中更容易接话）', rows: 2,
+            key: 'keywords', label: '唤醒关键词（消息里出现这些词就必应，与兴趣无关）', rows: 2,
             value: (personaRt.keywords ?? []).join('\n'),
             onChange: (v) => { setPersonaRt({ ...personaRt, keywords: v.split('\n').map((x) => x.trim()) }); setPersonaRtDirty(true); },
           }),
           createElement(AreaRow, {
-            key: 'other', label: '别人的称呼（用于判断"在叫谁"，一行一个）', rows: 2,
+            key: 'other', label: '别人的称呼（告诉机器人"这些词是人名，不是在叫它"——仅记忆里没有的人需要填）', rows: 2,
             value: (personaRt.otherNames ?? []).join('\n'),
             onChange: (v) => { setPersonaRt({ ...personaRt, otherNames: v.split('\n').map((x) => x.trim()) }); setPersonaRtDirty(true); },
           }),
