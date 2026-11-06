@@ -19,6 +19,7 @@ import type { Logger } from '../types.ts';
 import { heroName } from './heroes.ts';
 import { parseAbilities, parseAbilityUpgrades, describeAbilityMix, type ParsedAbility } from './abilities.ts';
 import { AbilityRecordStore } from './ability-records.ts';
+import type { DotaWarmupConfig } from './warmup.ts';
 import {
   OpenDotaApi,
   OpenDotaError,
@@ -47,6 +48,13 @@ export interface DotaConfig {
   rateLimitPerMin: number;
   /** 是否额外查生涯总胜负（多一次请求） */
   includeWinLoss: boolean;
+  /**
+   * 凌晨预热（默认 3 点，用户指定）：把所有人昨天打过的局提前请求一遍，
+   * 触发 OpenDota 入队解析 —— 第二天白天查询才有完整技能/团战数据。
+   * OpenDota 的解析是按需的：一场比赛不被请求就永远停在"半解析"
+   * （2026-11-05/06 两次实测：局后 12~35 小时 ability_uses 仍缺）。
+   */
+  warmup?: Partial<DotaWarmupConfig>;
 }
 
 /** 同一账号的 recentMatches 缓存 */
@@ -360,6 +368,31 @@ export class DotaService {
   }
 
   /**
+   * 预热：对某人最近 withinHours 小时内打过的局逐场请求一次。
+   * 请求本身就会让 OpenDota 入队解析 —— 这正是"凌晨预热、白天查才有完整数据"的原理。
+   * 单场失败不中断（下一晚还会再试）；限流由本地闸门统一控制。
+   */
+  async warmRecent(accountId: number, withinHours: number): Promise<number> {
+    if (!this.config.enabled) {
+      throw new OpenDotaError('bad-request', 'Dota2 战绩功能未启用（config.dota.enabled=false）');
+    }
+    if (!Number.isSafeInteger(accountId) || accountId <= 0) {
+      throw new OpenDotaError('bad-request', `account_id 必须是正整数，收到 ${String(accountId)}`);
+    }
+    const raw = await this.matches(accountId, this.config.maxLimit);
+    const cutoffSec = Math.floor(Date.now() / 1000) - withinHours * 3600;
+    const targets = raw.filter((m) => m.start_time >= cutoffSec);
+    for (const m of targets) {
+      try {
+        await this.matchRaw(m.match_id);
+      } catch {
+        // 单场失败不中断：预热是锦上添花，明天还会再试
+      }
+    }
+    return targets.length;
+  }
+
+  /**
    * 单场详细解析。
    * matchId 必填；accountId 用来定位"这局里的哪个人"（不传就没法算队内排名/对位）。
    */
@@ -431,6 +464,17 @@ export class DotaService {
             ...(mix !== '' ? { mix } : {}),
           }],
         });
+      } else {
+        // 技能缺失时的护栏（2026-11-06 实锤：GDL 帕吉 24/3/12 那局，她把
+        // 「帕吉=钩子」的默认印象编成"钩子拉得太准了"——而那局根本没抽到肉钩。
+        // OMG 里英雄不一定有招牌技能，按默认技能描述必然翻车）。
+        // 不是简单的"没数据"：要明确告诉模型**不许怎么编**，只给"没数据"她还是会脑补。
+        form.notes.push(
+          '技能数据还没出来（OpenDota 对这局还没完成解析）。'
+          + '技能征召模式下英雄不一定有它的招牌技能 —— 在拿到真实技能列表之前，'
+          + '只聊 KDA / 伤害 / 装备这些数据，**不要提任何具体技能名**，'
+          + '也不要说"钩子准""大招放得好"这类默认联想；可以照实说"技能数据还没解析出来"。',
+        );
       }
     } catch (err) {
       form.notes.push(`技能没解析出来：${err instanceof Error ? err.message : String(err)}`);

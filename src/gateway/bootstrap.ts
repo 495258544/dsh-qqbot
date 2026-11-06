@@ -34,6 +34,7 @@ import { PersonaService } from '../persona/service.ts';
 import { registerPersonaTools } from '../persona/tools.ts';
 import { SteamService, registerSteamTools } from '../steam/index.ts';
 import { createDotaService, registerDotaTools, type DotaService } from '../dota/index.ts';
+import { createDotaWarmup } from '../dota/warmup.ts';
 import { createBridgeProbe, renderScreenNudge } from '../persona/screen-watch.ts';
 import { createDotaDigest } from '../persona/dota-digest.ts';
 import { configureGroupActivity, pickBestGroup } from '../features/group-activity.ts';
@@ -445,6 +446,31 @@ export async function bootstrapGateway(
       `dota-digest: 已武装（查 ${config.persona.dotaDigestQueryHours[0]}:00-${config.persona.dotaDigestQueryHours[1]}:00`
       + ` → 次日 ${config.persona.dotaDigestDeliverHours[0]}:00-${config.persona.dotaDigestDeliverHours[1]}:00`
       + `，关键词 ${kwCount > 0 ? `${kwCount} 个（自定义）` : '内置默认（含「打刀」）'}）`,
+    );
+  }
+
+  // ── OpenDota 解析预热（独立于 digest 开关：白天的单场查询同样受益）──
+  // OpenDota 的解析是按需的：一场比赛不被请求就永远停在"半解析"
+  // （KDA 有、技能/团战没有）。凌晨 3 点把昨天所有人打过的局请求一遍，
+  // 触发 OpenDota 入队解析，白天查"这局拿了什么技能"才拿得到。
+  if (dota && config.dota.warmup?.enabled !== false) {
+    const warmup = createDotaWarmup({
+      config: config.dota.warmup ?? {},
+      logger,
+      bindings: () =>
+        steam
+          ? steam.bindings.list().map((b) => ({
+            openid: b.openid,
+            ...(b.binding.alias !== undefined ? { alias: b.binding.alias } : {}),
+            steamId: b.binding.steamId,
+          }))
+          : [],
+      service: dota,
+    });
+    warmup.start();
+    const wcfg = config.dota.warmup ?? {};
+    logger.info(
+      `dota-warmup: 已武装（每天 ${wcfg.hour ?? 3}:00 预热最近 ${wcfg.withinHours ?? 30}h 的比赛，触发 OpenDota 解析）`,
     );
   }
 

@@ -45,6 +45,7 @@ export const DEFAULT_DOTA_CONFIG: DotaConfig = {
   maxLimit: 20,
   rateLimitPerMin: 50,
   includeWinLoss: true,
+  warmup: { enabled: true, hour: 3, withinHours: 30, tz: 'Asia/Shanghai' },
 };
 
 /** 补齐缺省字段：容许上层只传部分配置（Schema 演化时不会因为少一个字段就崩） */
