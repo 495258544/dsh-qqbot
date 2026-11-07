@@ -113,3 +113,30 @@ describe('Humanizer.split · 不变的行为', () => {
     expect(parts.length).toBeLessThanOrEqual(4);
   });
 });
+
+describe('Humanizer.split · 多段不挤进一条（2026-11-07）', () => {
+  it('回归：3 段 167 字不再合成一个带换行的巨块', () => {
+    const msg = [
+      '知道了。往后不倒情节，只说感觉。',
+      '第三章最戳我的是那种「怕连累别人」的念头——他自己都不知道自己是谁、来自哪儿，却先想到走掉会连累这对母子。这个比什么身世谜团都暖一点。',
+      '还有那句「练武不练功，到头一场空」浮在意识里没人教过他。他怀疑自己是那东西的创造者，却连自己是谁都不知道。这种「明明是作者的东西，却像角色自己的」写法，挺妙的。',
+    ].join('\n\n');
+    const parts = new Humanizer({ burstMax: 2 }).split(msg, 2);
+    // 旧行为：1 条 165 字（两处 \n）。新行为：2 条气泡。
+    expect(parts.length).toBe(2);
+    // 气泡内部不再有"跨段落"换行（每段独立成气泡）
+    for (const p of parts) expect(p.split('\n').length).toBeLessThanOrEqual(2);
+  });
+
+  it('2 段正常长度的消息 → 2 个气泡（不合并成一条）', () => {
+    // 注意：<6 字的极短段会被相邻合并（原有碎句规则），
+    // 所以这里用正常长度的段落来验证"不挤一条"
+    const parts = new Humanizer({ burstMax: 2 }).split(
+      '这个我得想想再说。\n\n不过大体方向应该没什么问题，可以先走着看。',
+      2,
+    );
+    expect(parts.length).toBe(2);
+    expect(parts[0]).toContain('想想');
+    expect(parts[1]).toContain('方向');
+  });
+});

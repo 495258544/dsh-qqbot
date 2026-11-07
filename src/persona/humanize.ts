@@ -170,41 +170,40 @@ export class Humanizer {
       }
     }
 
-    // 条数够了就直接发，不做任何拼接
     if (blocks.length <= max) return blocks;
 
-    // 3) 超出上限：拆成最小单位（句子），装桶时**只在语义边界断开**
-    //    —— 段落边界用换行连接，同段落内的句子直接相连（保持原排版）。
+    // 单段软上限：一条气泡里太长观感也不好。超了沿句子边界拆。
+    const SOFT_MAX = 220;
+
+    // 3) 超出条数上限：**每个段落优先独占一条气泡**。
+    //
+    // ## 2026-11-07 修：多段不再挤进一条
+    //
+    // 上一版贪心装桶按 SOFT_MAX=220 字收口，结果她一条 3 段 / 167 字的回复
+    // 被合成**一个带两个换行的气泡** —— 用户反馈「所有内容挤在一条消息里面」。
+    // 真人分段的想法就是连着发几条，不是一个气泡里按两下回车。
+    //
+    // 现在：段落即气泡；只有单段自己超长（>SOFT_MAX）才沿句子边界拆开。
+    // 拆完若条数仍超 max，合并**最短的相邻对**（用换行连接，绝不空格拼接）。
     type Unit = { text: string; para: number };
     const units: Unit[] = [];
     let paraIdx = 0;
     for (const b of blocks) {
-      const segs = b
-        .split(/(?<=[。！？!?…~])\s*/)
-        .map((s) => s.trim())
-        .filter(Boolean);
-      if (segs.length === 0) {
+      // 段落本身够短 → 整段一个 unit（一个气泡）
+      if ([...b].length <= SOFT_MAX) {
         units.push({ text: b, para: paraIdx });
       } else {
-        for (const s of segs) units.push({ text: s, para: paraIdx });
+        // 超长段落沿句子切开（每句仍是独立 unit/气泡候选）
+        const segs = b
+          .split(/(?<=[。！？!?…~])\s*/)
+          .map((s) => s.trim())
+          .filter(Boolean);
+        for (const s of (segs.length > 0 ? segs : [b])) units.push({ text: s, para: paraIdx });
       }
       paraIdx++;
     }
 
-    // 单条消息的软上限：一条太长的观感也不好。超了就在句子/逗号处再切一刀。
-    const SOFT_MAX = 220;
-    const finalUnits: Unit[] = [];
-    for (const u of units) {
-      if ([...u.text].length <= SOFT_MAX) {
-        finalUnits.push(u);
-        continue;
-      }
-      const bits = u.text.split(/(?<=[，,、])/).map((s) => s.trim()).filter(Boolean);
-      if (bits.length > 1) for (const b of bits) finalUnits.push({ text: b, para: u.para });
-      else finalUnits.push(u);
-    }
-
-    /** 把一组 unit 拼回一段文本：跨段落用换行，同段落直接相连 */
+    /** 把一组 unit 拼回文本：同段落直接相连，跨段落用换行 */
     const render = (group: Unit[]): string => {
       let out = '';
       let prevPara = -1;
@@ -216,24 +215,11 @@ export class Humanizer {
       return out;
     };
 
-    // 贪心装桶：一条到软上限就收口；**永远不会切在句子中间**
-    const groups: Unit[][] = [];
-    let cur: Unit[] = [];
-    let curLen = 0;
-    for (const u of finalUnits) {
-      const len = [...u.text].length;
-      if (cur.length > 0 && curLen + len > SOFT_MAX) {
-        groups.push(cur);
-        cur = [];
-        curLen = 0;
-      }
-      cur.push(u);
-      curLen += len;
-    }
-    if (cur.length) groups.push(cur);
+    // 初始：每个 unit 一组（一段/一句 = 一个气泡）
+    const groups: Unit[][] = units.map((u) => [u]);
 
-    // 桶数超上限（max=1、或段落太少装不下）→ 合并相邻桶，
-    // 合并时优先并**最短的那一对相邻桶**，直到降到 max。
+    // 条数超上限 → 反复合并**合并后总长最短**的相邻对（保持语义相邻），
+    // 直到降到 max。合并用换行连接（跨段落）或直连（同段落被句拆的）。
     while (groups.length > max && groups.length > 1) {
       let bestIdx = 0;
       let bestLen = Infinity;
