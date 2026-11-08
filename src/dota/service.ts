@@ -17,7 +17,7 @@
  */
 import type { Logger } from '../types.ts';
 import { heroName } from './heroes.ts';
-import { parseAbilities, parseAbilityUpgrades, describeAbilityMix, type ParsedAbility } from './abilities.ts';
+import { parseAbilities, parseAbilityUpgrades, describeAbilityMix, abilityLabel, type ParsedAbility } from './abilities.ts';
 import { AbilityRecordStore } from './ability-records.ts';
 import type { DotaWarmupConfig } from './warmup.ts';
 import {
@@ -442,8 +442,14 @@ export class DotaService {
         // 只放在结构化字段里的话她很可能压根不去看。
         // 兜底路径的次数口径不同（加点数 ≠ 使用数），措辞必须分开，别让人以为他按了 126 次。
         const label = basis === 'levels' ? '技能（按加点）' : '技能';
-        form.summaryText += `\n${label}｜${abilities.map((a) => `${a.name}×${a.uses}`).join(' / ')}`;
+        form.summaryText += `\n${label}｜${abilities.map((a) => `${abilityLabel(a)}×${a.uses}`).join(' / ')}`;
         if (mix !== '') form.summaryText += `\n路子｜${mix}`;
+        // 技能名是识别 OMG 组合的凭据：给权威中文名，别让她自己译。
+        // 2026-11-08 实锤：God's Strength 被译成「众神之力」，官方是「神之力量」。
+        form.notes.push(
+          '技能名按上面给的写法照抄：括号前是官方简体中文名，括号里是英文原名；'
+          + '没给中文名的技能直接用英文原名。不要自行翻译、改名或换成别的说法。',
+        );
 
         // 落一份记录（同一场重复解析就覆盖，幂等）—— 隔几天再问"他上把拿了什么"就有据可查
         this.abilityRecords.put({
@@ -457,6 +463,7 @@ export class DotaService {
             win: form.player.win,
             abilities: abilities.map((a) => ({
               name: a.name,
+              ...(a.nameZh !== undefined ? { nameZh: a.nameZh } : {}),
               uses: a.uses,
               ...(a.behavior !== undefined ? { behavior: a.behavior } : {}),
               ...(a.damageType !== undefined ? { damageType: a.damageType } : {}),

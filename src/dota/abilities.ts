@@ -12,10 +12,13 @@
  *     · 加点顺序里混着天赋（special_bonus_unique_xxx），要另外剔
  *     · 使用次数直接反映**这套技能的重心**：谁用了 126 次影压，谁就是核心输出
  *
- * 为什么用英文技能名：
- *   OpenDota 只给英文 dname。硬翻译要维护上千条中英对照，且新技能一上线就过时。
- *   她输出的是中文，英文技能名进上下文她会自己转述成「影压」「妖术」。
+ * 技能名怎么显示（2026-11-08 改）：
+ *   原本指望「英文 dname 进上下文，她自己转述成中文」——实测翻车：
+ *   `God's Strength` 被直译成「众神之力」，而官方简体中文是「神之力量」。
+ *   现在由 `ability-zh.ts` 给权威中文名，没收录的一律保留英文原名，
+ *   展示层统一输出 `神之力量（God's Strength）`，并禁止她自行翻译或改名。
  */
+import { abilityZh } from './ability-zh.ts';
 import type { AbilityMeta } from './opendota.ts';
 
 export interface ParsedAbility {
@@ -23,6 +26,8 @@ export interface ParsedAbility {
   key: string;
   /** 展示名，如 Shadowraze（没有 dname 时回退成 key） */
   name: string;
+  /** 官方简体中文名；没收录对照表时为 undefined，展示层保留英文原名 */
+  nameZh?: string;
   /** 本局使用次数（被动技能不会出现在这里） */
   uses: number;
   /** 施法类型，如 "No Target" / "Unit Target" */
@@ -75,9 +80,11 @@ export function parseAbilities(
     if (!Number.isFinite(n) || n <= 0) continue;
     const m = meta.get(key);
     const dname = m?.dname ?? '';
+    const zh = dname !== '' ? abilityZh(dname) : undefined;
     out.push({
       key,
       name: dname !== '' ? dname : key,
+      ...(zh !== undefined ? { nameZh: zh } : {}),
       uses: Math.round(n),
       ...(m?.behavior !== undefined && m.behavior !== '' ? { behavior: m.behavior } : {}),
       ...(m?.dmgType !== undefined && m.dmgType !== '' ? { damageType: m.dmgType } : {}),
@@ -123,9 +130,11 @@ export function parseAbilityUpgrades(
   for (const [key, levels] of counts) {
     const m = meta.get(key);
     const dname = m?.dname ?? '';
+    const zh = dname !== '' ? abilityZh(dname) : undefined;
     out.push({
       key,
       name: dname !== '' ? dname : key,
+      ...(zh !== undefined ? { nameZh: zh } : {}),
       uses: levels, // 这里复用字段表示"加点次数"，调用方要按 basis='levels' 措辞
       ...(m?.behavior !== undefined && m.behavior !== '' ? { behavior: m.behavior } : {}),
       ...(m?.dmgType !== undefined && m.dmgType !== '' ? { damageType: m.dmgType } : {}),
@@ -134,6 +143,14 @@ export function parseAbilityUpgrades(
 
   out.sort((a, b) => b.uses - a.uses);
   return out;
+}
+
+/**
+ * 统一展示格式：有官方中文名就 `中文（英文原名）`，没有就只给英文原名。
+ * 括号里的英文是给群友对号用的锚点，也让她没有「自己译一个」的余地。
+ */
+export function abilityLabel(a: ParsedAbility): string {
+  return a.nameZh !== undefined ? `${a.nameZh}（${a.name}）` : a.name;
 }
 
 /**
@@ -165,7 +182,7 @@ export function describeAbilityMix(abilities: ParsedAbility[]): string {
   // 用得最多的那个单独点出来 —— 这才是这局的重心
   const top = abilities[0];
   if (top !== undefined && top.uses >= 20) {
-    tags.push(`用得最多的是 ${top.name}（${top.uses} 次）`);
+    tags.push(`用得最多的是 ${abilityLabel(top)}（${top.uses} 次）`);
   }
   return tags.join('；');
 }

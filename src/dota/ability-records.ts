@@ -19,6 +19,8 @@ import path from 'node:path';
 export interface AbilityRecordEntry {
   /** 展示名（英文 dname，如 Shadowraze） */
   name: string;
+  /** 官方简体中文名（对照表没收录时缺省，沿用英文原名） */
+  nameZh?: string;
   /** 本局使用次数 */
   uses: number;
   behavior?: string;
