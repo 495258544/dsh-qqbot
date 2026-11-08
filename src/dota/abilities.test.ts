@@ -182,3 +182,24 @@ describe('parseAbilityUpgrades · ability_uses 缺失时的兜底', () => {
     // 但语义不同 —— service 层用 basis 标注，summary 措辞分别为「技能」/「技能（按加点）」
   })
 })
+
+describe('ability_capture · 占领旗帜是引擎技能不是英雄技能', () => {
+  // 2026-11-08 实测：9079610365（邪影芳灵局）的 ability_uses 里有
+  // ability_capture×2（占领前哨/旗帜，OpenDota 标记 Hidden）——
+  // 漏过滤会让她把"占了两次旗"当成一个技能来分析。
+  it('精确名单拦下 ability_capture', () => {
+    expect(isNoiseAbility('ability_capture')).toBe(true)
+  })
+
+  it('真实解析里不再出现', () => {
+    const meta = new Map<string, AbilityMeta>([
+      ['shadow_shaman_voodoo', { dname: 'Hex', behavior: 'Unit Target' }],
+      ['ability_capture', { behavior: 'Unit Target / Channeled / Hidden' }],
+    ])
+    const got = parseAbilities(
+      { shadow_shaman_voodoo: 27, ability_capture: 2 },
+      meta,
+    )
+    expect(got.map((a) => a.name)).toEqual(['Hex'])
+  })
+})
