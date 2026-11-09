@@ -11,6 +11,8 @@
 import type { ContentBlock } from '@deepseek-ai/dsh-llm';
 import { createUserMessage } from '@deepseek-ai/dsh-llm';
 import { appendFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
 import type { SessionManager } from '../session/index.ts';
 import type { ImQQBotConfig } from '../config.ts';
 import type { ChatScope, Logger, QuotedAttachment, RawAttachment, ReplyTarget } from '../types.ts';
@@ -173,7 +175,9 @@ export async function handleInbound(
 
   // ── 诊断：把进来的消息（含附件/下载结果）追加到调试文件，便于排查"图片收不到" ──
   try {
-    const dbg = '/root/.dsh-qqbot/debug-inbound.jsonl';
+    // 原来写死 /root/...（Linux 路径），Windows 上 append 直接抛错被下面的 catch 吞掉，
+    // 于是"图片到底有没有作为附件进来"永远查不到。和 debug-wakegate.jsonl 放同一目录。
+    const dbg = join(homedir(), '.dsh-qqbot', 'debug-inbound.jsonl');
     const atts = (msg.attachments ?? []).map((a) => ({
       content_type: a.content_type,
       filename: a.filename,
