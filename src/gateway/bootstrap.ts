@@ -352,6 +352,12 @@ export async function bootstrapGateway(
     svc.startSurf();
   }
 
+  // 这两个定时器必须在下面的 lifecycle teardown 里显式停掉。
+  // 2026-11-09 实测：热重载只换插件代码、不重启进程，旧实例的 setInterval 还活着，
+  // 于是凌晨 3:00 预热跑了两遍（19:00:14Z / 19:00:34Z）。每重载一次都会再攒一个。
+  let dotaDigest: ReturnType<typeof createDotaDigest> | undefined;
+  let dotaWarmup: ReturnType<typeof createDotaWarmup> | undefined;
+
   // ── Dota 战绩隔夜播报：凌晨「自由活动」查 → 次日 10:00-12:00 不打扰时段发群 ──
   // 两阶段用落盘摘要衔接（断电重启不丢），天然实现「隔夜」与「一天只发一次」。
   // 目标群按「Dota 相关度」挑（聊过 dota > 有战绩当事人 > 最近活跃），可手工指定。
@@ -378,7 +384,7 @@ export async function bootstrapGateway(
       }));
     };
 
-    const digest = createDotaDigest({
+    dotaDigest = createDotaDigest({
       config: {
         enabled: true,
         queryHours: config.persona.dotaDigestQueryHours,
@@ -439,7 +445,7 @@ export async function bootstrapGateway(
         return { ok: true };
       },
     });
-    digest.start();
+    dotaDigest.start();
 
     const kwCount = config.persona.dotaKeywords.length;
     logger.info(
@@ -454,7 +460,7 @@ export async function bootstrapGateway(
   // （KDA 有、技能/团战没有）。凌晨 3 点把昨天所有人打过的局请求一遍，
   // 触发 OpenDota 入队解析，白天查"这局拿了什么技能"才拿得到。
   if (dota && config.dota.warmup?.enabled !== false) {
-    const warmup = createDotaWarmup({
+    dotaWarmup = createDotaWarmup({
       config: config.dota.warmup ?? {},
       logger,
       bindings: () =>
@@ -467,7 +473,7 @@ export async function bootstrapGateway(
           : [],
       service: dota,
     });
-    warmup.start();
+    dotaWarmup.start();
     const wcfg = config.dota.warmup ?? {};
     logger.info(
       `dota-warmup: 已武装（每天 ${wcfg.hour ?? 3}:00 预热最近 ${wcfg.withinHours ?? 30}h 的比赛，触发 OpenDota 解析）`,
@@ -542,6 +548,8 @@ export async function bootstrapGateway(
         logger.info('Shutting down');
         persona?.stop();
         upstreamWatch?.stop();
+        dotaDigest?.stop();
+        dotaWarmup?.stop();
         await manager.disposeAll();
         bot.stop();
       };
