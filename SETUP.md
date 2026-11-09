@@ -13,6 +13,34 @@
 npm install && npm run build
 ```
 
+### 可选依赖：`dsh-ego-browser`（agent 浏览器）
+
+**不装也能用**，装了才多两件事：
+
+| 装了 | 不装 |
+|---|---|
+| 深度冲浪能抓正文（见闻更实） | 冲浪只走搜索摘要 |
+| NGA 设置面板能「在 agent 浏览器打开登录页」 | 只能游客态读 NGA（列版面/读帖照样能用） |
+
+安装方式（在 **profile** 下装，不是在本仓库里）：
+
+```bash
+dsh plugin --profile web add dsh-ego-browser
+```
+
+为什么是 profile：它是与本插件**平级**的宿主插件。实测从本插件包内
+`require.resolve('dsh-ego-browser')` 会 MODULE_NOT_FOUND，只有从 profile 才解析得到。
+代码里用 `src/persona/ego-locate.ts` 动态定位，**不再硬编码**
+`/root/.dsh/profiles/web/node_modules/...` 这种快照路径（换 profile 会静默失效）。
+
+自检：
+
+```bash
+node -e "import('/root/Documents/deepseek-harness/default-workspace/dsh-qqbot/lib/persona/ego-locate.js').then(m=>console.log(m.locateEgo({fresh:true})))"
+```
+
+返回 `undefined` = 没装好；返回对象 = 可用。详见 `EXTENSIONS.md` 第四节。
+
 ## 二、申请 Steam Web API Key
 
 打开 https://steamcommunity.com/dev/apikey ，登录后 Domain Name 随便填（如 `localhost`），拿到 32 位十六进制 Key。

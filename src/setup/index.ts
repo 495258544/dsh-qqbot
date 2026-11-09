@@ -19,6 +19,8 @@ import { registerBindRoutes, type WebServerLike } from './bind-routes.ts';
 import { createBrowserPresenter, createTerminalPresenter, isDesktopHost } from './presenters.ts';
 import { persistCredentialsToProfile, type SetupCredentials } from './persist.ts';
 import { getProfileDir } from '../shared/index.ts';
+import { clearCredentials, genQrSession, ngaStatus, renderQrPng } from '../persona/nga-capture.ts';
+import { currentQrSession, forgetQrSession, pollQrSession, rememberQrSession, saveCredentials, QR_TTL_SEC } from '../persona/tools.ts';
 
 export type { SetupCredentials } from './persist.ts';
 export { persistCredentialsToProfile } from './persist.ts';
@@ -120,6 +122,8 @@ export async function ensureCredentials(
  *   用 lateBind holder —— bootstrapGateway 完成后由调用方回填实现，
  *   回填前返回 503（面板显示"不可用"，不阻塞）。
  */
+// 扫码会话表与 TTL 与 persona 工具**共用同一份**（见 persona/tools.ts 的说明）：
+// 她在聊天里生成的二维码，主人在设置面板扫完之后，两边看到的是同一张。
 export function registerBoundCredentialRoutes(ctx: Context, logger: Logger, appId: string, config: Record<string, unknown>): void {
   // bootstrap 完成后由 gateway 回填（persona 相关能力的延迟绑定）
   const late: {
@@ -173,6 +177,58 @@ export function registerBoundCredentialRoutes(ctx: Context, logger: Logger, appI
       runtimeStatus: () => {
         if (late.status === undefined) throw new Error('网关尚未启动完成，稍后再试');
         return late.status();
+      },
+      // NGA 登录：纯 HTTP 扫码（不依赖浏览器，也不依赖网关是否起好）
+      ngaStatus: () => ngaStatus(),
+      ngaQr: async () => {
+        // 每次生成都是**新 key**：复用旧 key 会让已经发出去的那个二维码立刻失效
+        const session = await genQrSession();
+        rememberQrSession(session);
+        const qrDataUrl = await renderQrPng(session.content, 480);
+        logger.info(`im-qqbot: NGA 登录二维码已生成（${session.qrkey.slice(0, 8)}…）`);
+        return { ok: true, qrDataUrl, expiresInSec: QR_TTL_SEC };
+      },
+      ngaQrPoll: async () => {
+        const session = currentQrSession();
+        if (session === undefined) {
+          return { status: 'expired' as const, message: '还没有可用的二维码，请先生成' };
+        }
+        // 本地也判一次过期：服务端可能一直回"未找到登录许可"，
+        // 我们若无限轮询，用户会对着一个死码干等
+        if (Date.now() - session.issuedAt > QR_TTL_SEC * 1000) {
+          forgetQrSession();
+          return { status: 'expired' as const, message: '二维码过期了，重新生成一个' };
+        }
+        const r = await pollQrSession(session);
+        if (r.status === 'success' && r.credentials) {
+          try {
+            const file = saveCredentials(r.credentials);
+            forgetQrSession();
+            logger.info(`im-qqbot: NGA 登录成功（uid=${r.credentials.uid}）→ ${file}`);
+            return {
+              status: 'success' as const,
+              uid: r.credentials.uid,
+              ...(r.username ? { username: r.username } : {}),
+              message: `已登录${r.username ? `：${r.username}` : ''}`,
+            };
+          } catch (err) {
+            return {
+              status: 'expired' as const,
+              message: `拿到凭证但写盘失败：${err instanceof Error ? err.message : String(err)}`,
+            };
+          }
+        }
+        if (r.status === 'expired') forgetQrSession();
+        return {
+          status: r.status,
+          ...(r.username ? { username: r.username } : {}),
+          message: r.message,
+        };
+      },
+      ngaClear: () => {
+        const removed = clearCredentials();
+        if (removed) logger.info('im-qqbot: NGA 凭证已清除（回到游客态）');
+        return removed;
       },
     });
     (scoped as unknown as { effect(fn: () => () => void, name?: string): void }).effect(() => {

@@ -21,7 +21,12 @@ import {
   BIND_PERSONA_PATH,
   BIND_PRESETS_PATH,
   BIND_STATUS_PATH,
+  NGA_CAPTURE_PATH,
+  NGA_CLEAR_PATH,
+  NGA_OPEN_PATH,
+  NGA_STATUS_PATH,
   type ModelOptionWire,
+  type NgaStatusWire,
 } from '../shared/bind-protocol.ts';
 
 /** 访问控制配置（与 src/config.ts 的 AccessControlConfig 对应的局部投影） */
@@ -115,6 +120,19 @@ function useConfigPanelStyles(): void {
 }
 .imqb2-fb-add:hover { background: var(--dsw-alias-fill-l1, rgba(128,128,128,.1)); }
 .imqb2-fb-add:disabled { opacity: .5; cursor: default; }
+/* 普通文字按钮（次要动作，如「退出登录」）。
+ *
+ * 为什么单独一个：不能复用 .imqb2-fb-del —— 那是给 26×26 的 × 图标用的，
+ * 宽度锁死在 26px。文字按钮套上去，四个字被挤成一个字一行，竖着排。
+ * 这是我加 NGA 面板时选错了 class 造成的，别再犯。 */
+.imqb2-fb-action {
+  align-self: flex-start; border: 0.5px solid var(--dsw-alias-border-l2);
+  border-radius: 8px; background: transparent; padding: 5px 12px;
+  font: inherit; font-size: 12px; color: var(--dsw-alias-label-secondary);
+  cursor: pointer; white-space: nowrap;
+}
+.imqb2-fb-action:hover { color: var(--dsw-alias-label-primary); background: var(--dsw-alias-fill-l1, rgba(128,128,128,.1)); }
+.imqb2-fb-action:disabled { opacity: .5; cursor: default; }
 .imqb2-status-val { font-size: 13px; color: var(--dsw-alias-label-secondary); }
 .imqb2-switch {
   box-sizing: border-box; position: relative; flex: 0 0 auto;
@@ -192,6 +210,37 @@ function useConfigPanelStyles(): void {
 }
 /* cwd 只读行 */
 .imqb2-readonly { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; color: var(--dsw-alias-label-secondary); word-break: break-all; margin: 0; }
+
+/* ── 手机适配（最小化，2026-11-09 重做）─────────────────────────
+ *
+ * ## 上一版我改错了，教训记在这里
+ *
+ * 第一版我按"手机版应该长什么样"重做了整个面板：分段控件从横排改成竖排、
+ * 删掉滑动指示器、底栏改竖排、按钮全放大到 40px…… 结果用户反馈
+ * **"原先只有 nga 部分不合适，现在上面也有不合适的了"** ——
+ * 我修一个局部问题，顺手把全局观感重做了一遍。这是越界。
+ *
+ * ## 这一版的原则：只修"会坏"的，不动"好看不好看"
+ *
+ * 下面每一条都对应一个**具体的坏**（点不中 / 溢出 / 被 iOS 放大），
+ * 没有一条是"我觉得手机上这样更好看"。凡是能不改的一律不改。
+ */
+@media (max-width: 560px) {
+  /* ① 输入框字号必须 ≥16px。
+   *
+   * 这不是审美问题：iOS Safari 会对 <16px 的输入框**自动放大整页**，
+   * 用户点一下输入框，整个面板变成放大的、要手动缩回去 —— 这是坏。
+   * 只改 font-size，不动高度/内边距，视觉几乎不变。
+   */
+  .imqb2-input, .imqb2-textarea { font-size: 16px; }
+
+  /* ② 二维码按窄屏收缩。
+   *
+   * 写死 240px 在 320~360px 的老手机上会左右溢出一两个像素，
+   * 出现横向滚动条。只约束这一个元素，其余尺寸不碰。
+   */
+  .imqb2-qr-img { max-width: 100%; height: auto; }
+}
     `;
     document.head.appendChild(style);
     return () => { style.remove(); };
@@ -448,6 +497,34 @@ export function ConfigPanel(props?: { bindPhase?: string }): ReactNode {
   const [personaRtDirty, setPersonaRtDirty] = useState(false);
   const [personaRtBusy, setPersonaRtBusy] = useState(false);
   const [personaRtMsg, setPersonaRtMsg] = useState<{ ok: boolean; text: string } | null>(null);
+  // NGA 凭证（只关心「有没有登录」+ 浏览器能不能连）
+  const [nga, setNga] = useState<NgaStatusWire | null>(null);
+  const [ngaMsg, setNgaMsg] = useState<{ ok: boolean; text: string } | null>(null);
+  const [ngaBusy, setNgaBusy] = useState(false);
+  // 扫码流程：二维码 data URL + 轮询状态
+  const [ngaQr, setNgaQr] = useState<{ dataUrl: string; expiresInSec: number } | null>(null);
+  const [ngaPoll, setNgaPoll] = useState<NgaPollWire | null>(null);
+
+  /** 读 NGA 凭证状态（三个按钮都靠它刷新） */
+  const refreshNga = useCallback(async (): Promise<void> => {
+    try {
+      const res = await fetch(NGA_STATUS_PATH, { cache: 'no-store' });
+      const body = (await res.json().catch(() => ({}))) as { ok?: boolean } & Partial<NgaStatusWire>;
+      if (res.ok && body.ok === true) {
+        setNga({
+          authenticated: body.authenticated === true,
+          path: body.path ?? '',
+          browserAvailable: body.browserAvailable === true,
+          ...(body.uid ? { uid: body.uid } : {}),
+          ...(body.browserHint ? { browserHint: body.browserHint } : {}),
+        });
+        return;
+      }
+      setNga(null);
+    } catch {
+      setNga(null); // 状态区隐藏，不阻塞面板
+    }
+  }, []);
 
   useEffect(() => {
     void (async () => {
@@ -471,8 +548,48 @@ export function ConfigPanel(props?: { bindPhase?: string }): ReactNode {
         const body = (await res.json().catch(() => ({}))) as { ok?: boolean; runtime?: PersonaRuntimeWire };
         if (res.ok && body.ok === true && body.runtime) setPersonaRt(body.runtime);
       } catch { /* 人格区隐藏 */ }
+      await refreshNga();
     })();
   }, []);
+  // 二维码出现后每 2 秒轮询一次扫码结果。
+  //
+  // 为什么是 2 秒：NGA 那边扫码确认后 cookie 立刻就能用，
+  // 2 秒的延迟人感知不到；再快只是白打服务端。
+  // 一旦 success 或 expired 就停 —— 不能对着死码一直抡。
+  useEffect(() => {
+    if (ngaQr === null) return;
+    let stopped = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+
+    const tick = async (): Promise<void> => {
+      if (stopped) return;
+      try {
+        const res = await fetch(NGA_QR_POLL_PATH, { method: 'POST' });
+        const body = (await res.json().catch(() => ({ status: 'pending', message: '解析失败' }))) as NgaPollWire;
+        if (stopped) return;
+        setNgaPoll(body);
+        if (body.status === 'success') {
+          stopped = true;
+          setNgaQr(null);
+          await refreshNga();
+          return;
+        }
+        if (body.status === 'expired') {
+          stopped = true;
+          return;
+        }
+      } catch {
+        // 网络抖动：继续轮询，不要因为一次失败就停掉整条流程
+      }
+      if (!stopped) timer = setTimeout(() => { void tick(); }, 2000);
+    };
+    void tick();
+    return () => {
+      stopped = true;
+      if (timer !== undefined) clearTimeout(timer);
+    };
+  }, [ngaQr, refreshNga]);
+
   const [loadError, setLoadError] = useState<string | null>(null);
   // 绑定相位变化时重拉配置（扫码落库的白名单等新值）
   const bindPhase = props?.bindPhase;
@@ -716,6 +833,86 @@ export function ConfigPanel(props?: { bindPhase?: string }): ReactNode {
             : null,
           createElement('p', { key: 'rt-hint', className: 'imqb2-hint' },
             '这几项存在 runtime.json，保存后立即生效，不重启插件、不断会话。'),
+        ],
+
+    createElement('div', { className: 'imqb2-group-title' }, 'NGA（艾泽拉斯国家地理）'),
+    nga === null
+      ? createElement('p', { className: 'imqb2-hint' }, 'NGA 服务不可用（网关未启动）')
+      : [
+          // 登录态 —— 总是显示，改完立即能看见
+          createElement('p', { key: 'nga-state', className: 'imqb2-hint' },
+            nga.authenticated
+              ? `✅ 已登录${nga.uid ? `（uid=${nga.uid}）` : ''} —— 可以搜索、看收藏。`
+              : '⭕ 游客态 —— 能列版面、读帖子；**搜索需要登录**。'),
+          createElement('div', { key: 'nga-btns', className: 'imqb2-fb-row' },
+            // 生成二维码（内联显示，不用弹窗）
+            createElement('button', {
+              key: 'qr', type: 'button', className: 'imqb2-fb-add',
+              disabled: ngaBusy,
+              onClick: () => {
+                if (ngaBusy) return;
+                setNgaBusy(true); setNgaMsg(null); setNgaPoll(null); setNgaQr(null);
+                void fetch(NGA_QR_PATH, { method: 'POST' })
+                  .then(async (res) => {
+                    const body = (await res.json().catch(() => ({}))) as NgaQrWire & { message?: string };
+                    if (res.ok && body.ok === true && body.qrDataUrl) {
+                      setNgaQr({ dataUrl: body.qrDataUrl, expiresInSec: body.expiresInSec ?? 120 });
+                    } else {
+                      setNgaMsg({ ok: false, text: body.message ?? `生成失败（HTTP ${res.status}）` });
+                    }
+                  })
+                  .catch((err: unknown) => setNgaMsg({ ok: false, text: err instanceof Error ? err.message : String(err) }))
+                  .finally(() => setNgaBusy(false));
+              },
+            }, '生成登录二维码'),
+            createElement('button', {
+              key: 'clr', type: 'button', className: 'imqb2-fb-action',
+              disabled: ngaBusy || !nga.authenticated,
+              style: nga.authenticated ? undefined : { opacity: 0.5, cursor: 'default' },
+              onClick: () => {
+                if (ngaBusy || !nga.authenticated) return;
+                setNgaBusy(true); setNgaMsg(null);
+                void fetch(NGA_CLEAR_PATH, { method: 'POST' })
+                  .then(async (res) => {
+                    const body = (await res.json().catch(() => ({}))) as { ok?: boolean; message?: string };
+                    setNgaMsg({ ok: res.ok && body.ok === true, text: body.message ?? '已退出' });
+                    setNgaQr(null); setNgaPoll(null);
+                    await refreshNga();
+                  })
+                  .catch((err: unknown) => setNgaMsg({ ok: false, text: err instanceof Error ? err.message : String(err) }))
+                  .finally(() => setNgaBusy(false));
+              },
+            }, '退出登录'),
+          ),
+          // 二维码内联展开 —— 不弹浮层：手机上浮层要处理 z-index/点外面关，
+          // 内联就长在面板里，滚动到这儿直接扫，最省事
+          ngaQr !== null
+            ? createElement('div', { key: 'nga-qr-box', className: 'imqb2-hint imqb2-qr-box', style: { textAlign: 'center' as const } }, [
+                createElement('img', {
+                  key: 'img', src: ngaQr.dataUrl, alt: 'NGA 登录二维码',
+                  // 用 maxWidth 而不是写死 width：窄屏自动收缩，宽屏仍是 240
+                  width: 240, height: 240,
+                  className: 'imqb2-qr-img',
+                  style: { display: 'block' as const, margin: '8px auto', maxWidth: '100%', height: 'auto' as const },
+                }),
+                createElement('p', { key: 'tip', className: 'imqb2-hint' },
+                  '手机 NGA App → 左上角菜单 → 扫一扫。'
+                  + `二维码约 ${ngaQr.expiresInSec} 秒有效，过期就再点一次「生成」。`),
+                createElement('p', { key: 'poll', className: 'imqb2-note' },
+                  ngaPoll === null ? '⏳ 等待扫码…'
+                    : ngaPoll.status === 'success' ? `✅ ${ngaPoll.message}，正在刷新状态…`
+                      : ngaPoll.status === 'expired' ? `⚠️ ${ngaPoll.message}`
+                        : `⏳ ${ngaPoll.message}`),
+              ])
+            : null,
+          ngaMsg !== null
+            ? createElement('p', {
+                key: 'nga-msg',
+                className: `imqb2-note${ngaMsg.ok ? ' imqb2-note--ok' : ' imqb2-note--error'}`,
+              }, (ngaMsg.ok ? '' : '⚠️ ') + ngaMsg.text)
+            : null,
+          createElement('p', { key: 'nga-path', className: 'imqb2-hint' },
+            `凭证存在 ${nga.path}（只含 uid 和登录 token，不含密码）。重新登录后立即生效，不用重启。`),
         ],
 
     form.cwd !== undefined

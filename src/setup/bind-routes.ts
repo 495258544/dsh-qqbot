@@ -30,7 +30,14 @@ import {
   BIND_STATE_PATH,
   BIND_STATUS_PATH,
   BIND_UNBIND_PATH,
+  NGA_CLEAR_PATH,
+  NGA_QR_PATH,
+  NGA_QR_POLL_PATH,
+  NGA_STATUS_PATH,
   type BindStateWire,
+  type NgaPollWire,
+  type NgaQrWire,
+  type NgaStatusWire,
 } from '../shared/bind-protocol.ts';
 
 // 协议单一来源：shared/bind-protocol.ts（类型 + 路径常量，客户端共用）
@@ -112,6 +119,18 @@ export interface BindRoutesOptions {
    */
   readPersonaRuntime?: () => Record<string, unknown>;
   writePersonaRuntime?: (patch: Record<string, unknown>) => { ok: boolean; error?: string };
+  /**
+   * NGA 登录（纯 HTTP 扫码）。不提供时四条路由全部 503。
+   *
+   * 生成 qrkey → 渲染二维码；前端显示后每 2 秒调 poll；成功即落盘凭证。
+   * 全程不碰浏览器，也不需要密码。
+   */
+  ngaStatus?: () => NgaStatusWire;
+  /** 生成二维码（返回 data URL + 过期秒数） */
+  ngaQr?: () => Promise<NgaQrWire>;
+  /** 轮询扫码结果 */
+  ngaQrPoll?: () => Promise<NgaPollWire>;
+  ngaClear?: () => boolean;
 }
 
 /** 可经 UI 编辑的配置键（白名单：只收用户必要的字段，其余走 patch/env） */
@@ -241,6 +260,27 @@ export function registerBindRoutes(
       kind: 'exact',
       path: BIND_PERSONA_PATH,
       handler: (req, res) => { void handlePersonaRuntime(req, res, options); },
+    }),
+    // NGA 登录（纯 HTTP 扫码，四条路由）
+    webServer.register({
+      kind: 'exact',
+      path: NGA_STATUS_PATH,
+      handler: (req, res) => { handleNgaStatus(req, res, options); },
+    }),
+    webServer.register({
+      kind: 'exact',
+      path: NGA_QR_PATH,
+      handler: (req, res) => { void handleNgaQr(req, res, options); },
+    }),
+    webServer.register({
+      kind: 'exact',
+      path: NGA_QR_POLL_PATH,
+      handler: (req, res) => { void handleNgaQrPoll(req, res, options); },
+    }),
+    webServer.register({
+      kind: 'exact',
+      path: NGA_CLEAR_PATH,
+      handler: (req, res) => { handleNgaClear(req, res, options); },
     }),
   ];
   logger.info(`im-qqbot: 端内绑定页已就绪: ${BIND_STATE_PATH}`);
@@ -388,6 +428,63 @@ function sendJson(res: ServerResponse, status: number, body: unknown): void {
     'cache-control': 'no-store',
   });
   res.end(payload);
+}
+
+/** NGA 登录状态（只读）。把 path 也回给面板：用户能自己 `cat` 核对我们存了什么。 */
+function handleNgaStatus(req: IncomingMessage, res: ServerResponse, options: BindRoutesOptions): void {
+  if (!trusted(req)) { sendJson(res, 403, { error: 'forbidden' }); return; }
+  if (options.ngaStatus === undefined) { sendJson(res, 503, { error: 'NGA 服务不可用' }); return; }
+  try {
+    sendJson(res, 200, { ok: true, ...options.ngaStatus() });
+  } catch (err) {
+    sendJson(res, 502, { error: `读取状态失败: ${err instanceof Error ? err.message : String(err)}` });
+  }
+}
+
+/**
+ * 生成登录二维码。
+ *
+ * POST：它会在服务端申请一个新的 qrkey（有副作用，且**每次调用都要新的**——
+ * 复用旧 key 会让已经发出去的二维码立刻失效）。
+ */
+async function handleNgaQr(req: IncomingMessage, res: ServerResponse, options: BindRoutesOptions): Promise<void> {
+  if (!trusted(req)) { sendJson(res, 403, { error: 'forbidden' }); return; }
+  if ((req.method ?? 'GET').toUpperCase() !== 'POST') { sendJson(res, 405, { error: 'method not allowed' }); return; }
+  if (options.ngaQr === undefined) { sendJson(res, 503, { error: 'NGA 登录服务不可用' }); return; }
+  try {
+    sendJson(res, 200, await options.ngaQr());
+  } catch (err) {
+    sendJson(res, 502, { ok: false, message: `生成二维码失败：${err instanceof Error ? err.message : String(err)}` });
+  }
+}
+
+/** 轮询扫码结果。POST：服务端在扫码成功时会落盘凭证（有副作用）。 */
+async function handleNgaQrPoll(req: IncomingMessage, res: ServerResponse, options: BindRoutesOptions): Promise<void> {
+  if (!trusted(req)) { sendJson(res, 403, { error: 'forbidden' }); return; }
+  if ((req.method ?? 'GET').toUpperCase() !== 'POST') { sendJson(res, 405, { error: 'method not allowed' }); return; }
+  if (options.ngaQrPoll === undefined) { sendJson(res, 503, { error: 'NGA 登录服务不可用' }); return; }
+  try {
+    sendJson(res, 200, await options.ngaQrPoll());
+  } catch (err) {
+    sendJson(res, 502, { status: 'pending', message: `查询失败：${err instanceof Error ? err.message : String(err)}` });
+  }
+}
+
+/** 清除 NGA 凭证（回到游客态）。POST：有副作用。 */
+function handleNgaClear(req: IncomingMessage, res: ServerResponse, options: BindRoutesOptions): void {
+  if (!trusted(req)) { sendJson(res, 403, { error: 'forbidden' }); return; }
+  if ((req.method ?? 'GET').toUpperCase() !== 'POST') { sendJson(res, 405, { error: 'method not allowed' }); return; }
+  if (options.ngaClear === undefined) { sendJson(res, 503, { error: 'NGA 服务不可用' }); return; }
+  try {
+    const removed = options.ngaClear();
+    sendJson(res, 200, {
+      ok: true,
+      removed,
+      message: removed ? '已退出登录，之后按游客态访问 NGA' : '本来就没有凭证（一直是游客态）',
+    });
+  } catch (err) {
+    sendJson(res, 502, { ok: false, message: `清除失败：${err instanceof Error ? err.message : String(err)}` });
+  }
 }
 
 function handleState(

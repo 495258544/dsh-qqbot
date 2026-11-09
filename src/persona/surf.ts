@@ -30,16 +30,16 @@
  *   - 息屏：只能走 curl / ego-browser（虚拟屏1分钟后也会黑）
  */
 import { execFileSync } from 'node:child_process';
+import { locateEgo } from './ego-locate.ts';
 import { appendFileSync } from 'node:fs';
 import type { SelfProfileService } from './self.ts';
 import { DEFAULT_TZ, hourInTz, isHourInRange } from './clock.ts';
 
 /** ego-browser 入口（vendored Linux 版，package.json 无 bin 字段） */
-const EGO_BIN =
-  '/root/.dsh/profiles/web/node_modules/dsh-ego-browser/runtime/ego-linux/bin/ego-browser.mjs';
+// ego 路径不硬编码：走 ego-locate.ts 的可选依赖解析（见该文件说明）。
+// 硬编码部署路径的后果是：换 profile 就静默失去 Layer 2 抓正文能力。
 /** root 下必须用的 chrome wrapper（否则 --no-sandbox 缺失会假装 DevTools 超时） */
-const EGO_CHROME =
-  '/root/.dsh/profiles/web/node_modules/dsh-ego-browser/bin/ego-chrome-wrapper.sh';
+
 
 /**
  * 宿主 web 搜索的最小接口（只取我们要用的那一个方法）。
@@ -431,9 +431,13 @@ await page.waitForTimeout(400)
 const body = await page.evaluate('document.body.innerText.slice(0, ${Number(maxChars)})')
 console.log(JSON.stringify({body}))
 `;
-  const out = execFileSync('node', [EGO_BIN], {
+  // 拿不到 ego 就直接返回空：调用方（surfTopic 的 Layer 2）本来就把空串当"没抓到"处理，
+  // 所以这里不抛错 —— 可选依赖缺席不该让整条冲浪链路崩掉
+  const ego = locateEgo();
+  if (ego === undefined) return '';
+  const out = execFileSync('node', [ego.bin], {
     input: script,
-    env: { ...process.env, EGO_LINUX_HEADLESS: '1', EGO_LINUX_CHROME: EGO_CHROME },
+    env: { ...process.env, EGO_LINUX_HEADLESS: '1', EGO_LINUX_CHROME: ego.chrome },
     encoding: 'utf8',
     timeout: timeoutMs,
   });

@@ -33,6 +33,7 @@ import { DeliverablesDeliverer } from '../transport/deliverables.ts';
 import { PersonaService } from '../persona/service.ts';
 import { bindPersonaWeb } from '../persona/web-wiring.ts';
 import { registerPersonaTools } from '../persona/tools.ts';
+import { NgaClient, loadCredentials } from '../persona/nga.ts';
 import { bindPersonaRuntimeProviders } from '../setup/index.ts';
 import { checkBiliHealth, formatHealthIssues } from '../persona/bili-health.ts';
 import { SteamService, registerSteamTools } from '../steam/index.ts';
@@ -362,7 +363,19 @@ export async function bootstrapGateway(
 
   // ── persona 工具（qq_write_diary / qq_read_diary / qq_memory_append）──
   if (persona) {
-    registerPersonaTools(ctx, persona, (agent) => manager.findByAgent(agent as Parameters<SessionManager['findByAgent']>[0]), logger);
+    // NGA 客户端：凭证从 ~/.dsh-qqbot/nga/credentials.json 读，没有就是游客态
+    // （游客态照样能列版面、读帖子，只是不能搜/收藏/发帖）。
+    // 启动时读一次 —— 用户换凭证后要重载插件才生效，这跟其它 persona 状态的时机一致。
+    const ngaCreds = loadCredentials();
+    if (ngaCreds) logger.info(`nga: 已加载登录凭证（uid=${ngaCreds.uid}）`);
+    else logger.info('nga: 游客态（列版面/读帖可用；搜索需登录凭证，见设置面板「NGA」）');
+    registerPersonaTools(
+      ctx,
+      persona,
+      (agent) => manager.findByAgent(agent as Parameters<SessionManager['findByAgent']>[0]),
+      logger,
+      new NgaClient(ngaCreds ? { credentials: ngaCreds } : {}),
+    );
 
     // M36：bili 输出字段自检。
     //
