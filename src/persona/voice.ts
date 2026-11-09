@@ -347,6 +347,10 @@ export class VoiceService {
     /** 候选 id → 覆盖了几个不同会话（跨场合才算稳定的说话习惯） */
     const diversity = new Map<string, number>();
 
+    /** kind → 中文「使用时机」文案。写入和去重必须用同一套映射。 */
+    const situationOf = (kind: 'start' | 'end' | 'mid'): string =>
+      kind === 'start' ? '想说开场白时' : kind === 'end' ? '想收尾时' : '想加个连接词时';
+
     const consider = (kind: 'start' | 'end' | 'mid', word: string, n: number): void => {
       if (n < 2) return;
       if (word.length < 2) return;
@@ -355,8 +359,12 @@ export class VoiceService {
       if (CONFLICT_WORDS.some((w) => word.includes(w))) return;
       const id = `${kind}:${word}`;
       if (picked.has(id)) return;
-      const existing = this.data.habits.find((h) => h.situation === kind && h.style === word);
-      if (existing) return;
+      // M38 修的 bug：这里原来等于 `h.situation === kind`，即拿中文
+      // `'想加个连接词时'` 跟英文字符串 `'mid'` 比 —— **永远为 false**，
+      // 去重完全失效。后果：同一个词每次抽取都重新插入一条，
+      // 实测线上出现 4 个候选 × 3 份重复 = 12 条 habits。
+      const situation = situationOf(kind);
+      if (this.data.habits.some((h) => h.situation === situation && h.style === word)) return;
       // M33：证据必须来自**真的含有这个词**的样本，不能拿 samples.slice(0,2) 冒充。
       //
       // 原写法 `evidence: samples.slice(0, 2)` 是"前两条样本无论有没有这个词都当证据"，
@@ -371,7 +379,7 @@ export class VoiceService {
       if (matched.length < 2) return;
       picked.set(id, {
         id,
-        situation: kind === 'start' ? '想说开场白时' : kind === 'end' ? '想收尾时' : '想加个连接词时',
+        situation: situationOf(kind),
         style: word,
         count: matched.length,
         adoptedAt: Date.now(),

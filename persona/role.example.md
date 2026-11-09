@@ -1,6 +1,8 @@
 # 角色卡示例 · 小深
 
-> 复制这份改成你想要的样子，填到 `persona.roleCardPath`。
+> **本仓库实际部署用的是 `persona/rolecard-xiaoyu.md`（小羽的正本，改动记 `PERSONA-CHANGELOG.md`），这份只是通用模板，别当她的改。**
+>
+> 复制这份改成你想要的样子，填到 `persona.roleCardPath`（支持绝对路径 / `~/` / 相对仓库根）。
 > 启动时 `Role.lint()` 会体检常见坑（客服腔、没写"不做什么"、超长段落）。
 > 结构参考自 ai-companion-kit（MIT, pinganbbOvO）的 role.example.md，
 > 并按 dsh-qqbot（官方 Bot API + dsh agent 工具面）改写。

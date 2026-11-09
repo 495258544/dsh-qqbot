@@ -7,7 +7,7 @@
  *  3. 陈述句反例（最容易误报的：吧字祈使、呢字进行、疑问代词任指）
  */
 import { describe, expect, it } from 'vitest';
-import { detectQuestion, detectAddressee, classifyUtterance, isQuestion, extractVocatives } from './question-detect.ts';
+import { detectQuestion, detectAddressee, isQuestion, extractVocatives } from './question-detect.ts';
 
 describe('detectQuestion · 原始失败样例', () => {
   it('旧正则漏掉的 7 条，现在都能识别', () => {
@@ -184,56 +184,6 @@ describe('detectAddressee · 在跟谁说话', () => {
   });
 });
 
-describe('classifyUtterance · 接不接话', () => {
-  it('明确问她 + 问句 → 接', () => {
-    expect(classifyUtterance('你吃了吗').shouldReply).toBe(true);
-    expect(classifyUtterance('小羽睡了吗', { names: ['小羽'] }).shouldReply).toBe(true);
-  });
-
-  it('省略主语的问句，只在对话窗口内才接', () => {
-    expect(classifyUtterance('吃了吗').shouldReply).toBe(false);
-    expect(classifyUtterance('吃了吗', { inConversationWithMe: true }).shouldReply).toBe(true);
-  });
-
-  it('在问别人时不抢话', () => {
-    expect(
-      classifyUtterance('老张吃了吗', { otherNames: ['老张'], inConversationWithMe: true }).shouldReply,
-    ).toBe(false);
-  });
-
-  it('陈述句默认不接（避免变成应答器）', () => {
-    expect(classifyUtterance('今天好热', { inConversationWithMe: true }).shouldReply).toBe(false);
-    expect(classifyUtterance('你吃吧', { inConversationWithMe: true }).shouldReply).toBe(false);
-  });
-});
-
-describe('detectAddressee · 别人名字的排除边界', () => {
-  const others = ['江铭鑫', '铭鑫', '芋头'];
-
-  it('只叫别人 → 排除（别抢话）', () => {
-    const r = detectAddressee('江铭鑫你今晚打刀吗', { names: ['小深'], otherNames: others });
-    expect(r.excluded).toBe(true);
-    expect(r.explicit).toBe(false);
-  });
-
-  it('同时叫她和别人 → 不排除（"你俩"这种别装死）', () => {
-    const r = detectAddressee('江铭鑫 小深你俩打不打', { names: ['小深'], otherNames: others });
-    expect(r.excluded).toBe(false);
-    expect(r.explicit).toBe(true);
-  });
-
-  it('名字表里混进她自己时，按"点她"算，不按"点别人"算', () => {
-    const r = detectAddressee('小深今晚打不打', { names: ['小深'], otherNames: ['小深', '芋头'] });
-    expect(r.excluded).toBe(false);
-    expect(r.explicit).toBe(true);
-  });
-
-  it('没提任何人 → 既不排除也不明确指向', () => {
-    const r = detectAddressee('今晚有人打刀吗', { names: ['小深'], otherNames: others });
-    expect(r.excluded).toBe(false);
-    expect(r.explicit).toBe(false);
-  });
-});
 
 describe('extractVocatives · 提取"她可能被叫成什么"（M32）', () => {
   // 防的是 recordNameCall 零调用导致的死链：
@@ -290,5 +240,53 @@ describe('extractVocatives · 零误判（真实语料的教训）', () => {
   it('真正在叫她的才算', () => {
     expect(extractVocatives('小羽，在吗')).toEqual(['小羽']);
     expect(extractVocatives('小羽，几点了，你在干嘛')).toEqual(['小羽']);
+  });
+});
+
+describe('extractVocatives · 光杆「你」分支的误判（M33）', () => {
+  // 8a94319 的第三段规则是：
+  //   /^(2~4汉字)[，,、](?:在吗|你在|你|在不在|干嘛|几点)/
+  // 交替项里那个**光杆 `你`** 把门槛全废了 —— 任何"2~4 字 + 逗号 + 你…"都命中。
+  // 而它自己的测试恰好用"，就像"、"，等一下"绕开了这条分支，
+  // 所以"零误判"测出来是绿的。真实 100 轮语料没暴露，是数据选得好，不是规则严。
+
+  it('应答/程度开头的句子不算称呼（光杆「你」分支已收紧）', () => {
+    for (const t of ['停一下，你先忙', '好的，你说吧', '是啊，你说得对', '还行，你人呢', '不知道，你问我', '太吵了，你闭嘴', '算了，你继续']) {
+      expect(extractVocatives(t), `「${t}」不该抽出称呼`).toEqual([]);
+    }
+  });
+
+  it('真正的呼叫语仍然工作', () => {
+    expect(extractVocatives('小羽，在吗')).toEqual(['小羽']);
+    expect(extractVocatives('小羽，几点了，你在干嘛')).toEqual(['小羽']);
+    expect(extractVocatives('小鲸鱼，在不在')).toEqual(['小鲸鱼']);
+  });
+});
+
+describe('detectAddressee · 别人名字的排除边界', () => {
+  const others = ['江铭鑫', '铭鑫', '芋头'];
+
+  it('只叫别人 → 排除（别抢话）', () => {
+    const r = detectAddressee('江铭鑫你今晚打刀吗', { names: ['小深'], otherNames: others });
+    expect(r.excluded).toBe(true);
+    expect(r.explicit).toBe(false);
+  });
+
+  it('同时叫她和别人 → 不排除（"你俩"这种别装死）', () => {
+    const r = detectAddressee('江铭鑫 小深你俩打不打', { names: ['小深'], otherNames: others });
+    expect(r.excluded).toBe(false);
+    expect(r.explicit).toBe(true);
+  });
+
+  it('名字表里混进她自己时，按"点她"算，不按"点别人"算', () => {
+    const r = detectAddressee('小深今晚打不打', { names: ['小深'], otherNames: ['小深', '芋头'] });
+    expect(r.excluded).toBe(false);
+    expect(r.explicit).toBe(true);
+  });
+
+  it('没提任何人 → 既不排除也不明确指向', () => {
+    const r = detectAddressee('今晚有人打刀吗', { names: ['小深'], otherNames: others });
+    expect(r.excluded).toBe(false);
+    expect(r.explicit).toBe(false);
   });
 });

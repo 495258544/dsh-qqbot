@@ -17,6 +17,8 @@ import {
   clearAttribution,
   attributionSize,
   resetAttributionForTest,
+  rememberRefSender,
+  lookupRefSender,
 } from './attribution-index.ts';
 
 const APP = '1906131500';
@@ -78,6 +80,51 @@ describe('lookupAttribution · 内容反查', () => {
   it('太短的引文不做匹配（防"好""嗯"这类误配）', () => {
     rememberForAttribution(APP, GID, { ...JMX, content: '嗯' });
     expect(lookupAttribution(APP, GID, '嗯')).toBeUndefined();
+  });
+
+  it('两字短句完全一致且只有一个人说过 → 能认出（2026-11-10：她短回复不再"看不出"）', () => {
+    rememberForAttribution(APP, GID, { ...BOT, content: '嗯。' });
+    const hit = lookupAttribution(APP, GID, '嗯。');
+    expect(hit?.senderId).toBe(BOT.senderId);
+  });
+
+  it('两字短句两个人都说过 → 有歧义，宁可不认（不瞎猜）', () => {
+    rememberForAttribution(APP, GID, { ...JMX, content: '好。' });
+    rememberForAttribution(APP, GID, { ...BOT, content: '好。' });
+    expect(lookupAttribution(APP, GID, '好。')).toBeUndefined();
+  });
+
+  it('长回复的后半段也能反查到（2026-11-10：索引不再截断在 200 字）', () => {
+    const head = '前面是很长的铺垫，讲了一整段背景'.repeat(8);   // 远超 200 字
+    const tail = '最后这句才是她想说的结论';
+    rememberForAttribution(APP, GID, { ...BOT, content: head + tail });
+    expect(lookupAttribution(APP, GID, tail)?.senderId).toBe(BOT.senderId);
+  });
+
+  it('超过 500 字的内容才截断（新上限 = humanize 气泡软上限的 2 倍以上）', () => {
+    const long = 'x'.repeat(480) + '结尾标记句';
+    rememberForAttribution(APP, GID, { ...BOT, content: long });
+    expect(lookupAttribution(APP, GID, '结尾标记句')?.senderId).toBe(BOT.senderId);
+  });
+});
+
+describe('归属索引 · 按消息 id 直查（refKey，2026-11-10）', () => {
+  it('msgIdx → 发送者：权威命中，短消息也能用', () => {
+    rememberRefSender('REFIDX_abc', BOT.senderId, BOT.senderName);
+    const hit = lookupRefSender('REFIDX_abc');
+    expect(hit?.senderId).toBe(BOT.senderId);
+    expect(hit?.senderName).toBe('小羽');
+  });
+
+  it('没记过的 msgIdx → undefined', () => {
+    expect(lookupRefSender('REFIDX_missing')).toBeUndefined();
+    expect(lookupRefSender(undefined)).toBeUndefined();
+  });
+
+  it('超过上限后丢最旧的（防无界增长）', () => {
+    for (let i = 0; i < 1100; i++) rememberRefSender(`REFIDX_${i}`, JMX.senderId);
+    expect(lookupRefSender('REFIDX_0')).toBeUndefined();       // 最旧的被挤掉
+    expect(lookupRefSender('REFIDX_1099')).toBeDefined();      // 最新还在
   });
 });
 

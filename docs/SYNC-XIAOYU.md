@@ -287,3 +287,57 @@ git log --oneline e220f56..origin/xiaoyu          # 上次同步点之后的新�
 | `bili video summary` | ❌ B站 `-101` | **AI 总结必须登录** |
 
 所以字幕/AI 总结这两个核心能力目前用不了，需要 `bili auth login --qr-out <png>` 让人类扫码。
+
+---
+
+## 2026-11-10 · 第五次同步（远端目标 `4f99edd`，用户要求「不要 NGA，其他同步」）
+
+| 项 | 值 |
+|---|---|
+| 远端 HEAD | `aaa45bd`（11-09），但**同步目标定在 `4f99edd`** |
+| 为什么不是 HEAD | `5242d84..aaa45bd` 三个提交里：`4f99edd` 是引用归属解析（父=`5242d84`，**整棵树无 NGA**）；`2317767` 是 NGA 功能；`aaa45bd` 是 NGA/bili 平台重构。用户明确不要 NGA → 以 `4f99edd` 为目标天然排除后两个，不用在接线里做剥离 |
+| 上次同步点 | `272537a` → 本次范围 `272537a..4f99edd` = 47 提交 |
+| 同步方式 | 逐提交 `git apply --3way`（9 个干净落地）+ 按 `4f99edd` 终版整取 56 个未定制/新增文件 + 定制文件手工并 |
+| 验证 | `npm run build` 通过、`npm test` **1058/1058**（上次 909）、NGA 零文件零引用 |
+
+### 干净落地的 9 个提交
+
+`3d7fdcd` / `0bf2d4f`（own-life 时段锚点）、`01d72ce`（README）、`4b5fbb0`（热重读 `mtimeMs:size`）、`fa7c65a`（@她只注入 10 分钟历史）、`7f2c8ae` / `07fbc70` / `baa39f6`（搜索调研文档）、`845fc88`（humanize 巨块修复）。
+
+### 整取终版的 56 个文件（work 未定制或缺失）
+
+`src/xhh/*` 全套、`src/persona/web-wiring.ts`、`src/features/attribution-index.ts`、`src/shared/attribution-out.ts` / `ego-locate*`、`src/transport/reply-*` / `outbound.ts` / `deliverables.ts`、`src/setup/*` / `src/client/config-panel.ts`、`humanize.ts` / `voice.ts` / `runtime-config.ts` / `memory.ts` / `own-life.ts` / `self.ts` / `surf.ts` 终版、`src/persona/memory-decay.ts`（work 缺失，补上）、`src/media/sticker-tool.ts`（导出 `adoptIntoLibrary` 等给 xhh 用）、`src/media/send-*`、`src/commands/help|model|preset.ts`、全部配套测试。
+
+### 手工并的定制文件（绝不整取）
+
+| 文件 | 做法 |
+|---|---|
+| `src/config.ts` | 只加 `xhh` 配置段；**`enabled` 默认 `false`**（不擅自给线上增加常驻工具，profile 里可开）。`c2cMode: allowlist`、`dota.warmup`、`vision.defaultPrompt` 中文护栏、`dotaDigestQueryHours [10,12]` 全部保留 |
+| `src/transport/inbound.ts` | `buildQuotePart` 合成两版：终版「store → refKey → 内容反查 → 图片指纹」三层权威 + work 的动图识别与转发图 `#N` 锚点。**参数顺序改为 `lookupRef` 第 6、`forwardImageNumbers` 第 7**（终版测试按第 6 传 lookupRef，work 测试同步适配） |
+| `src/persona/service.ts` | 冲浪改 async（`await surfTopic` / `await runSurfRound` + tick rejection 兜底）、加 `attachWeb()` / `hasWeb()` / `recordSurfWatchings()`；**不整取终版**（会删掉 work 手工并进去的情绪服务 / M37 watching / 口癖管线） |
+| `src/gateway/bootstrap.ts` | 软注入 `bindPersonaWeb`、xhh 工具注册（默认关）、设置面板 `bindPersonaRuntimeProviders` 回填；保留 digest/warmup 定时器 stop 与视觉工具注册 |
+| `src/gateway/middleware-setup.ts` | `quoteRef.enrichEntry` 记 `msgIdx → 发送者`、`personaWakeGate` 传 `selfIds`（owner + bot + runtime.json 热补充） |
+| `src/middleware/persona-wake-gate.ts` | 只加 `selfIds` 选项和 `knownNames(new Set([senderId, ...selfIds]))`；情绪写入点保持 work 版 |
+
+### 明确跳过
+
+- `2317767` / `aaa45bd`：**NGA**（用户明确不要）。`aaa45bd` 里的 `src/bili/` 目录迁移与 `ego-locate` 搬家属于无功能收益的重构，一并跳过。
+- 15 个清单跳过：11-01 那批 local-patch / `e98ddc7` 热生效 / `63c6f96` `2f78305` dota / `0d39866` 移植 work 的 digest 修复（work 已有或已领先）、三个角色卡提交（`5242d84` `b7f1e2e` `ac6f186`，人设是「小羽」，work 是「小深」）、`9e564fc`、`beb1dff`（lib 产物）。
+- 所有远端 `lib/*.js`：一律本地 `npm run build`。
+
+### 这次踩到 / 修掉的坑
+
+1. `persona.test.ts` 断言 `resolveCardPath('persona/rolecard-xiaoyu.md')` 文件存在 —— 角色卡被有意排除，断言改用本仓库确实入库的 `persona/role.example.md`，验证逻辑不变。
+2. `xhh/images.test.ts` 的 `r.path.startsWith(root)` 在 Windows 上必挂（索引路径存 posix 正斜杠、临时目录是反斜杠）→ 断言两边先归一化再比，**功能代码不动**。
+3. `surf.ts` 终版把 `surfTopic` / `runSurfRound` 改成 async，`service.ts` 与 `tools.ts` 的 `qq_browse` 调用点必须一起改 await，否则类型过不了、运行时拿到 Promise。
+4. `memory.ts` 终版 import `./memory-decay.ts`，work 没有该模块 —— 整取时要把新增依赖一起带上。
+5. `git cherry` 的 90 个「未引入」不可信（含从 work 反向 cherry-pick 的提交），**必须按上次同步点判增量**。
+
+### 下次怎么继续
+
+```bash
+git fetch origin "+refs/heads/xiaoyu:refs/remotes/origin/xiaoyu"
+git log --oneline 4f99edd..origin/xiaoyu      # 目前是 2317767 + aaa45bd（NGA）
+```
+
+若以后改变主意要 NGA，从 `2317767` 单独整块取（含 `src/nga/*`、config/bootstrap/setup/panel 接线），不要 merge 整分支。

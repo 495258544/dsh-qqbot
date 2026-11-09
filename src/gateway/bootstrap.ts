@@ -31,7 +31,10 @@ import { registerSendFileTool, type MediaSenderLike } from '../media/send-file-t
 import { registerStickerTool, registerArchiveTool } from '../media/sticker-tool.ts';
 import { DeliverablesDeliverer } from '../transport/deliverables.ts';
 import { PersonaService } from '../persona/service.ts';
+import { bindPersonaWeb } from '../persona/web-wiring.ts';
 import { registerPersonaTools } from '../persona/tools.ts';
+import { createXhhClient, registerXhhTools } from '../xhh/index.ts';
+import { bindPersonaRuntimeProviders } from '../setup/index.ts';
 import { SteamService, registerSteamTools } from '../steam/index.ts';
 import { createDotaService, registerDotaTools, type DotaService } from '../dota/index.ts';
 import { createDotaWarmup } from '../dota/warmup.ts';
@@ -99,6 +102,9 @@ export async function bootstrapGateway(
     persona = new PersonaService({ config: config.persona, dataDir, logger });
     manager.persona = persona;
     logger.info(`persona: 已启用（dataDir=${dataDir}）`);
+    // 宿主 web 搜索软注入：服务就绪/被替换时回填，缺席时冲浪走 Bing RSS 兜底
+    const svc = persona;
+    bindPersonaWeb(ctx, (web) => svc.attachWeb(web));
   }
 
   // ── Steam 集成（查群友状态/最近游戏）──
@@ -248,6 +254,63 @@ export async function bootstrapGateway(
 
   bot.on('ready', () => {
     console.log(`[im-qqbot] Bot ready! appId=${config.appId}`);
+    // 设置面板扩展：回填「人格热区 / 状态快照」的延迟绑定实现。
+    // 路由在 src/index.ts 里先于 PersonaService 注册，所以这里才补 provider。
+    // 读回显「基线 ∪ 追加」的生效值；写只把基线里没有的条目落进 runtime.json，
+    // 否则改 profile 基线后追加层会残留旧副本、两边漂移。
+    try {
+      const baselineNames = config.persona?.names ?? [];
+      const baselineKeywords = config.persona?.keywords ?? [];
+      const baselineOtherNames = config.persona?.otherNames ?? [];
+      const baselineSelfIds = [
+        ...(config.persona?.ownerOpenids ?? []),
+        ...(config.persona?.botOpenid && config.persona.botOpenid !== '' ? [config.persona.botOpenid] : []),
+      ];
+      const merge = (baseline: string[], extra: string[]): string[] =>
+        [...new Set([...baseline, ...extra])];
+      bindPersonaRuntimeProviders(ctx, {
+        persona: {
+          read: () => ({
+            names: merge(baselineNames, persona?.runtime.names() ?? []),
+            keywords: merge(baselineKeywords, persona?.runtime.keywords() ?? []),
+            otherNames: merge(baselineOtherNames, persona?.runtime.otherNames() ?? []),
+            selfIds: merge(baselineSelfIds, persona?.runtime.selfIds() ?? []),
+          }),
+          write: (patch) => {
+            if (persona === undefined) return { ok: false, error: 'persona 未启用' };
+            try {
+              const diff = (submitted: string[] | undefined, baseline: string[]): string[] | undefined =>
+                submitted === undefined ? undefined
+                  : submitted.map((s) => s.trim()).filter((s) => s !== '' && !baseline.includes(s));
+              // 只放进有值的键：显式 undefined 会把没提交的键静默清空
+              const updatePatch: Record<string, string[]> = {};
+              const namesD = diff(patch.names as string[] | undefined, baselineNames);
+              if (namesD !== undefined) updatePatch.names = namesD;
+              const keywordsD = diff(patch.keywords as string[] | undefined, baselineKeywords);
+              if (keywordsD !== undefined) updatePatch.keywords = keywordsD;
+              const otherD = diff(patch.otherNames as string[] | undefined, baselineOtherNames);
+              if (otherD !== undefined) updatePatch.otherNames = otherD;
+              const selfD = diff(patch.selfIds as string[] | undefined, baselineSelfIds);
+              if (selfD !== undefined) updatePatch.selfIds = selfD;
+              persona.runtime.update(updatePatch as { names?: string[] });
+              return { ok: true };
+            } catch (err) {
+              return { ok: false, error: err instanceof Error ? err.message : String(err) };
+            }
+          },
+        },
+        status: () => ({
+          qqConnected: true,
+          appId: config.appId,
+          activeSessions: manager.size,
+          webSearchAvailable: persona?.hasWeb() ?? false,
+          fallbackRoutes: (config.persona?.fallbackRoutes ?? []).map((r) => `${r.provider}/${r.model}`),
+          notifyOwnerOnFailover: config.persona?.notifyOwnerOnFailover ?? true,
+        }),
+      });
+    } catch (err) {
+      logger.warn(`设置面板扩展回填失败: ${err instanceof Error ? err.message : String(err)}`);
+    }
   });
 
   // ── 富媒体过期清理 ──
@@ -281,9 +344,18 @@ export async function bootstrapGateway(
     void steam.selfCheck().catch(() => {});
   }
 
-  // ── Dota2 工具（qq_dota_recent）──
+  // ── Dota2 工具（qq_dota_recent / qq_dota_match / qq_dota_abilities）──
   if (dota) {
     registerDotaTools(ctx, dota, logger);
+  }
+
+  // ── 小黑盒只读工具（默认关；匿名接口，不需要登录凭据）──
+  if (config.xhh?.enabled) {
+    try {
+      registerXhhTools(ctx, createXhhClient(config.xhh, logger), config, logger);
+    } catch (err) {
+      logger.warn(`xhh: 初始化失败，小黑盒功能已跳过: ${err instanceof Error ? err.message : String(err)}`);
+    }
   }
 
   // ── own-life 静默唤醒：只投递给**存活**的 owner c2c 会话（peek 不重建），

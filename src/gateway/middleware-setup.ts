@@ -26,6 +26,7 @@ import type { Logger } from '../types.ts';
 import type { SteamService } from '../steam/service.ts';
 import { buildCommandList } from '../commands/index.ts';
 import { attributionRecorder } from '../middleware/attribution-recorder.ts';
+import { rememberRefSender } from '../features/attribution-index.ts';
 import { attachmentProcessor } from '../middleware/attachment.ts';
 import { questionAnswer } from '../middleware/question-answer.ts';
 import { getHistoryStore, historyGroupKey } from '../features/history-store.ts';
@@ -111,6 +112,13 @@ export function setupMiddlewares(
   bot.use(quoteRef({
     maxSize: 500,
     preferMsgElements: true,
+    // 顺手把「msgIdx → 发送者」记进归属索引的 refKey 直查表。
+    // 短消息（「嗯。」）与被截断的引用预览达不到内容反查门槛，按 msgIdx
+    // 直查才是权威来源，内容反查从此只作兜底。
+    enrichEntry: (entry, middlewareCtx) => {
+      rememberRefSender(middlewareCtx.message.msgIdx, middlewareCtx.message.senderId, middlewareCtx.message.senderName);
+      return entry;
+    },
   }));
 
   // 5. 群聊 @bot 门控
@@ -152,6 +160,13 @@ export function setupMiddlewares(
             .flatMap((b) => String(b.binding.alias ?? '').split(/[、,，/]/))
             .map((n) => n.trim())
             .filter((n) => n !== '')),
+      ])],
+      // 自己人的 openid：profile 的 owner + bot 是基线，runtime.json 的 selfIds
+      // 是热补充（登记本人小号/备用号，改完不用重启）。说话人自己由门内并入。
+      selfIds: () => [...new Set([
+        ...config.persona.ownerOpenids,
+        ...(config.persona.botOpenid !== '' ? [config.persona.botOpenid] : []),
+        ...persona.runtime.selfIds(),
       ])],
     }));
   }

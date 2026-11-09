@@ -94,6 +94,28 @@ export interface Watching {
 /** 观看记录上限。人的"最近看过"不会记很久，但也不该只剩 3 条 */
 export const MAX_WATCHING = 20;
 
+/**
+ * 她自己的冲浪姿态偏好（M-surf-pref，2026-11-06）。
+ *
+ * ## 设计边界（为什么只有这两个自由度）
+ *
+ * 冲浪的**机制**（时段、频率、引擎、质量闸、提示骨架与安全边界）归代码，
+ * 她**改不了也不该改** —— 那是"程序改程序"。
+ * 她能调的是**姿态**：这次上网想留意什么方向、希望结果以什么姿态被自己记住。
+ * 这两样都是内容层的东西，与 qq_mark_interest（兴趣）同一性质 ——
+ * 符合"自主性长在内容上，不长在机制上"的边界。
+ *
+ * 两个都可空：空 = 用默认姿态（提示里就不出现这一段，行为与从前一致）。
+ */
+export interface SurfPreference {
+  /** 一句话：此刻想在网上留意什么方向（如"最近 C40 相关的实战帖"） */
+  focus?: string;
+  /** 一句话：希望结果怎么被自己记住（默认姿态是一句反应 + 出处） */
+  digestAs?: string;
+  /** 最后修改时间（面板展示用） */
+  updatedAt?: number;
+}
+
 /** 社交状态（被嫌吵后的收敛） */
 export interface SelfEngagement {
   /** 话痨度 1.0 正常 → 0.1 几乎不说话 */
@@ -160,6 +182,8 @@ export interface SelfProfile {
    * 和 `findings` 的区别：findings 是查到的情报，watching 是自己经历的。
    */
   watching?: Watching[];
+  /** 她自己的冲浪姿态偏好（可空 = 默认姿态） */
+  surfPreference?: SurfPreference;
 }
 
 /** 冻结线：强度低于此值 → 冻结（不删除，保留可追溯） */
@@ -235,6 +259,7 @@ function emptyProfile(): SelfProfile {
     screenWatch: { enabled: false, allowedApps: [], intervalMs: 30 * 60 * 1000 },
     wishes: [],
     watching: [],
+    surfPreference: undefined,
   };
 }
 
@@ -265,6 +290,10 @@ export class SelfProfileService {
         lastSurfAt: raw.lastSurfAt,
         wishes: Array.isArray(raw.wishes) ? raw.wishes : base.wishes,
         watching: Array.isArray(raw.watching) ? raw.watching : base.watching,
+        surfPreference:
+          raw.surfPreference !== null && typeof raw.surfPreference === 'object'
+            ? raw.surfPreference
+            : base.surfPreference,
       };
     } catch (err) {
       this.log?.(`self: 读取失败，用空画像: ${err instanceof Error ? err.message : String(err)}`);
@@ -677,6 +706,42 @@ export class SelfProfileService {
    * 只说**事实**（看了什么、什么时候），不下"这说明你爱看X"这种结论——
    * 跟 M33 那条一样：解释权留给她自己。
    */
+  /** 她的冲浪姿态偏好（可空） */
+  surfPreference(): SurfPreference | undefined {
+    return this.data.surfPreference;
+  }
+
+  /**
+   * 设置冲浪姿态偏好（qq_surf_preference 的写端）。
+   * 两个字段都传 undefined 表示清除（回到默认姿态）。
+   */
+  setSurfPreference(pref: { focus?: string; digestAs?: string | null }): SurfPreference | undefined {
+    const focus = typeof pref.focus === 'string' ? pref.focus.trim().slice(0, 200) : undefined;
+    // digestAs 特殊：显式 null = 清除；undefined = 不动
+    const digestAs =
+      pref.digestAs === null ? undefined
+      : typeof pref.digestAs === 'string' ? pref.digestAs.trim().slice(0, 200)
+      : this.data.surfPreference?.digestAs;
+
+    // 空串视同清除：两项都不剩 → 整个偏好对象回到 undefined（默认姿态），
+    // 不留 {"focus":""} 这种空壳（空壳会在提示组装里被 bits.length 挡住，
+    // 但文件里留垃圾数据没有意义）。
+    const next: SurfPreference | undefined =
+      (focus === undefined || focus === '') && (digestAs === undefined || digestAs === '')
+        ? undefined
+        : {
+            ...(focus !== undefined && focus !== '' ? { focus } : {}),
+            ...(digestAs !== undefined && digestAs !== '' ? { digestAs } : {}),
+            updatedAt: Date.now(),
+          };
+    this.data.surfPreference = next;
+    this.save();
+    this.log?.(next === undefined
+      ? 'self: 冲浪姿态已清除（回到默认）'
+      : `self: 冲浪姿态已更新${next.focus ? `（留意：${next.focus.slice(0, 40)}）` : ''}`);
+    return next;
+  }
+
   renderWatching(n = 4): string {
     const arr = this.recentWatching(n);
     if (arr.length === 0) return '';

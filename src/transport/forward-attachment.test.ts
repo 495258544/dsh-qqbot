@@ -108,12 +108,12 @@ describe('buildQuotePart · 转发图锚点', () => {
   };
 
   it('下载成功的那条挂 #N，和 Forward images 编号对上', () => {
-    const out = buildQuotePart(quote, [], undefined, undefined, undefined, [1]);
+    const out = buildQuotePart(quote, [], undefined, undefined, undefined, undefined, [1]);
     expect(out).toContain('[图片 #1]');
   });
 
   it('没下载成功的条不挂编号（不给她不存在的图指路）', () => {
-    const out = buildQuotePart(quote, [], undefined, undefined, undefined, []);
+    const out = buildQuotePart(quote, [], undefined, undefined, undefined, undefined, []);
     expect(out).toContain('[图片]');
     expect(out).not.toContain('#1');
   });
@@ -134,7 +134,7 @@ describe('buildQuotePart · 转发图锚点', () => {
           + url('GIF'),
       ].join('\n'),
     };
-    const out = buildQuotePart(gifQuote, [], undefined, undefined, undefined, [2]);
+    const out = buildQuotePart(gifQuote, [], undefined, undefined, undefined, undefined, [2]);
     expect(out).toContain('发了一张动图');
     expect(out).toContain('[动图 #2]');
     expect(out).not.toContain('[图片 #2]');

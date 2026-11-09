@@ -22,6 +22,25 @@ export const BIND_UNBIND_PATH = '/qqbot/im-qqbot/bind/unbind';
 /** 配置读写（设置面板表单） */
 export const BIND_CONFIG_PATH = '/qqbot/im-qqbot/config';
 
+/** 模型列表（设置面板下拉菜单数据源；只读，动态发现） */
+export const BIND_MODELS_PATH = '/qqbot/im-qqbot/models';
+
+/** Agent preset 列表（设置面板 Preset 下拉数据源；只读） */
+export const BIND_PRESETS_PATH = '/qqbot/im-qqbot/presets';
+
+/** 运行时状态（设置面板状态总览区；只读快照） */
+export const BIND_STATUS_PATH = '/qqbot/im-qqbot/status';
+
+/** 人格热区读写（runtime.json 四件套：names/keywords/otherNames/selfIds） */
+export const BIND_PERSONA_PATH = '/qqbot/im-qqbot/persona-runtime';
+
+/** 一个可选模型条目（下拉菜单的一项） */
+export interface ModelOptionWire {
+  provider: string;
+  id: string;
+  name?: string;
+}
+
 /** 线上协议（HTTP 路由序列化形态） */
 export type BindStateWire =
   | { phase: 'starting' }

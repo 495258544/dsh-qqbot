@@ -2,12 +2,16 @@
  * 模型命令：/model — 查看或切换模型
  */
 import type { CommandDeps, CategorizedCommand } from './types.ts';
+import { commandAllowlistAuth } from './auth.ts';
 import { getScopePeer, sendMarkdownChunked } from '../shared/index.ts';
 
-export function modelCommand({ manager, config }: CommandDeps): CategorizedCommand {
+export function modelCommand({ manager, config, logger }: CommandDeps): CategorizedCommand {
   return {
     name: 'model',
     category: 'agent',
+    // 管理类指令：私聊/群聊均可用，但仅限白名单用户（与 /preset 同构）
+    scope: 'all',
+    authorized: commandAllowlistAuth(config, logger),
     description: '查看或切换模型（用法: /model [provider/model]）',
     handler: async (cmdCtx) => {
       const { scope, peerId } = getScopePeer(cmdCtx);
@@ -42,7 +46,10 @@ export function modelCommand({ manager, config }: CommandDeps): CategorizedComma
 
         lines.push('', '手动指定: `/model provider/model`');
 
-        await sendMarkdownChunked(cmdCtx, lines.join('\n'), config.textChunkLimit);
+        await sendMarkdownChunked(cmdCtx, lines.join('\n'), config.textChunkLimit, {
+          appId: config.appId,
+          botOpenid: config.persona?.botOpenid,
+        });
         return { kind: 'noop' as const };
       }
 

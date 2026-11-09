@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { Memory } from './memory.ts';
 import { Diary } from './diary.ts';
-import { Role } from './role.ts';
+import { Role, resolveCardPath } from './role.ts';
 import { Waker } from './wake.ts';
 import { Humanizer } from './humanize.ts';
 import { createOwnLife } from './own-life.ts';
@@ -117,6 +117,35 @@ describe('Role · 角色卡', () => {
     expect(role.renderAnchor()).toContain('此刻提醒');
     expect(role.renderAnchor()).toContain('不是 AI 助手');
   });
+
+  it('resolveCardPath：绝对路径原样 / ~ 展开 / 相对仓库根', () => {
+    // 绝对路径（POSIX + Windows 盘符）不改动
+    expect(resolveCardPath('/a/b.md')).toBe('/a/b.md');
+    expect(resolveCardPath('C:\\users\\a\\b.md')).toBe('C:\\users\\a\\b.md');
+    expect(resolveCardPath('')).toBe('');
+    // ~ 展开到主目录（此前按字面文件名读，必然 ENOENT 且静默）
+    expect(resolveCardPath('~')).toBe(os.homedir());
+    expect(resolveCardPath('~/.dsh-qqbot/persona/rolecard-default.md'))
+      .toBe(path.join(os.homedir(), '.dsh-qqbot/persona/rolecard-default.md'));
+    // 相对路径按仓库根解析，不依赖进程 cwd。
+    // work 分支不携带「小羽」角色卡（人设是小深），用本仓库确实入库的模板验证。
+    const abs = resolveCardPath('persona/role.example.md');
+    expect(path.isAbsolute(abs)).toBe(true);
+    expect(fs.existsSync(abs)).toBe(true);
+  });
+
+  it('Role 经符号链接读角色卡：改目标即改内容（readFileSync 穿透软链）', () => {
+    const real = path.join(dir, 'real.md');
+    const link = path.join(dir, 'link.md');
+    fs.writeFileSync(real, '# 角色卡\n你说话很直。别装。');
+    fs.symlinkSync(real, link);
+    const role = new Role({ cardPath: link });
+    expect(role.read()).toContain('你说话很直');
+    // 改真实文件后新建实例读到新内容（模拟 5s 缓存过期后的热重读）
+    fs.writeFileSync(real, '# 角色卡\n你说话很直。别装。现在加了一节。');
+    const fresh = new Role({ cardPath: link });
+    expect(fresh.read()).toContain('加了一节');
+  });
 });
 
 describe('Waker · 该不该说话', () => {
@@ -128,7 +157,7 @@ describe('Waker · 该不该说话', () => {
   });
 
   it('@ 必醒 / 名字必醒 / owner 不@也潜水', () => {
-    // probability 必须固定为 0：默认概率带随机，会让「owner 潜水」这条偶发假失败
+    // probability: 0 → 关掉随机放行，断言才可重复（默认 0.05 会让"随便一句"偶尔醒，实测约 7% 翻车）
     const w = new Waker({ names: ['小鱼'], ownerIds: ['boss'], probability: 0 });
     expect(w.shouldWake({ key: 'group:1', userId: 'u2', text: '@小鱼 在吗', isAtMe: true }).reason).toBe('atMention');
     expect(w.shouldWake({ key: 'group:1', userId: 'u2', text: '小鱼你看' }).reason).toContain('name:');
@@ -342,6 +371,7 @@ describe('own-life · 静默唤醒约束', () => {
   it('投递失败不计次数', async () => {
     let fired = 0;
     const life = createOwnLife({
+      rollProbability: 1,
       deliver: async () => { throw new Error('boom'); },
       intervalMs: 0,
       statePath: path.join(dir, 'st.json'),
@@ -357,6 +387,7 @@ describe('own-life · 静默唤醒约束', () => {
   it('日上限后跳过', async () => {
     let count = 0;
     const life = createOwnLife({
+      rollProbability: 1,
       deliver: async () => { count += 1; },
       intervalMs: 0,
       maxPerDay: 2,
@@ -374,6 +405,7 @@ describe('own-life · 静默唤醒约束', () => {
 
   it('安静时段不叫（按北京时间判定，启动时未设 TZ）', async () => {
     const life = createOwnLife({
+      rollProbability: 1,
       deliver: async () => {},
       quiet: [3, 8],           // 北京 3:00-8:00 安静
       tz: 'Asia/Shanghai',
@@ -390,22 +422,22 @@ describe('own-life · 静默唤醒约束', () => {
     const statePath = path.join(dir, 'st4.json');
     let count = 0;
     const life1 = createOwnLife({
+      rollProbability: 1,
       deliver: async () => { count += 1; },
       intervalMs: 3600_000,
       quiet: [0, 0],
       midnightAt: '23:59',
-      rollProbability: 1, // 关掉掷骰：这个用例测的是重启不补发，不是概率
       statePath,
       log: () => {},
     });
     await life1.tick(Date.now());
     expect(count).toBe(1);
     const life2 = createOwnLife({
+      rollProbability: 1,
       deliver: async () => { count += 1; },
       intervalMs: 3600_000,
       quiet: [0, 0],
       midnightAt: '23:59',
-      rollProbability: 1, // 关掉掷骰：这个用例测的是重启不补发，不是概率
       statePath,
       log: () => {},
     });
@@ -418,6 +450,7 @@ describe('own-life · 静默唤醒约束', () => {
     const statePath = path.join(dir, 'm5.json');
     let count = 0;
     const life = createOwnLife({
+      rollProbability: 1,
       deliver: async () => { count += 1; return { ok: false, reason: 'no-live-session' }; },
       intervalMs: 0, quiet: [0, 0], midnightAt: '00:00',
       statePath, log: () => {},
@@ -434,6 +467,7 @@ describe('own-life · 静默唤醒约束', () => {
 
   it('deliver 返回 true/void = 成功，正常计次', async () => {
     const life = createOwnLife({
+      rollProbability: 1,
       deliver: async () => {}, intervalMs: 0, quiet: [0, 0], midnightAt: '00:00',
       statePath: path.join(dir, 'm5b.json'), log: () => {},
     });

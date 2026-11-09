@@ -19,7 +19,7 @@ import { SelfProfileService } from './self.ts';
 import { VoiceService } from './voice.ts';
 import { SelfNoteService } from './self-note.ts';
 import { EmotionService, speakWillingness, typingSpeedFactor, burstLimit, describeEmotion } from './emotion.ts';
-import { runSurfRound, inSurfWindow, surfTopic, type SurfResult } from './surf.ts';
+import { runSurfRound, inSurfWindow, surfTopic, type SurfResult, type WebSearchLike } from './surf.ts';
 import { clockInTz, weekdayInTz, dayInTz, hourInTz, DEFAULT_TZ } from './clock.ts';
 import { prunePendingAttachments } from '../features/pending-attachments.ts';
 import { Humanizer } from './humanize.ts';
@@ -221,6 +221,11 @@ export class PersonaService {
   public ownLife: OwnLifeHandle | undefined;
   /** 冲浪定时器（M6：低峰时段上网搜集她感兴趣的内容） */
   private surfTimer: ReturnType<typeof setInterval> | undefined;
+  /**
+   * 宿主 web 搜索服务（软注入回填，见 persona/web-wiring.ts）。
+   * 未就绪时冲浪走 Bing RSS 兜底；服务卸载时回填 undefined。
+   */
+  private webSearch: WebSearchLike | undefined;
   /** 看屏幕观察（M7/R7，默认关；只在 screenWatchEnabled 时存在） */
   public screenWatch: ScreenWatchHandle | undefined;
   /** 轮内记账暂存（sessionId → 用户/回复文本），turn/end 配对写流水后清除。
@@ -641,14 +646,45 @@ export class PersonaService {
    * 结果**编造了具体文章**（"散文吧有篇《修鞋摊子收起来了》"）。
    * 有了这个入口，她就能真的查，查不到也如实说查不到。
    */
-  surf(topic: string, opts: { deep?: boolean } = {}): SurfResult | undefined {
+  async surf(topic: string, opts: { deep?: boolean } = {}): Promise<SurfResult | undefined> {
     const t = String(topic ?? '').trim();
     if (!t) return undefined;
     try {
-      return surfTopic(t, { deep: opts.deep === true, maxFindings: 5 });
+      const r = await surfTopic(t, {
+        deep: opts.deep === true,
+        maxFindings: 5,
+        web: this.webSearch,
+        log: (m) => this.deps.logger.info(`persona: ${m}`),
+      });
+      // 主动查到的东西也要落进 watching（「我看过的东西」），否则下次被问只能现编
+      if (r && r.findings.length > 0) this.recordSurfWatchings([r]);
+      return r;
     } catch (err) {
       this.deps.logger.warn(`persona: 按需冲浪失败 ${err instanceof Error ? err.message : String(err)}`);
       return undefined;
+    }
+  }
+
+  /** 宿主 web 搜索服务就绪/卸载时回填（软注入落点，见 web-wiring.ts） */
+  attachWeb(web: WebSearchLike | undefined): void {
+    this.webSearch = web;
+    this.deps.logger.info(web === undefined
+      ? 'persona: 宿主 web 搜索服务已卸载 → 冲浪退回 Bing RSS'
+      : 'persona: 宿主 web 搜索服务已接入 → 冲浪/qq_browse 走 web 层');
+  }
+
+  /** 诊断用：宿主 web 搜索当前是否可用 */
+  hasWeb(): boolean {
+    return this.webSearch !== undefined && typeof this.webSearch.search === 'function';
+  }
+
+  /** 冲浪成果落进 self.json 的 watching（只记标题与出处，不替她写感受） */
+  private recordSurfWatchings(results: SurfResult[]): void {
+    for (const r of results) {
+      for (const f of r.findings) {
+        if (!f.title) continue;
+        this.self.addWatching({ title: f.title, ref: f.url || undefined, done: true });
+      }
     }
   }
 
@@ -671,7 +707,7 @@ export class PersonaService {
     // 所以改用 info + 按天节流：窗口内每 tick 记一条（2 小时窗口约 4 条），
     // 窗口外每天只记第一条 —— 既看得出"今天到底进没进窗口"，又不刷屏。
     let surfLogDay = '';
-    const tick = (): void => {
+    const tick = async (): Promise<void> => {
       const now = Date.now();
       const prev = this.self.snapshot().lastSurfAt ?? 0;
       const gapH = prev ? (now - prev) / 3600_000 : 999;
@@ -689,13 +725,16 @@ export class PersonaService {
       }
       try {
         log.info('persona: 冲浪开始');
-        const results = runSurfRound(this.self, {
+        const results = await runSurfRound(this.self, {
           maxTopics: cfg.surfMaxTopics,
           deep: cfg.surfDeep,
           log: (m) => log.info(`persona: ${m}`),
+          web: this.webSearch,
         });
         const total = results.reduce((a, r) => a + r.findings.length, 0);
         log.info(`persona: 冲浪完成，${results.length} 个话题 / ${total} 条见闻`);
+        // 先落 watching 再投递：投递是 followup，那一轮她可能顺手补感受
+        if (total > 0) this.recordSurfWatchings(results);
         // 收集到的内容对下次对话有用 → 静默告知 agent（如果 owner 会话存活）
         if (total > 0) this.notifySurfResults(results);
       } catch (err) {
@@ -703,7 +742,12 @@ export class PersonaService {
       }
     };
 
-    this.surfTimer = setInterval(tick, 30 * 60 * 1000);   // 每 30 分钟检查
+    // async tick 的 rejection 必须自己兜住，否则 setInterval 会变成 unhandledRejection
+    this.surfTimer = setInterval(() => {
+      tick().catch((err: unknown) => {
+        log.warn(`persona: 冲浪 tick 异常 ${err instanceof Error ? err.message : String(err)}`);
+      });
+    }, 30 * 60 * 1000);   // 每 30 分钟检查
     if (typeof this.surfTimer.unref === 'function') this.surfTimer.unref();
     log.info(`persona: 冲浪已武装 · 时段 ${cfg.surfFromHour}:00-${cfg.surfToHour}:00 · 每轮最多 ${cfg.surfMaxTopics} 话题`);
   }

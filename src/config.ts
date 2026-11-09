@@ -3,6 +3,7 @@
  */
 import Schema from '@deepseek-ai/schemastery';
 import { DEFAULT_DOTA_CONFIG, type DotaConfig } from './dota/index.ts';
+import { DEFAULT_XHH_CONFIG, type XhhConfig } from './xhh/index.ts';
 
 export interface AccessControlConfig {
   /** C2C 访问模式 */
@@ -301,6 +302,8 @@ export interface ImQQBotConfig {
   steam: SteamConfig;
   /** Dota2 战绩（数据源 OpenDota，免 key；与 steam 段解耦，各自独立开关） */
   dota: DotaConfig;
+  /** 小黑盒只读（搜索/读帖/收图；匿名接口，不碰账号） */
+  xhh: XhhConfig;
   /** 运维巡检（独立模块，与 persona 无关）：上游同步检查 */
   ops: OpsConfig;
 }
@@ -529,6 +532,16 @@ export const ConfigSchema: Schema<ImQQBotConfig> = Schema.object({
       withinHours: Schema.natural().default(30).description('预热最近多少小时内的局（30 ≈ 覆盖"昨天白天+昨晚"）'),
     }).description('OpenDota 解析预热（OpenDota 的解析是按需的：一场比赛不被请求就永远停在半解析状态）'),
   }).description('Dota2 战绩配置（数据源 OpenDota，免 key；对方需在游戏内开启「公开比赛数据」）'),
+  // 默认关：同步了模块但不擅自给线上增加常驻工具，需要时在 profile 里把 xhh.enabled 打开
+  xhh: Schema.object({
+    enabled: Schema.boolean().default(false).description('小黑盒只读工具总开关（默认关；开=注册 qq_xhh_search / qq_xhh_read / qq_xhh_save_sticker）'),
+    timeoutMs: Schema.natural().default(DEFAULT_XHH_CONFIG.timeoutMs).description('单次请求超时(ms)'),
+    throttleWindowMs: Schema.natural().default(DEFAULT_XHH_CONFIG.throttleWindowMs).description('节流窗口长度(ms)：实测短时间连打即被风控'),
+    throttleMaxCalls: Schema.natural().default(DEFAULT_XHH_CONFIG.throttleMaxCalls).description('窗口内最多几次请求（搜索与读帖共用）'),
+    defaultLimit: Schema.natural().default(DEFAULT_XHH_CONFIG.defaultLimit).description('搜索默认返回几条'),
+    maxLimit: Schema.natural().default(DEFAULT_XHH_CONFIG.maxLimit).description('单次搜索上限'),
+    commentLimit: Schema.natural().default(DEFAULT_XHH_CONFIG.commentLimit).description('读帖时最多带几条评论'),
+  }).description('小黑盒只读（搜索帖子/读正文/收图进表情库；匿名接口，不碰账号）'),
   ops: Schema.object({
     upstreamWatchEnabled: Schema.boolean().default(false).description('上游同步巡检（只读：只报告，不自动合并）'),
     upstreamWatchRepo: Schema.string().default('').description('被巡检仓库绝对路径（空=自动探测 dsh-qqbot 自身）'),

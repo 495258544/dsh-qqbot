@@ -53,10 +53,28 @@ describe('Humanizer.split · 超出条数上限时不再拼成一坨', () => {
 
   it('内容不丢：分条后拼起来覆盖原文的每一段', () => {
     const parts = new Humanizer({ burstMax: 2 }).split(REAL_CASE, 2);
-    const joined = parts.join('\n');
+    // 注意：新算法会在句号处切，所以比对时要忽略分隔符
+    const norm = (s: string) => s.replace(/[\s\n]/g, '');
+    const joined = norm(parts.join(''));
     for (const para of REAL_CASE.split('\n\n')) {
-      expect(joined).toContain(para.slice(0, 12));
+      expect(joined).toContain(norm(para).slice(0, 12));
     }
+  });
+
+  it('语义边界（第三轮的核心）：每条都结束在句末标点上，绝不切在句子中间', () => {
+    const parts = new Humanizer({ burstMax: 2 }).split(REAL_CASE, 2);
+    for (const p of parts) {
+      expect(p.trim()).toMatch(/[。！？!?…~]$/);
+    }
+  });
+
+  it('引导句不被拆开（「两条对胃口的：」要和她引出的内容在一起）', () => {
+    const msg = '冲浪回来了。这回搜到的是正经东西，不再是字典页。\n\n两条对胃口的：一条是澎湃上的《花式咖啡、小甜水的快乐》。';
+    const parts = new Humanizer({ burstMax: 2 }).split(msg, 2);
+    // 引导句与它引出的内容必须在同一条里
+    const withLead = parts.find((p) => p.includes('两条对胃口的'));
+    expect(withLead).toBeDefined();
+    expect(withLead!.includes('花式咖啡')).toBe(true);
   });
 
   it('max=1（情绪低/慢速）时也保留换行，而不是空格拼接', () => {
@@ -93,5 +111,32 @@ describe('Humanizer.split · 不变的行为', () => {
   it('极短行会与相邻合并（原有行为保留）', () => {
     const parts = new Humanizer({ burstMax: 4 }).split('好\n的\n今天天气不错我们出去走走吧', 4);
     expect(parts.length).toBeLessThanOrEqual(4);
+  });
+});
+
+describe('Humanizer.split · 多段不挤进一条（2026-11-07）', () => {
+  it('回归：3 段 167 字不再合成一个带换行的巨块', () => {
+    const msg = [
+      '知道了。往后不倒情节，只说感觉。',
+      '第三章最戳我的是那种「怕连累别人」的念头——他自己都不知道自己是谁、来自哪儿，却先想到走掉会连累这对母子。这个比什么身世谜团都暖一点。',
+      '还有那句「练武不练功，到头一场空」浮在意识里没人教过他。他怀疑自己是那东西的创造者，却连自己是谁都不知道。这种「明明是作者的东西，却像角色自己的」写法，挺妙的。',
+    ].join('\n\n');
+    const parts = new Humanizer({ burstMax: 2 }).split(msg, 2);
+    // 旧行为：1 条 165 字（两处 \n）。新行为：2 条气泡。
+    expect(parts.length).toBe(2);
+    // 气泡内部不再有"跨段落"换行（每段独立成气泡）
+    for (const p of parts) expect(p.split('\n').length).toBeLessThanOrEqual(2);
+  });
+
+  it('2 段正常长度的消息 → 2 个气泡（不合并成一条）', () => {
+    // 注意：<6 字的极短段会被相邻合并（原有碎句规则），
+    // 所以这里用正常长度的段落来验证"不挤一条"
+    const parts = new Humanizer({ burstMax: 2 }).split(
+      '这个我得想想再说。\n\n不过大体方向应该没什么问题，可以先走着看。',
+      2,
+    );
+    expect(parts.length).toBe(2);
+    expect(parts[0]).toContain('想想');
+    expect(parts[1]).toContain('方向');
   });
 });

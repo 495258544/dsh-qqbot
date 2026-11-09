@@ -42,6 +42,7 @@ describe('RuntimeConfig · 基础读取', () => {
     expect(cfg.names()).toEqual([])
     expect(cfg.keywords()).toEqual([])
     expect(cfg.otherNames()).toEqual([])
+    expect(cfg.selfIds()).toEqual([])
   })
 
   it('读到三份列表并去重、去空、trim', () => {
@@ -100,5 +101,37 @@ describe('RuntimeConfig · 热生效', () => {
     expect(cfg.names()).toEqual(['小深'])
     expect(cfg.otherNames()).toEqual(['刘宗锴'])
     expect(cfg.keywords()).toEqual(['打刀'])
+  })
+})
+
+describe('RuntimeConfig · selfIds（自己人 openid，热登记小号）', () => {
+  it('读到并去重去空', () => {
+    writeExternal(JSON.stringify({ selfIds: ['DAE485A3', '  DAE485A3 ', '', '2DA749E8'] }))
+    expect(make().selfIds()).toEqual(['DAE485A3', '2DA749E8'])
+  })
+
+  it('没有 selfIds 字段时返回空数组（老文件向后兼容）', () => {
+    writeExternal(JSON.stringify({ names: ['小深'] }))
+    expect(make().selfIds()).toEqual([])
+  })
+
+  // 关键回归：update() 只带 names，绝不能把 selfIds 静默清空。
+  // 四份 payload 少写一份就是这个 bug —— 工具改个名字会把主人登记的小号抹掉。
+  it('update() 其它字段不会清空 selfIds', () => {
+    writeExternal(JSON.stringify({ selfIds: ['DAE485A3'] }))
+    const cfg = make()
+    expect(cfg.selfIds()).toEqual(['DAE485A3'])
+    cfg.update({ keywords: ['开黑'] })
+    expect(cfg.selfIds()).toEqual(['DAE485A3']) // 没动 selfIds，必须还在
+    // 另一个实例（重启后）也读得到
+    expect(make().selfIds()).toEqual(['DAE485A3'])
+  })
+
+  it('selfIds 本身可热更新（登记一个新小号，不用重启）', () => {
+    writeExternal(JSON.stringify({ selfIds: ['DAE485A3'] }))
+    const cfg = make()
+    cfg.update({ selfIds: ['DAE485A3', 'NEWALTID'] })
+    expect(cfg.selfIds()).toEqual(['DAE485A3', 'NEWALTID'])
+    expect(make().selfIds()).toEqual(['DAE485A3', 'NEWALTID'])
   })
 })

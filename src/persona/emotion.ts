@@ -190,7 +190,7 @@ export function typingSpeedFactor(state: EmotionState): number {
 /**
  * 闸门 ③：分几条发。
  * arousal 高（激动）→ 更容易连发两条；低 → 合成一条。
- * 返回 1 或 2（官方 API 同一 msgId 被动回复限 4 次，留额度）。
+ * 返回 1 或 2（官方：单聊每条消息可被动回复 4 次、群聊 5 次，留额度）。
  */
 export function burstLimit(state: EmotionState, cap = 2): number {
   // arousal 0.3（基线）→ 阈值 0.3，即基线附近约一半概率发两条

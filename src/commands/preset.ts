@@ -4,12 +4,16 @@
  * 无参数列出可用 preset（可点击切换），有参数切换，reset/default 重置为默认。
  */
 import type { CommandDeps, CategorizedCommand } from './types.ts';
+import { commandAllowlistAuth } from './auth.ts';
 import { getScopePeer, sendMarkdownChunked } from '../shared/index.ts';
 
-export function presetCommand({ manager, config }: CommandDeps): CategorizedCommand {
+export function presetCommand({ manager, config, logger }: CommandDeps): CategorizedCommand {
   return {
     name: 'preset',
     category: 'agent',
+    // 管理类指令：私聊/群聊均可用，但仅限白名单用户（复用审批的名单语义）
+    scope: 'all',
+    authorized: commandAllowlistAuth(config, logger),
     description: '查看或切换 agent preset（用法: /preset [id]）',
     handler: async (cmdCtx) => {
       const { scope, peerId } = getScopePeer(cmdCtx);
@@ -34,7 +38,10 @@ export function presetCommand({ manager, config }: CommandDeps): CategorizedComm
         }
         lines.push('', '手动指定: `/preset <id>`，重置默认: `/preset reset`');
 
-        await sendMarkdownChunked(cmdCtx, lines.join('\n'), config.textChunkLimit);
+        await sendMarkdownChunked(cmdCtx, lines.join('\n'), config.textChunkLimit, {
+          appId: config.appId,
+          botOpenid: config.persona?.botOpenid,
+        });
         return { kind: 'noop' as const };
       }
 

@@ -39,7 +39,7 @@ interface ToolsRegistryLike {
 }
 
 /** 一条表情记录 */
-interface StickerEntry {
+export interface StickerEntry {
   path: string;
   use?: string[];
   emo?: string[];
@@ -398,7 +398,7 @@ export function resolveLibraryRoot(config?: ImQQBotConfig): string {
 }
 
 /** 把一条记录写进索引（读-改-写，按 path 去重） */
-function upsertIndex(entry: StickerEntry, root: string, logger: Logger): boolean {
+export function upsertIndex(entry: StickerEntry, root: string, logger: Logger): boolean {
   const p = `${root}/${INDEX_FILE}`;
   try {
     let idx: StickerIndex;
@@ -424,23 +424,40 @@ function upsertIndex(entry: StickerEntry, root: string, logger: Logger): boolean
 /** 库内收集目录名（归档进来的图放这里，与手工分类目录分开） */
 const COLLECT_DIR = '_群聊收集';
 
+/** 收集目录名（供其他模块把外部图片收进同一个库时复用） */
+export const STICKER_COLLECT_DIR = COLLECT_DIR;
+
 /**
  * 把外部图片收进库目录。
  * 桌面端必需：聊天附件落在 ~/.dsh-qqbot/media，会被 TTL 清理；
  * 只把原路径写进索引会留下死链。已在本库内的图原样返回，不重复复制。
  */
-function adoptIntoLibrary(srcPath: string, root: string, logger: Logger): string {
+export function adoptIntoLibrary(
+  srcPath: string,
+  root: string,
+  logger: Logger,
+  collectDirName: string = COLLECT_DIR,
+  /**
+   * 文件名里的可读部分。不传就用源文件名主干。
+   *
+   * 为什么要能覆盖：源文件常常是**临时文件**（`IMG_123_1793778178052.png`），
+   * 带时间戳就意味着同一张图每次会得到不同目标名 —— MD5 只体现在前缀，
+   * 去重会失效，库里会出现同一张图的多个副本。调用方应给一个稳定名字。
+   */
+  stemOverride?: string,
+): string {
   const posix = (p: string): string => p.replace(/\\/g, '/');
   const rootPrefix = posix(root).replace(/\/+$/, '') + '/';
   if (posix(srcPath).toLowerCase().startsWith(rootPrefix.toLowerCase())) return posix(srcPath);
 
-  const collectDir = join(root, COLLECT_DIR);
+  const collectDir = join(root, collectDirName);
   mkdirSync(collectDir, { recursive: true });
 
   const buf = readFileSync(srcPath);
   const md5 = createHash('md5').update(buf).digest('hex');
   const ext = extname(srcPath) || '.jpg';
-  const stem = basename(srcPath, extname(srcPath))
+  const rawStem = stemOverride ?? basename(srcPath, extname(srcPath));
+  const stem = rawStem
     .replace(/[^\w\u4e00-\u9fa5-]/g, '_')
     .slice(0, 40) || 'sticker';
   const dest = join(collectDir, `${md5.slice(0, 12)}_${stem}${ext}`);

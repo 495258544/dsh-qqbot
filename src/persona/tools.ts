@@ -812,7 +812,7 @@ export function registerPersonaTools(
     async execute(args: unknown): Promise<Record<string, unknown>> {
       const { topic, deep } = args as { topic: string; deep?: boolean };
       try {
-        const r = persona.surf?.(topic, { deep: deep === true });
+        const r = await persona.surf?.(topic, { deep: deep === true });
         if (!r || r.findings.length === 0) return { topic, findings: [], ok: false };
         return {
           topic,

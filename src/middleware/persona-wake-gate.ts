@@ -83,6 +83,13 @@ export function personaWakeGate(
      * 「芋头你今晚打不打」就会被她当成省略主语的问句抢着接。
      */
     extraNames?: () => string[];
+    /**
+     * 自己人的 openid（owner + bot + runtime.json 的 selfIds）。
+     * 这些账号的群昵称不该进「别人名字」表：群成员 openid ≠ 私聊 owner id，
+     * 只过滤 ownerOpenids 修不掉「主人自称群昵称被当成在叫别人」。
+     * 当前说话人自己由门内并入（senderId 现成）。
+     */
+    selfIds?: () => Iterable<string>;
   } = {},
 ): Middleware {
   const fromBotAtMeAllowed = opts.fromBotAtMeAllowed !== false;
@@ -161,7 +168,10 @@ export function personaWakeGate(
             // @ 了别人 → 活跃期内也不该抢话（详见 mentionsOtherPeople 的注释）
             atSomeoneElse: mentionsOtherPeople(msg.content ?? '', ctx.state.mention?.wasMentioned === true),
             // 群友的昵称（带 30s 缓存 + 绑定表补全）：用来识别"这句话是在叫别人"
-            otherNames: [...persona.memory.knownNames(), ...(opts.extraNames?.() ?? [])],
+            otherNames: [
+              ...persona.memory.knownNames(new Set([msg.senderId, ...(opts.selfIds?.() ?? [])])),
+              ...(opts.extraNames?.() ?? []),
+            ],
             // 活跃期内按概率接话，避免变成应答器
             inActiveWindow: waker.isSpeakerActive(key, msg.senderId),
           })

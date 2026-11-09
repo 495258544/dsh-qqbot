@@ -25,7 +25,7 @@ import {
 } from './attachment.ts';
 import { clearGroupHistory } from '../features/history-store.ts';
 import { recordGroupActivity } from '../features/group-activity.ts';
-import { lookupAttribution, lookupByImageMd5 } from '../features/attribution-index.ts';
+import { lookupAttribution, lookupByImageMd5, lookupRefSender } from '../features/attribution-index.ts';
 import { stashPendingAttachments, takePendingAttachments, pendingKey } from '../features/pending-attachments.ts';
 
 import type { MiddlewareContext } from '@tencent-connect/qqbot-nodejs';
@@ -49,6 +49,8 @@ interface ProcessedMessage {
 interface ResolvedQuote {
   text?: string;
   entry?: { senderId?: string; senderName?: string; content?: string; isBot?: boolean };
+  /** 被引用消息的 msgIdx（归属索引直查用，权威高于内容反查） */
+  refKey?: string;
   attachments?: QuotedAttachment[];
 }
 
@@ -155,6 +157,13 @@ export async function handleInbound(
     scope === 'group'
       ? (md5s) => {
           const hit = lookupByImageMd5(config.appId, gid, md5s);
+          return hit ? { id: hit.senderId, name: hit.senderName } : {};
+        }
+      : undefined,
+    // msgIdx → 发送者直查（quoteRef 的 enrichEntry 记的，权威高于内容反查）
+    scope === 'group'
+      ? (refKey?: string) => {
+          const hit = lookupRefSender(refKey);
           return hit ? { id: hit.senderId, name: hit.senderName } : {};
         }
       : undefined,
@@ -274,6 +283,8 @@ function assembleAgentBody(
   lookupSender?: (quotedText: string) => { id?: string; name?: string },
   /** 按图片 MD5 反查（QQ 的图片文件名就是内容 MD5，无需下载图片） */
   lookupImage?: (md5s: string[]) => { id?: string; name?: string },
+  /** 按消息 id（msgIdx）直查发送者（quoteRef 的 enrichEntry 记的，权威） */
+  lookupRef?: (refKey?: string) => { id?: string; name?: string },
   /** 主人 openid 列表（命中时说话人标签带「·主人」—— 否则主人用小号说话她认不出来） */
   ownerIds?: readonly string[],
   /** vision.enabled 开着才提示她用看图工具，避免指向一个没注册的工具 */
@@ -292,6 +303,7 @@ function assembleAgentBody(
     botOpenid || detectBotSelfId(state.history),
     lookupSender,
     lookupImage,
+    lookupRef,
     (state.downloadedForwardFiles ?? []).map(d => d.nodeIndex),
   );
   const userMessage = buildUserMessage(userContent, quotePart, msg.senderId, msg.senderName, isGroup, wasMentioned, ownerIds);
@@ -391,6 +403,8 @@ export function buildQuotePart(
   botSelfId?: string,
   lookupSender?: (quotedText: string) => { id?: string; name?: string },
   lookupImage?: (md5s: string[]) => { id?: string; name?: string },
+  /** 按消息 id（msgIdx）直查发送者——比内容反查权威，短消息/截断预览也能命中 */
+  lookupRef?: (refKey?: string) => { id?: string; name?: string },
   /** 已下载成功的转发图所在条号（1-based）；有图时在占位符上挂 #N 锚点 */
   forwardImageNumbers?: readonly number[],
 ): string {
@@ -424,10 +438,15 @@ export function buildQuotePart(
     const fromIndex = lookupSender?.(text);
     if (fromIndex && (fromIndex.id || fromIndex.name)) return fromIndex;
     const probe = norm(text);
-    if (probe.length < 4 || !history?.length) return {};
+    if (probe.length < 2 || !history?.length) return {};
+    // 短引文（<4 字）只做完全一致匹配，避免「嗯」命中任何含「嗯」的话
     for (const h of [...history].reverse()) {
       const body = norm(String(h.content ?? ''));
-      if (!body || body.length < 4) continue;
+      if (!body || body.length < 2) continue;
+      if (probe.length < 4) {
+        if (body === probe) return { id: h.senderId, name: h.senderName };
+        continue;
+      }
       if (probe.includes(body) || (body.length >= 8 && body.includes(probe))) {
         return { id: h.senderId, name: h.senderName };
       }
@@ -438,9 +457,28 @@ export function buildQuotePart(
   /** 这个人是不是"她自己"（用于把"别人说的"和"她自己说过的"区分开） */
   const isSelf = (id?: string): boolean => Boolean(botSelfId && id && id === botSelfId);
 
-  /** 一段引文的归属短语 */
-  const labelOf = (text: string, storeId?: string, storeName?: string): string => {
-    const found = (storeId || storeName) ? { id: storeId, name: storeName } : lookup(text);
+  /**
+   * 单条引文的发送者。权威优先级：
+   *   1. QQ store 的 entry（被引用消息本尊的发送者）
+   *   2. refKey 按 msgIdx 直查（短消息/被截断的预览也能命中）
+   *   3. 内容反查（归属索引 → 群历史）
+   *
+   * 合并转发绝不能走这条路：store/refKey 指向的是「转发这条合并消息的人」，
+   * 不是每条内容的作者。返回 undefined 表示确实查不到。
+   */
+  const resolveSingle = (text: string): { id?: string; name?: string } | undefined => {
+    if (quote?.entry?.senderId || quote?.entry?.senderName) {
+      return { id: quote.entry.senderId, name: quote.entry.senderName };
+    }
+    const byRef = lookupRef?.(quote?.refKey);
+    if (byRef && (byRef.id || byRef.name)) return byRef;
+    const byContent = lookup(text);
+    return (byContent.id || byContent.name) ? byContent : undefined;
+  };
+
+  /** 合并转发逐条的归属短语：只认内容反查，绝不把转发者套到每条上 */
+  const labelOf = (text: string): string => {
+    const found = lookup(text);
     const name = found.name ?? (found.id ? shortSenderId(found.id) : undefined);
     if (!name) return '某人';
     if (isSelf(found.id)) return `这是你自己之前说的「${name}」`;
@@ -493,7 +531,7 @@ export function buildQuotePart(
           // MD5 没命中。**不要**拿 fallbackOwner 套上去：
           // 同一转发里能查到某条属于 A，不代表别的条目也属于 A
           // —— 实测过这会造成"全标成我自己"的过度推断。
-          who = labelOf(content, quote.entry?.senderId, quote.entry?.senderName);
+          who = labelOf(content);
         }
 
         // 下载成功的图挂一个 #N 锚点，和下方 [Forward images] 里的编号对应。
@@ -504,7 +542,7 @@ export function buildQuotePart(
         return;
       }
 
-      let label = labelOf(content, quote.entry?.senderId, quote.entry?.senderName);
+      let label = labelOf(content);
       // 过短的内容（如单个"1"）达不到反查门槛，只会落到"某人"。
       // 同一合并转发里其他条目若能确定发送者，就归给此人。
       //
@@ -537,13 +575,25 @@ export function buildQuotePart(
     return '[Quoted message begins]\n（这是系统代你发出的运行状态提示，不是别人在跟你聊天）\n[消息内容] （系统提示，已略去）\n[Quoted message ends]\n[Current message]\n';
   }
 
-  const label = labelOf(raw, quote.entry?.senderId, quote.entry?.senderName);
-  const found = lookup(raw);
-  const attribution = found.id && isSelf(found.id)
+  // 发送者解析：store → refKey → 内容反查；文字查不到再试图片指纹
+  // （她发的表情包以前从不进索引 → 引用她的图只会「看不出是谁说的」）
+  let author = resolveSingle(raw);
+  if (!author) {
+    const md5s = (quote?.attachments ?? [])
+      .map((a) => a.filename ?? '')
+      .filter((f) => /^[A-Fa-f0-9]{32}/.test(f))
+      .map((f) => f.slice(0, 32).toLowerCase());
+    const byImage = md5s.length > 0 ? lookupImage?.(md5s) : undefined;
+    if (byImage && (byImage.id || byImage.name)) author = byImage;
+  }
+
+  const selfHit = Boolean(author?.id && isSelf(author.id));
+  const name = author?.name ?? (author?.id ? shortSenderId(author.id) : undefined);
+  const attribution = selfHit
     ? '[Quoted message begins]\n（这是你自己之前说过的话）\n'
-    : label === '某人'
+    : !name
       ? '[Quoted message begins]\n（看不出这句是谁说的）\n'
-      : `[Quoted message begins]\n（这是「${label}」说的）\n`;
+      : `[Quoted message begins]\n（这是「${name}」说的）\n`;
 
   return `${attribution}${raw}\n[Quoted message ends]\n[Current message]\n`;
 }
