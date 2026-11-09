@@ -125,39 +125,74 @@ export class Humanizer {
   }
 
   /**
-   * 把一段长回复切成"像人打出来的"若干条：
-   * 先按换行切，过长的按中文标点再切，太短的相邻项合并，
-   * 超过 burstMax 的合并进最后一条。
+   * 把一段长回复切成"像人打出来的"若干条。
+   *
+   * ## 2026-11-06 修：超出条数上限时的合并方式
+   *
+   * 旧实现是 `merged.slice(max - 1).join(' ')` —— 把超出部分**全部用空格拼成一条**。
+   * 实测她一条 439 字 / 6 段的回复被切成「12 字 + 427 字」，而那条 427 字
+   * 里段落分隔全被空格替换，在 QQ 上就是**一个没有换行的巨块**（用户原话：
+   * "又是一大段"）。也就是说"她写了一坨"这个观感有一半是这里造成的，不是她写的。
+   *
+   * 另外旧实现把全部余量倒进**最后一条**，前一条只剩 max-1 个片段，
+   * 分配极不均衡（12 + 427）。
+   *
+   * 现在：按长度**均衡装桶**，桶内保留换行（段落结构不被破坏），
+   * 只有单个段落本身就超过目标长度时才按句切开。
+   * 条数上限仍然是 max（官方 API 同一 msgId 被动回复限 4 次，要留额度）。
    */
   split(text: string, max = this.effectiveBurstMax()): string[] {
     const raw = String(text ?? '').trim();
     if (!raw) return [];
-    let parts = raw.split(/\n+/).map((s) => s.trim()).filter(Boolean);
-    const out: string[] = [];
-    for (const p of parts) {
-      if ([...p].length <= 40) {
-        out.push(p);
-        continue;
-      }
-      const segs = p.split(/(?<=[。！？!?…~])\s*/).map((s) => s.trim()).filter(Boolean);
-      out.push(...(segs.length ? segs : [p]));
-    }
-    parts = out;
-    const merged: string[] = [];
-    for (const s of parts) {
-      const last = merged[merged.length - 1];
-      if (last && [...last].length < 6 && [...last].length + [...s].length <= 24) {
-        merged[merged.length - 1] = last + s;
+
+    // 1) 先按段落切 —— 段落是作者的排版意图，不再一律按句打碎
+    const paras = raw.split(/\n+/).map((s) => s.trim()).filter(Boolean);
+
+    // 2) 合并极短段（单独一行的「嗯」「好」）
+    const blocks: string[] = [];
+    for (const p of paras) {
+      const last = blocks[blocks.length - 1];
+      if (last && [...last].length < 6 && [...last].length + [...p].length <= 24) {
+        blocks[blocks.length - 1] = last + p;
       } else {
-        merged.push(s);
+        blocks.push(p);
       }
     }
-    if (merged.length > max) {
-      const head = merged.slice(0, max - 1);
-      head.push(merged.slice(max - 1).join(' '));
-      return head;
+
+    // 条数够了就直接发，不做任何拼接
+    if (blocks.length <= max) return blocks;
+
+    // 3) 超出上限：均衡装桶，桶内用换行连接（保留段落）
+    const total = blocks.reduce((n, s) => n + [...s].length, 0);
+    const target = Math.ceil(total / max);
+    const buckets: string[] = [];
+    let cur: string[] = [];
+    let curLen = 0;
+
+    for (const b of blocks) {
+      // 单段就超目标：允许按句切开，免得一个桶被一整段独占
+      let pieces = [b];
+      if ([...b].length > target) {
+        const segs = b
+          .split(/(?<=[。！？!?…~])\s*/)
+          .map((s) => s.trim())
+          .filter(Boolean);
+        if (segs.length > 1) pieces = segs;
+      }
+      for (const piece of pieces) {
+        const len = [...piece].length;
+        // 够长了就收口；留够剩余桶位（buckets.length < max-1）
+        if (cur.length > 0 && curLen + len > target && buckets.length < max - 1) {
+          buckets.push(cur.join('\n'));
+          cur = [];
+          curLen = 0;
+        }
+        cur.push(piece);
+        curLen += len;
+      }
     }
-    return merged;
+    if (cur.length) buckets.push(cur.join('\n'));
+    return buckets;
   }
 
   /** 执行一次拟人化发送 */
