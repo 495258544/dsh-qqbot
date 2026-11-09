@@ -18,7 +18,7 @@
  *   现在由 `ability-zh.ts` 给权威中文名，没收录的一律保留英文原名，
  *   展示层统一输出 `神之力量（God's Strength）`，并禁止她自行翻译或改名。
  */
-import { abilityZh } from './ability-zh.ts';
+import { abilityZh, formatAbilityName } from './ability-zh.ts';
 import type { AbilityMeta } from './opendota.ts';
 
 export interface ParsedAbility {
@@ -150,7 +150,7 @@ export function parseAbilityUpgrades(
  * 括号里的英文是给群友对号用的锚点，也让她没有「自己译一个」的余地。
  */
 export function abilityLabel(a: ParsedAbility): string {
-  return a.nameZh !== undefined ? `${a.nameZh}（${a.name}）` : a.name;
+  return formatAbilityName(a.name, a.nameZh);
 }
 
 /**
@@ -182,7 +182,8 @@ export function describeAbilityMix(abilities: ParsedAbility[]): string {
   // 用得最多的那个单独点出来 —— 这才是这局的重心
   const top = abilities[0];
   if (top !== undefined && top.uses >= 20) {
-    tags.push(`用得最多的是 ${abilityLabel(top)}（${top.uses} 次）`);
+    // 中文名本身已带「（English）」括号，次数另用逗号分开，别叠成两层括号
+    tags.push(`用得最多的是 ${abilityLabel(top)}，${top.uses} 次`);
   }
   return tags.join('；');
 }

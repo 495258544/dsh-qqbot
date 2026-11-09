@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { abilityZh } from './ability-zh.ts'
+import { abilityZh, formatAbilityName } from './ability-zh.ts'
 import { parseAbilities, parseAbilityUpgrades, abilityLabel } from './abilities.ts'
 import type { AbilityMeta } from './opendota.ts'
 
@@ -23,6 +23,18 @@ describe('abilityZh · 技能官方中文名', () => {
   it('没收录的一律返回 undefined（保留英文原名，不硬译）', () => {
     expect(abilityZh('Some Brand New Skill')).toBeUndefined()
     expect(abilityZh('')).toBeUndefined()
+  })
+})
+
+describe('formatAbilityName · 旧记录也能补中文', () => {
+  it('有 nameZh 直接用；没有就回查对照表', () => {
+    expect(formatAbilityName("God's Strength", '神之力量')).toBe("神之力量（God's Strength）")
+    expect(formatAbilityName("God's Strength")).toBe("神之力量（God's Strength）")
+  })
+
+  it('没收录的保持英文原名，不硬译、不加空括号', () => {
+    expect(formatAbilityName('Some Brand New Skill')).toBe('Some Brand New Skill')
+    expect(formatAbilityName('Rot', '')).toBe('腐烂（Rot）')
   })
 })
 
