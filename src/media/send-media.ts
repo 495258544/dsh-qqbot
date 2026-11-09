@@ -11,6 +11,7 @@ import type { ReplyTarget } from '../types.ts';
 import type { SendFileConfig } from '../config.ts';
 import { MEDIA_ROOT } from './media-cleaner.ts';
 import { resolveAgentCwd } from '../shared/dirs.ts';
+import { md5OfFile, rememberOwnSend, type OwnSendContext } from '../shared/attribution-out.ts';
 
 export { resolveAgentCwd };
 
@@ -90,12 +91,22 @@ export type SendMediaResult =
  *
  * 文件不存在、不是普通文件时返回 missing（不抛错，调用方决定降级文案）；
  * 平台发送失败返回 failed。文件名透传给通用文件通道。
+ *
+ * ── 图片归属（2026-11-10 补齐）──────────────────────────────────
+ * 以前她发的图/表情包从不进归属索引（文字反查不到图，imageMd5 只有
+ * 入站记录器会写）→ 用户引用她的表情包时她只能看到「看不出这句是谁说的」，
+ * 等于认不出自己发过的东西。现在发送成功后按本地文件算 MD5 记一条，
+ * QQ 的图片文件名就是内容 MD5，引用时直接对上。
  */
 export async function sendMediaFile(
   bot: MediaSenderLike,
   target: ReplyTarget,
   filePath: string,
-  opts: { fileName?: string } = {},
+  opts: {
+    fileName?: string;
+    /** 群聊时传入 → 发送成功后把这张图记进归属索引（认得出是她发的） */
+    attribution?: OwnSendContext;
+  } = {},
 ): Promise<SendMediaResult> {
   let size: number;
   try {
@@ -108,16 +119,25 @@ export async function sendMediaFile(
 
   const fileName = opts.fileName ?? basename(filePath);
   const ext = extname(filePath).toLowerCase();
+  const isImage = ext === '.gif' || IMAGE_EXTS.has(ext);
   const source = { localPath: filePath };
 
   try {
-    const result = ext === '.gif' || IMAGE_EXTS.has(ext)
+    const result = isImage
       ? await bot.sendImage(target, source)
       : VIDEO_EXTS.has(ext)
         ? await bot.sendVideo(target, source)
         : VOICE_EXTS.has(ext)
           ? await bot.sendVoice(target, source)
           : await bot.sendFile(target, source, { fileName });
+    // 图片才记指纹；其他媒体没有可靠的"内容指纹"，记了也匹配不上
+    if (isImage && opts.attribution?.groupId) {
+      rememberOwnSend(
+        opts.attribution,
+        '',
+        [md5OfFile(filePath)].filter((m): m is string => Boolean(m)),
+      );
+    }
     return {
       outcome: 'sent',
       size,

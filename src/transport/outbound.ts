@@ -9,7 +9,7 @@ import type { ImQQBotConfig } from '../config.ts';
 import type { Logger } from '../types.ts';
 import { chunkMarkdownText } from './chunker.ts';
 import { appendBotHistory } from '../features/history-store.ts';
-import { rememberForAttribution } from '../features/attribution-index.ts';
+import { BOT_SELF_NAME, rememberOwnSend, resolveBotSelfId } from '../shared/attribution-out.ts';
 import { OutboundBuffer, type QQBotSender } from './outbound-buffer.ts';
 import { formatToolResult, type ToolsRegistryLike, type ToolResultData } from './tool-presenter.ts';
 import type { DeliverablesDelivererLike } from './deliverables.ts';
@@ -60,13 +60,9 @@ interface ToolCallRecord {
 const SILENT_TURN_ERROR_CODES = new Set(['STREAM_CLOSED']);
 
 /**
- * 机器人自己的 openid 兜底值。
- *
- * 优先用 config.persona.botOpenid；没配时用这个实测值
- * （QQ 群里 @ 小羽时显示为 `<@B1FE2927B46C9AF15C464E62216395FF>`）。
- * 用于让她说过的话在历史里可被认出，避免模型把她自己的话当成别人说的。
+ * 机器人自己的 openid 兜底值已移出到 shared/attribution-out.ts（BOT_SELF_ID_FALLBACK），
+ * 供 send-helper / send-media / commands 共用，避免各写一份。
  */
-const BOT_SELF_ID_FALLBACK = 'B1FE2927B46C9AF15C464E62216395FF';
 
 /**
  * 错误提示冷却（同行同错误 N 毫秒内只发一次）。
@@ -419,26 +415,29 @@ class OutboundRouter {
   }
 
   /**
-   * 把她自己说过的话写进群历史缓冲。
+   * 把她自己说过的话写进群历史缓冲 + 归属索引。
    *
    * 为什么：用户经常引用小羽说过的话，但历史缓冲只记用户消息 → 反查不到 →
    * 只能标「某人」→ 模型会把她自己的话当成别人说的（"刚不是你那边卡了"就是这么来的）。
    * 只在群聊记录（私聊不需要历史缓冲），且只记真正送达的（失败的不算说过）。
+   *
+   * 归属索引的写入统一走 shared/attribution-out 的 rememberOwnSend ——
+   * 斜杠命令回复、她发的图/表情包也要能被引用时认出来（2026-11-10 补齐）。
    */
-  private rememberOwnWords(record: SessionRecord, chunk: string): void {
+  private rememberOwnWords(record: SessionRecord, chunk: string, imageMd5?: string[]): void {
     if (record.scope !== 'group') return;
-    try {
-      const selfId = this.config.persona?.botOpenid || BOT_SELF_ID_FALLBACK;
-      appendBotHistory(this.config.appId, record.peerId, chunk, selfId);
-      // 同时进归属索引：这样"用户引用小羽说过的话"能反查到是她自己说的
-      rememberForAttribution(this.config.appId, record.peerId, {
+    const selfId = resolveBotSelfId(this.config.persona?.botOpenid);
+    appendBotHistory(this.config.appId, record.peerId, chunk, selfId);
+    rememberOwnSend(
+      {
+        appId: this.config.appId,
+        groupId: record.peerId,
         senderId: selfId,
-        senderName: '小羽',
-        content: chunk,
-      });
-    } catch (err) {
-      this.logger.debug(`im-qqbot: 记录自身发言失败: ${err instanceof Error ? err.message : String(err)}`);
-    }
+        senderName: BOT_SELF_NAME,
+      },
+      chunk,
+      imageMd5,
+    );
   }
 
   /**

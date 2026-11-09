@@ -45,7 +45,10 @@ export function helpCommand(
       }
 
       lines.push('', `> dsh-qqbot v${PLUGIN_VERSION}`);
-      await sendMarkdownChunked(cmdCtx, lines.join('\n'), config.textChunkLimit);
+      await sendMarkdownChunked(cmdCtx, lines.join('\n'), config.textChunkLimit, {
+        appId: config.appId,
+        botOpenid: config.persona?.botOpenid,
+      });
       return { kind: 'noop' as const };
     },
   };

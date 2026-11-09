@@ -26,6 +26,7 @@ import type { Logger } from '../types.ts';
 import type { SteamService } from '../steam/service.ts';
 import { buildCommandList } from '../commands/index.ts';
 import { attributionRecorder } from '../middleware/attribution-recorder.ts';
+import { rememberRefSender } from '../features/attribution-index.ts';
 import { attachmentProcessor } from '../middleware/attachment.ts';
 import { questionAnswer } from '../middleware/question-answer.ts';
 import { getHistoryStore, historyGroupKey } from '../features/history-store.ts';
@@ -108,9 +109,18 @@ export function setupMiddlewares(
   //      才能判断话题是否跟她有关（别人引用她说过的话应该算强信号），
   //      门禁跑的时候 ctx.state.quote 还没解析出来 → 引用内容完全不参与判定。
   //      前移后 quote 对 personaWakeGate 可见；下游使用者不受影响。
+  //
+  //      enrichEntry（2026-11-10）：顺手把「msgIdx → 发送者」记进归属索引的
+  //      refKey 直查表。以前短消息（「嗯。」「好的」）和被截断的引用预览
+  //      都达不到内容反查的门槛 → 一律「看不出这句是谁说的」。按 msgIdx
+  //      直查是权威来源，零歧义；内容反查从此只是兜底。
   bot.use(quoteRef({
     maxSize: 500,
     preferMsgElements: true,
+    enrichEntry: (entry, middlewareCtx) => {
+      rememberRefSender(middlewareCtx.message.msgIdx, middlewareCtx.message.senderId, middlewareCtx.message.senderName);
+      return entry;
+    },
   }));
 
   // 5. 群聊 @bot 门控

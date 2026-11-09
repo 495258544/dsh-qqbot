@@ -10,6 +10,7 @@ import type { ImQQBotConfig } from '../config.ts';
 import type { SessionRecord } from '../session/index.ts';
 import type { Logger } from '../types.ts';
 import { isPathAllowed, resolveAgentCwd, sendMediaFile, type MediaSenderLike } from '../media/send-media.ts';
+import { BOT_SELF_NAME, resolveBotSelfId } from '../shared/attribution-out.ts';
 import type { PresentedFileRef } from './events.ts';
 import { chunkMarkdownText } from './chunker.ts';
 import type { QQBotSender } from './outbound-buffer.ts';
@@ -56,7 +57,14 @@ export class DeliverablesDeliverer implements DeliverablesDelivererLike {
         missed.push(`${display}（路径不在允许范围）`);
         continue;
       }
-      const result = await sendMediaFile(this.mediaBot, record.replyTarget, absPath);
+      const result = await sendMediaFile(this.mediaBot, record.replyTarget, absPath, {
+        attribution: {
+          appId: this.config.appId,
+          groupId: record.replyTarget.scope === 'group' ? record.replyTarget.targetId : undefined,
+          senderId: resolveBotSelfId(this.config.persona?.botOpenid),
+          senderName: BOT_SELF_NAME,
+        },
+      });
       if (result.outcome === 'sent') {
         sent++;
         this.logger.info(

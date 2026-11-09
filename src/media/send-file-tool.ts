@@ -14,6 +14,7 @@ import type { ImQQBotConfig } from '../config.ts';
 import type { DshAgent, SessionManager } from '../session/index.ts';
 import type { Logger, ReplyTarget } from '../types.ts';
 import { isPathAllowed, resolveAgentCwd, sendMediaFile, type MediaSenderLike } from './send-media.ts';
+import { BOT_SELF_NAME, resolveBotSelfId } from '../shared/attribution-out.ts';
 
 /** 工具名（qqbot 前缀避免与其他通道的同名工具冲突） */
 export const SEND_FILE_TOOL_NAME = 'qqbot_send_file';
@@ -130,8 +131,16 @@ export function registerSendFileTool(
       }
 
       // 3. 按扩展名分类发送（与交付物投递共用 send-media 的分发实现）
+      //    attribution：发送成功后把图片指纹记进归属索引 → 引用她发的图认得出是她发的
       const fileName = basename(absPath);
-      const result = await sendMediaFile(bot, replyTarget, absPath);
+      const result = await sendMediaFile(bot, replyTarget, absPath, {
+        attribution: {
+          appId: config.appId,
+          groupId: replyTarget.scope === 'group' ? replyTarget.targetId : undefined,
+          senderId: resolveBotSelfId(config.persona?.botOpenid),
+          senderName: BOT_SELF_NAME,
+        },
+      });
       if (result.outcome === 'missing') {
         throw new Error(`qqbot_send_file: 文件不存在或不可读: ${absPath}`);
       }

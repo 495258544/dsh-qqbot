@@ -38,7 +38,10 @@ export function presetCommand({ manager, config, logger }: CommandDeps): Categor
         }
         lines.push('', '手动指定: `/preset <id>`，重置默认: `/preset reset`');
 
-        await sendMarkdownChunked(cmdCtx, lines.join('\n'), config.textChunkLimit);
+        await sendMarkdownChunked(cmdCtx, lines.join('\n'), config.textChunkLimit, {
+          appId: config.appId,
+          botOpenid: config.persona?.botOpenid,
+        });
         return { kind: 'noop' as const };
       }
 

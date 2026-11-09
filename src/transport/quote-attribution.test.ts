@@ -179,3 +179,85 @@ describe('buildQuotePart · 不做过度推断（真实事故 2026-11-01 02:27�
     expect(out).not.toContain('你自己发了一张图片');
   });
 });
+
+describe('buildQuotePart · 2026-11-10 修订（store/refKey 权威 + 措辞 + 图片归属）', () => {
+  const BOT = 'B1FE2927B46C9AF15C464E62216395FF';
+  const JMX = '2DA749E82EB6FC4B2FCCD4102A3EB0AC';
+  /** 模拟归属索引：她自己说过「这个说法我认同」 */
+  const indexHasBotSaying = () => ({ id: BOT, name: '小羽' });
+  const indexHasJmxSaying = () => ({ id: JMX, name: 'jmx' });
+
+  it('store 权威说是用户 + 索引里她说过同文 → 以 store 为准，标用户（不再误判「你自己」）', () => {
+    // 真实事故：用户先说，她复读，索引里她那条更新 → 旧代码把用户的原话标成"你自己说的"
+    const out = buildQuotePart(
+      { text: '这个说法我认同', entry: { senderId: JMX, senderName: 'jmx' } },
+      undefined,
+      BOT,
+      indexHasBotSaying,
+    );
+    expect(out).toContain('jmx');
+    expect(out).not.toContain('你自己之前说过的话');
+  });
+
+  it('refKey 直查权威高于内容反查：短消息「嗯。」也能认出是她说的', () => {
+    const out = buildQuotePart(
+      { refKey: 'REFIDX_x1', text: '嗯。' },
+      undefined,
+      BOT,
+      undefined,
+      undefined,
+      (refKey) => (refKey === 'REFIDX_x1' ? { id: BOT, name: '小羽' } : {}),
+    );
+    expect(out).toContain('你自己之前说过的话');
+  });
+
+  it('refKey 直查优先于内容反查：索引里她的同文更新，但 refKey 说是用户 → 标用户', () => {
+    const out = buildQuotePart(
+      { refKey: 'REFIDX_x2', text: '我先去吃饭了' },
+      undefined,
+      BOT,
+      indexHasBotSaying,
+      undefined,
+      (refKey) => (refKey === 'REFIDX_x2' ? { id: JMX, name: 'jmx' } : {}),
+    );
+    expect(out).toContain('jmx');
+    expect(out).not.toContain('你自己之前说过的话');
+  });
+
+  it('store 指向她自己时输出干净（不再套娃「这是「这是你自己…」」）', () => {
+    const out = buildQuotePart(
+      { text: '卡了就别催了 我这边也动不了', entry: { senderId: BOT, senderName: '小羽' } },
+      undefined,
+      BOT,
+      () => ({}),   // 索引未命中（被淘汰/清空的真实场景）
+    );
+    expect(out).toContain('你自己之前说过的话');
+    expect(out).not.toContain('这是「这是');
+  });
+
+  it('合并转发里 store 给的是转发者 → 不再整块套到每条上（她的话认得出是她说的）', () => {
+    // 转发者 = jmx；包里第一条其实她自己说过
+    const out = buildQuotePart({
+      text: '=== 消息 1 ===\n[消息内容] 这活我接\n\n=== 消息 2 ===\n[消息内容] 一句谁都没说过的话',
+      entry: { senderId: JMX, senderName: 'jmx' },
+    }, undefined, BOT, (text) => (text.includes('这活我接') ? indexHasBotSaying() : {}));
+    expect(out).toContain('你自己之前说的');            // 她那条认得出
+    expect(out).not.toContain('jmx (');                 // 不再整块套转发者
+    expect(out).toContain('某人');                      // 查不到的如实说
+  });
+
+  it('单条引用她发的图（MD5 命中）→ 认出是她发的', () => {
+    const MD5 = 'E0AF774221D4BF42638E274B60F0C62E';
+    const out = buildQuotePart(
+      {
+        text: '[image: E0AF774221D4BF42638E274B60F0C62E.png]',
+        attachments: [{ contentType: 'image/png', url: 'https://x', filename: `${MD5}.png` }],
+      },
+      undefined,
+      BOT,
+      () => ({}),
+      (md5s) => (md5s.includes(MD5.toLowerCase()) ? { id: BOT, name: '小羽' } : {}),
+    );
+    expect(out).toContain('你自己之前说过的话');
+  });
+});
