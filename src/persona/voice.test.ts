@@ -54,10 +54,18 @@ describe('VoiceService · 采集', () => {
 });
 
 describe('VoiceService · 抽取与护栏', () => {
+  /**
+   * 造样本。
+   *
+   * M39 之后**所有类别都要求跨会话**（同一个会话里重复不算说话习惯），
+   * 所以这里轮流用两个 key —— 否则抽不出任何候选。
+   * 真实线上同理：53 条样本只来自 2 个会话时，抽出来的全是中文常用词的巧合重复。
+   */
   function seedSamples(service: VoiceService, lines: string[]): void {
     for (const [i, l] of lines.entries()) {
-      service.recordUtterance(`t${i}`, 'group:g', l);
-      service.judgeIncoming('group:g', '哈哈确实');
+      const k = i % 2 === 0 ? 'group:g' : 'group:g2';
+      service.recordUtterance(`t${i}`, k, l);
+      service.judgeIncoming(k, '哈哈确实');
     }
   }
 
@@ -89,10 +97,12 @@ describe('VoiceService · 抽取与护栏', () => {
 });
 
 describe('VoiceService · 确认门槛与注入', () => {
+  // M39：同样要跨会话（两个 key 轮流）
   function seed(service: VoiceService, n: number, line: string): void {
     for (let i = 0; i < n; i++) {
-      service.recordUtterance(`t${i}`, 'group:g', line);
-      service.judgeIncoming('group:g', '哈哈确实');
+      const k = i % 2 === 0 ? 'group:g' : 'group:g2';
+      service.recordUtterance(`t${i}`, k, line);
+      service.judgeIncoming(k, '哈哈确实');
     }
   }
 
@@ -171,9 +181,11 @@ describe('口癖管线 · 从样本到生效（M32 修的死链）', () => {
 
     // 走完整真实路径：她说一句 → 记录 → 对方笑着接住 → service 判定
     // （不能直接往 caughtSamples 里灌，那样测不到 recordUtterance/judgeIncoming）
+    // M39：轮流两个会话，否则跨会话判据过不了（同一场里重复不算说话习惯）
     for (let i = 0; i < 6; i++) {
-      svc.voice.recordUtterance(`t${i}`, 'group:g', '说实话这事挺离谱的吧');
-      svc.judgeVoice('group:g', '哈哈哈确实');
+      const k = i % 2 === 0 ? 'group:g' : 'group:g2';
+      svc.voice.recordUtterance(`t${i}`, k, '说实话这事挺离谱的吧');
+      svc.judgeVoice(k, '哈哈哈确实');
     }
 
     const habits = svc.voice.activeHabits();
@@ -194,10 +206,11 @@ describe('markUsed · 使用计数必须真的在涨（M32）', () => {
   it('说出口癖后会计数，并刷新 lastSaidAt', () => {
     const dir2 = fs.mkdtempSync(path.join(os.tmpdir(), 'voice-used-'));
     const svc = new VoiceService(dir2);
-    // 造一条生效口癖
+    // 造一条生效口癖（M39：必须跨会话，两个 key 轮流）
     for (let i = 0; i < 6; i++) {
-      svc.recordUtterance(`t${i}`, 'group:g', '说实话这事挺离谱的吧');
-      svc.judgeIncoming('group:g', '哈哈哈确实');
+      const k = i % 2 === 0 ? 'group:g' : 'group:g2';
+      svc.recordUtterance(`t${i}`, k, '说实话这事挺离谱的吧');
+      svc.judgeIncoming(k, '哈哈哈确实');
     }
     svc.extractCandidates();
     svc.promoteHabits();

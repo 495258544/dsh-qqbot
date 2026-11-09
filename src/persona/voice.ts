@@ -328,7 +328,12 @@ export class VoiceService {
       // 它们不是"口癖"，是中文的公共零件。中间类提到 3 字起，
       // 因为中间词没有位置约束（句首/句尾至少还有个边界），
       // 只能靠长度换特异性。
-      for (const n of [3, 4]) {
+      // M39：原来从 3 字起。实测 53 条样本（仅 2 个会话）抽出来的
+      // '是我自己' '在不在意' '不一样。' '造出来' **全部是普通词组巧合重复**，
+      // 语境是"另一行是我自己的话""在不在意的人那儿分量不一样"——
+      // 一句话中间的任意片段，不是口癖。
+      // 提到 4 字：中间词没有位置约束，只能靠长度换特异性。
+      for (const n of [4, 5]) {
         for (let i = 0; i <= line.length - n; i++) {
           const p = line.slice(i, i + n);
           if (p.length === n) middles.set(p, (middles.get(p) ?? 0) + 1);
@@ -385,9 +390,23 @@ export class VoiceService {
 
     // 按出现频次优先：先 ends（收尾句式最像口癖），再 starts，最后 middles
     const byFreq = (m: Map<string, number>) => [...m.entries()].sort((a, b) => b[1] - a[1]);
-    for (const [w, n] of byFreq(ends)) consider('end', w, n);
-    for (const [w, n] of byFreq(starts)) consider('start', w, n);
-    for (const [w, n] of byFreq(middles)) consider('mid', w, n);
+    // M39：所有类别都要求**跨会话**出现（≥2 个不同 key）。
+    //
+    // 实测教训：53 条样本只来自 2 个会话时，句尾「一样」抽出 3 次，
+    // 但语境是"分量不一样"/"不全一样"/"其实不一样"——**语义完全不同**，
+    // 不是口癖而是中文常用词的巧合。她真正的口癖必须在不同对话里都出现。
+    //
+    // 代价：样本少时会抽不出东西（这是对的，宁缺毋滥）。
+    const crossSession = (w: string): boolean =>
+      new Set(samples.filter((s) => s.herLine.includes(w)).map((s) => s.key)).size >= 2;
+
+    for (const [w, n] of byFreq(ends)) if (crossSession(w)) consider('end', w, n);
+    for (const [w, n] of byFreq(starts)) if (crossSession(w)) consider('start', w, n);
+    // M39：mid 类额外要求**跨会话**出现。
+    // 理由：中间词没有位置锚点，同一个会话里连续几条都含某词组很正常
+    // （比如同一段话题里反复说"在意"），那不叫说话习惯。
+    // 跨会话才说明是"她这个人"的模式，而不是"这一场对话"的痕迹。
+    for (const [w, n] of byFreq(middles)) if (crossSession(w)) consider('mid', w, n);
 
     // 护栏：子串去重 —— "说实" 是 "说实话" 的子串，只保留更长更有意义的那个
     const all = [...picked.values()];

@@ -597,7 +597,8 @@ export class PersonaService {
       // 结果：own-life.json 里 lastFiredAt 有值但 firedToday=0 —— 触发了却被静默跳过。
       //
       // 正确语义应该按"睡觉时段"来：深夜到清晨别叫，白天晚上都算她的时间。
-      quiet: [23, 8],
+      // 现在从配置读（ownLifeQuietHours），这样能按作息调整而不改代码。
+      quiet: (this.deps.config.ownLifeQuietHours as [number, number]) ?? [23, 8],
       log: (m) => this.deps.logger.info(`persona: own-life ${m}`),
     });
     this.ownLife.start();
