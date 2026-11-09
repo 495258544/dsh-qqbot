@@ -14,6 +14,7 @@ import * as dns from 'node:dns';
 import type { Logger, RawAttachment } from '../types.ts';
 import type { MediaConfig } from '../config.ts';
 import { MEDIA_ROOT } from '../media/media-cleaner.ts';
+import { detectAnimatedContainer } from '../media/animated-container.ts';
 
 /** 默认富媒体下载大小上限（MB），可被 media.maxMB 覆盖 */
 const DEFAULT_MAX_MB = 200;
@@ -28,6 +29,8 @@ export interface DownloadedFile {
   contentType: 'image' | 'video' | 'file';
   /** 本地绝对路径；图片扩展名已按 magic bytes 校正（判类型以此为准，勿用 filename） */
   localPath: string;
+  /** 是否为动图容器（GIF / APNG / 动画 WebP），按文件字节判定，不靠扩展名 */
+  animated?: boolean;
 }
 
 /**
@@ -390,7 +393,12 @@ export async function downloadMediaAttachments(
       archiveImage(localPath, att.filename, media.archiveDir, logger);
     }
 
-    results.push({ filename: att.filename, contentType, localPath });
+    results.push({
+      filename: att.filename,
+      contentType,
+      localPath,
+      animated: contentType === 'image' && detectAnimatedContainer(buf) !== null,
+    });
   }
 
   return results;

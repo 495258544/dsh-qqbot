@@ -628,14 +628,14 @@ function buildDynamicCtx(
     lines.push('[Forward images]');
     let hasGif = false;
     for (const f of [...forwardFiles].sort((a, b) => a.nodeIndex - b.nodeIndex)) {
-      // localPath 的扩展名已按 magic bytes 校正，判动图以它为准（contentType 只有 image/video/file）
-      const animated = /\.gif$/i.test(f.localPath);
+      // 下载时已按文件字节判定动图容器（GIF / APNG / 动画 WebP），扩展名只作兜底
+      const animated = f.animated === true || /\.gif$/i.test(f.localPath);
       if (animated) hasGif = true;
       lines.push(`  #${f.nodeIndex}: Image: ${f.localPath}${animated ? '（动图）' : ''}`);
     }
     lines.push('（# 编号对应上面合并转发里的图片；不同 # 是不同消息、不同的图，不要混在一起描述）');
     if (hasGif) {
-      lines.push('（标了「动图」的是会动的图，不是静态截图；看图工具会自动抽帧，别把某一帧说成整张动图，也别凭一帧编动作）');
+      lines.push('（标了「动图」的是会动的图，不是静态截图；看图工具会抽帧并给出每帧时刻，别把某一帧说成整张动图，也别猜角色名或编剧情）');
     }
   }
 
@@ -644,10 +644,10 @@ function buildDynamicCtx(
   // 只有 vision.enabled 开着、工具确实注册了才给这条提示。
   if (visionEnabled && lines.some(l => l.includes('Image: '))) {
     lines.push('[看图] 要看清图里的内容就调用 qqbot_describe_image，image 传上面的本地绝对路径；别只凭文件名或占位符猜。');
-    if (lines.some(l => /\.gif($|\s|（)/i.test(l))) {
-      lines.push('（.gif 是动图：看图工具会自动抽首/中/末帧拼成一张图；描述时说清动作变化，'
-        + '不要把某一帧当成整张动图，更不要凭一帧编「挥手送别」这类剧情）');
-    }
+    // 对所有图片都给这条：APNG / 动画 WebP 没有 .gif 后缀，旧的 `.gif` 专属提示覆盖不到。
+    lines.push('（看图工具会按文件字节识别动图：GIF 抽 8 帧拼成网格并给出帧号与时刻；'
+      + 'APNG/动画 WebP 暂只能看到首帧，会明确标注「未完整解析」。'
+      + '描述时只说画面里实际可见的内容，不要猜角色名、作品名或剧情，也不要把某一帧当成整张动图）');
   }
 
   return lines.length > 0 ? lines.join('\n') + '\n\n' : '';

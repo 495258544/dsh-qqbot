@@ -2,8 +2,9 @@
  * GIF 动图抽帧回归用例。
  *
  * 背景：2026-11-09 群里一张 62 帧动图被当成静态图（只落首帧）描述成「挥手送别」；
- * 第二轮实测发现 4 帧均匀采样间隔 0.86s 仍会漏掉中段短暂动作。这里锁住：
- * 多帧必须抽成 PNG 网格联系表、抽样含首尾、变化峰值帧补空隙、解码失败静默回退。
+ * 第二轮实测发现 4 帧均匀采样间隔 0.86s 仍会漏掉短暂动作，改为 8 帧网格 + 差分补帧；
+ * 第三轮（17:10 真实群聊）确认抽帧本身有效、错在提示词诱导认角色，于是护栏前置通用化、
+ * 拼图改「无空格 + 几乎不缩放」选列、补总时长与背景色恢复。这里锁住这些行为。
  */
 import { describe, it, expect } from 'vitest';
 import { inflateSync } from 'node:zlib';
@@ -11,8 +12,10 @@ import {
   gifToContactSheet,
   sampleFrameIndices,
   selectSampledFrames,
+  chooseSheetColumns,
   animatedImagePrompt,
   ANIMATED_FALLBACK_PROMPT,
+  ANIMATED_GUARD_PROMPT,
   GIF_SAMPLE_COUNT,
 } from './gif-frames.ts';
 
@@ -124,6 +127,26 @@ describe('selectSampledFrames', () => {
   });
 });
 
+describe('chooseSheetColumns', () => {
+  it('8 帧 300x383：选 4 列 × 2 行，无空格且几乎不缩放（旧逻辑是 3×3 留空格）', () => {
+    // 3 列 × 3 行 = 9 格，右下留空；4 列 × 2 行只需缩到 0.985
+    expect(chooseSheetColumns(8, 300, 383, 1200, 1200)).toBe(4);
+  });
+
+  it('4 帧小图：默认选 2×2；宽上限太小时改 1 列竖排以避开整体缩放', () => {
+    expect(chooseSheetColumns(4, 8, 8, 1200, 1200)).toBe(2);
+    expect(chooseSheetColumns(4, 8, 8, 20, 1200)).toBe(1);
+  });
+
+  it('高度上限很小时优先「几乎不缩放」的横排方案', () => {
+    expect(chooseSheetColumns(4, 8, 8, 1200, 10)).toBe(4);
+  });
+
+  it('平分时取更宽（更符合时间轴阅读顺序）', () => {
+    expect(chooseSheetColumns(2, 8, 8, 1200, 1200)).toBe(2);
+  });
+});
+
 describe('gifToContactSheet', () => {
   it('多帧 GIF → PNG 网格联系表，抽到的帧内容各不相同', () => {
     const sheet = gifToContactSheet(new Uint8Array(FOUR_FRAME_GIF));
@@ -133,6 +156,7 @@ describe('gifToContactSheet', () => {
     expect(sheet!.columns).toBe(2);
     expect(sheet!.sampledTimes).toHaveLength(4);
     expect(sheet!.sampledTimes![0]).toBe(0);
+    expect(sheet!.durationSeconds).toBeGreaterThan(0);
     expect([...sheet!.data.subarray(0, 8)]).toEqual(PNG_MAGIC);
 
     const img = decodePng(sheet!.data);
@@ -163,8 +187,16 @@ describe('gifToContactSheet', () => {
     expect(img.height).toBe(50);
   });
 
-  it('超出宽/高上限时等比缩小到能看清的范围', () => {
+  it('高度上限很小时改横排，直接避开整体缩放（单帧保持 8x8）', () => {
     const sheet = gifToContactSheet(new Uint8Array(FOUR_FRAME_GIF), { maxHeight: 10 });
+    expect(sheet!.columns).toBe(4);
+    const img = decodePng(sheet!.data);
+    expect(img.width).toBe(50);
+    expect(img.height).toBe(8);
+  });
+
+  it('宽高都被卡死时仍等比缩小到上限内', () => {
+    const sheet = gifToContactSheet(new Uint8Array(FOUR_FRAME_GIF), { maxWidth: 10, maxHeight: 10 });
     expect(sheet!.width).toBe(10);
     expect(sheet!.height).toBe(10);
     expect(decodePng(sheet!.data).width).toBe(10);
@@ -179,25 +211,31 @@ describe('gifToContactSheet', () => {
 });
 
 describe('动图 prompt 护栏', () => {
-  it('说明帧序号/时刻与网格顺序，并明确禁止把单帧编成剧情', () => {
+  it('说明帧序号/时刻/格数/总时长与网格顺序，不再写死上一张图的特化动作', () => {
     const p = animatedImagePrompt({
       data: new Uint8Array(),
       totalFrames: 62,
       sampledFrames: [0, 12, 24, 37, 49, 61],
       sampledTimes: [0, 0.5, 1.0, 1.54, 2.04, 2.54],
+      durationSeconds: 2.62,
       columns: 3,
       width: 50,
       height: 50,
     });
     expect(p).toContain('62 帧');
-    expect(p).toContain('2.54 秒');
+    expect(p).toContain('2.62 秒');
+    expect(p).toContain('共 6 格');
     expect(p).toContain('第 38 帧');
     expect(p).toContain('1.54s');
     expect(p).toContain('从左到右、从上到下');
     expect(p).toContain('每行 3 张');
     expect(p).toContain('多数帧');
-    expect(p).toContain('短暂动作');
-    expect(p).toContain('挥手');
+    expect(p).toContain('少数帧');
+    expect(p).toContain('关键物件');
+    // 通用护栏，不能残留上一张女仆动图的特化词
+    expect(p).not.toContain('挥手');
+    expect(p).not.toContain('送别');
+    expect(p).not.toContain('拍打');
   });
 
   it('没有时刻信息时仍给帧序号，不编造秒数', () => {
@@ -205,6 +243,7 @@ describe('动图 prompt 护栏', () => {
       data: new Uint8Array(),
       totalFrames: 4,
       sampledFrames: [0, 1, 2, 3],
+      durationSeconds: 0,
       columns: 2,
       width: 22,
       height: 22,
@@ -213,8 +252,17 @@ describe('动图 prompt 护栏', () => {
     expect(p).not.toContain('秒');
   });
 
-  it('解码失败的兜底护栏同样禁止脑补动作', () => {
+  it('前置通用护栏明确禁止猜角色/作品名，并要求看不清就直说', () => {
+    expect(ANIMATED_GUARD_PROMPT).toContain('优先于下面所有指令');
+    expect(ANIMATED_GUARD_PROMPT).toContain('角色名');
+    expect(ANIMATED_GUARD_PROMPT).toContain('作品名');
+    expect(ANIMATED_GUARD_PROMPT).toContain('看不清');
+  });
+
+  it('解码失败的兜底护栏禁止脑补动作与身份', () => {
     expect(ANIMATED_FALLBACK_PROMPT).toContain('动图');
+    expect(ANIMATED_FALLBACK_PROMPT).toContain('未完整解析');
     expect(ANIMATED_FALLBACK_PROMPT).toContain('不要');
+    expect(ANIMATED_FALLBACK_PROMPT).not.toContain('挥手');
   });
 });

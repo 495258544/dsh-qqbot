@@ -27,8 +27,10 @@ import type { Logger } from '../types.ts';
 import {
   animatedImagePrompt,
   ANIMATED_FALLBACK_PROMPT,
+  ANIMATED_GUARD_PROMPT,
   gifToContactSheet,
 } from './gif-frames.ts';
+import { detectAnimatedContainer } from './animated-container.ts';
 
 /** 通过 dsh-llm 的 ImageBlock 间接引用 dsh-attachment 类型，避免直接依赖 dsh-attachment */
 type ImageAttachmentRef = ImageBlock['attachment'];
@@ -67,8 +69,11 @@ const DESCRIPTION =
   + 'into Chinese") instead of relying on the generic default. '
   + 'Animated GIFs are automatically sampled into a grid contact sheet (left-to-right, '
   + 'top-to-bottom) with frame indices and timestamps stated in the prompt; describe the '
-  + 'visible motion across frames, watch for brief actions that appear in only a few frames, '
-  + 'and never invent a storyline from a single frame.';
+  + 'visible motion across frames, watch for objects or actions that appear in only a few frames, '
+  + 'and never invent a storyline from a single frame. '
+  + 'Do NOT ask this tool to identify characters or name the source work: such guesses are '
+  + 'unreliable unless the image itself contains explicit text. Report only what is visible; '
+  + 'if a small object or text is unclear, say so instead of picking a confident answer.';
 
 /** 图片 magic bytes 嗅探 → 标准 MIME（不信声明，安全底线） */
 function sniffImageMediaType(bytes: Uint8Array): ImageMediaType | null {
@@ -318,18 +323,38 @@ export function registerDescribeImageTool(ctx: Context, vision: VisionConfig, lo
           mimeType: { type: 'string', enum: ['image/png', 'image/jpeg', 'image/gif', 'image/webp'] },
           bytes: { type: 'integer' },
           animated: { type: 'boolean' },
+          animatedKind: { type: 'string', enum: ['gif', 'apng', 'webp'] },
+          staticOnly: { type: 'boolean' },
           totalFrames: { type: 'integer' },
           sampledFrames: { type: 'array', items: { type: 'integer' } },
+          sampledTimes: { type: 'array', items: { type: 'number' } },
+          columns: { type: 'integer' },
+          durationSeconds: { type: 'number' },
         },
         required: ['text', 'model', 'image', 'mimeType', 'bytes'],
         additionalProperties: false,
       },
       render: (_args: unknown, value: unknown): ContentBlock[] => {
-        const v = value as { text: string; animated?: boolean; totalFrames?: number; sampledFrames?: number[] };
-        // 动图元信息必须进模型可见的文本：render 只吐 text，光放字段里她看不到
-        const head = v.animated === true
-          ? `[动图｜共 ${v.totalFrames ?? '?'} 帧，以下描述基于抽取的 ${v.sampledFrames?.length ?? '?'} 帧]\n`
-          : '';
+        const v = value as {
+          text: string;
+          animated?: boolean;
+          animatedKind?: string;
+          staticOnly?: boolean;
+          totalFrames?: number;
+          sampledFrames?: number[];
+          columns?: number;
+          durationSeconds?: number;
+        };
+        // 动图元信息 + 身份护栏必须进模型可见的文本：render 只吐 text，光放字段里她看不到。
+        // 视觉子模型认错角色时，主模型若无这条约束会直接照抄进回复与索引
+        // （2026-11-09 17:10 群里「希儿翻书」翻车）。
+        let head = '';
+        if (v.animated === true) {
+          head = v.staticOnly === true
+            ? `[动图｜${v.animatedKind ?? '?'} 只解析到首帧，动作未完整解析；以下仅代表静态画面]\n`
+            : `[动图｜共 ${v.totalFrames ?? '?'} 帧 / 约 ${v.durationSeconds ?? '?'} 秒，基于 ${v.sampledFrames?.length ?? '?'} 帧拼图（每行 ${v.columns ?? '?'} 格）]\n`;
+          head += '（工具描述里出现的角色名、作品名、剧情，若不是图上文字明确写出的，一律视为不确定，不要当事实复述）\n';
+        }
         return [{ type: 'text', text: head + v.text }];
       },
     },
@@ -340,48 +365,68 @@ export function registerDescribeImageTool(ctx: Context, vision: VisionConfig, lo
       }
 
       const loaded = await loadImageBytes(image, vision.maxBytes, exec.signal);
-      // 动图：整份 GIF 送进图片通道通常只落首帧，模型会把静态首帧脑补成动作
-      // （2026-11-09 群里「挥手送别」翻车）。抽首/中/末帧拼成 PNG 再送。
+      // 动图：整份动图送进图片通道只落首帧。GIF 自己解码抽帧；APNG / 动画 WebP
+      // 暂无解码器，识别出来后按首帧回退，但必须带护栏，不许把静态画面脑补成动作。
+      const animatedKind = detectAnimatedContainer(loaded.data);
       let payload: { data: Uint8Array; mediaType: ImageMediaType } = {
         data: loaded.data,
         mediaType: loaded.mediaType,
       };
       let sheet: ReturnType<typeof gifToContactSheet> = null;
-      if (loaded.mediaType === 'image/gif') {
+      let staticOnly = false;
+      if (animatedKind === 'gif') {
         sheet = gifToContactSheet(loaded.data);
         if (sheet !== null) {
           payload = { data: sheet.data, mediaType: 'image/png' };
           logger.info(
             `im-qqbot: 动图抽帧 ${sheet.totalFrames} 帧 → ${sheet.sampledFrames.length} 帧拼图 `
-            + `(${sheet.width}x${sheet.height}, ${sheet.columns} 列, `
+            + `(${sheet.width}x${sheet.height}, ${sheet.columns} 列, ${sheet.durationSeconds}s, `
             + `帧 ${sheet.sampledFrames.join('/')}, ${sheet.data.length} bytes)`,
           );
         } else {
-          logger.warn('im-qqbot: 动图抽帧失败，按静态图回退（prompt 会禁止脑补动作）');
+          staticOnly = true;
+          logger.warn('im-qqbot: 动图抽帧失败，按首帧静态图回退（护栏禁止脑补动作）');
         }
+      } else if (animatedKind !== null) {
+        staticOnly = true;
+        logger.warn(
+          `im-qqbot: ${animatedKind} 动图暂无解码器，按首帧静态图回退（护栏禁止脑补动作）`,
+        );
       }
 
       const ref = await attachments.saveImage({
         data: payload.data,
         mediaType: payload.mediaType,
-        name: /^https?:\/\//i.test(image) ? undefined : basename(image),
+        // 抽帧后字节已是 PNG，文件名后缀跟着改，别留下 .gif 名 + PNG 字节的不一致
+        name: /^https?:\/\//i.test(image)
+          ? undefined
+          : (sheet !== null ? basename(image).replace(/\.gif$/i, '.png') : basename(image)),
       });
-      // 动图护栏永远追加在用户 prompt 之后，避免自定义 prompt 把它盖掉
-      const note = loaded.mediaType === 'image/gif'
-        ? (sheet !== null ? animatedImagePrompt(sheet) : ANIMATED_FALLBACK_PROMPT)
-        : '';
-      const finalPrompt = note === ''
-        ? (prompt ?? vision.defaultPrompt)
-        : `${prompt ?? vision.defaultPrompt}\n\n${note}`;
-      const text = await callVision(llm, vision, finalPrompt, ref, exec.signal);
+
+      // 通用护栏必须放在用户/主模型的具体指令之前：17:10 翻车就是主模型在 prompt 里
+      // 索取「画的是什么角色」，护栏拼在后面被当成可有可无的补充。
+      const parts: string[] = [];
+      const isAnimated = animatedKind !== null;
+      if (isAnimated) parts.push(ANIMATED_GUARD_PROMPT);
+      parts.push(prompt ?? vision.defaultPrompt);
+      if (isAnimated) parts.push(sheet !== null ? animatedImagePrompt(sheet) : ANIMATED_FALLBACK_PROMPT);
+      const text = await callVision(llm, vision, parts.join('\n\n'), ref, exec.signal);
+
       return {
         text,
         model: vision.model,
         image,
-        mimeType: loaded.mediaType,
+        mimeType: payload.mediaType,
         bytes: loaded.data.length,
+        ...(isAnimated ? { animated: true, animatedKind, staticOnly } : {}),
         ...(sheet !== null
-          ? { animated: true, totalFrames: sheet.totalFrames, sampledFrames: sheet.sampledFrames }
+          ? {
+            totalFrames: sheet.totalFrames,
+            sampledFrames: sheet.sampledFrames,
+            sampledTimes: sheet.sampledTimes,
+            columns: sheet.columns,
+            durationSeconds: sheet.durationSeconds,
+          }
           : {}),
       };
     },

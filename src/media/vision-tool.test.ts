@@ -10,6 +10,7 @@ import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'n
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { parse as hostParse } from 'yaml';
+import { detectAnimatedContainer } from './animated-container.ts';
 import type { VisionConfig } from '../config.ts';
 import type { Logger } from '../types.ts';
 
@@ -191,5 +192,70 @@ describe('ensureVisionInputModal — 误报澄清（未复现）', () => {
     const before = hostParse(content) as { prompts: { system: string } };
     const after = hostParse(readFileSync(settingsPath, 'utf8')) as { prompts: { system: string } };
     expect(after.prompts.system).toBe(before.prompts.system);
+  });
+});
+
+/** 最小 PNG chunk（检测器只读结构，不校验 CRC） */
+function pngChunk(type: string, size: number): Uint8Array {
+  const out = new Uint8Array(12 + size);
+  new DataView(out.buffer).setUint32(0, size);
+  for (let i = 0; i < 4; i += 1) out[4 + i] = type.charCodeAt(i);
+  return out;
+}
+
+function riffChunk(type: string, size: number): Uint8Array {
+  const out = new Uint8Array(8 + size);
+  for (let i = 0; i < 4; i += 1) out[i] = type.charCodeAt(i);
+  new DataView(out.buffer).setUint32(4, size, true);
+  return out;
+}
+
+function cat(...parts: Uint8Array[]): Uint8Array {
+  const out = new Uint8Array(parts.reduce((s, p) => s + p.length, 0));
+  let o = 0;
+  for (const p of parts) { out.set(p, o); o += p.length; }
+  return out;
+}
+
+const PNG_SIG = Uint8Array.of(0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a);
+const WEBP_HEADER = cat(
+  Uint8Array.of(0x52, 0x49, 0x46, 0x46),
+  new Uint8Array(4),
+  Uint8Array.of(0x57, 0x45, 0x42, 0x50),
+);
+
+describe('detectAnimatedContainer — GIF 之外的动图不再被当静态图', () => {
+  it('GIF → gif', () => {
+    expect(detectAnimatedContainer(
+      Uint8Array.of(0x47, 0x49, 0x46, 0x38, 0x39, 0x61, 1, 0, 1, 0, 0, 0),
+    )).toBe('gif');
+  });
+
+  it('PNG 带 acTL → apng；普通静态 PNG → null', () => {
+    expect(detectAnimatedContainer(cat(
+      PNG_SIG, pngChunk('IHDR', 13), pngChunk('acTL', 8), pngChunk('IDAT', 4), pngChunk('IEND', 0),
+    ))).toBe('apng');
+    expect(detectAnimatedContainer(cat(
+      PNG_SIG, pngChunk('IHDR', 13), pngChunk('IDAT', 4), pngChunk('IEND', 0),
+    ))).toBeNull();
+  });
+
+  it('acTL 出现在 IDAT 之后不算合法 APNG，不误判静态图', () => {
+    expect(detectAnimatedContainer(cat(
+      PNG_SIG, pngChunk('IHDR', 13), pngChunk('IDAT', 4), pngChunk('acTL', 8), pngChunk('IEND', 0),
+    ))).toBeNull();
+  });
+
+  it('WEBP 带 ANIM/ANMF → webp；普通静态 WebP → null', () => {
+    expect(detectAnimatedContainer(cat(
+      WEBP_HEADER, riffChunk('VP8X', 10), riffChunk('ANIM', 6), riffChunk('ANMF', 16),
+    ))).toBe('webp');
+    expect(detectAnimatedContainer(cat(WEBP_HEADER, riffChunk('VP8 ', 10)))).toBeNull();
+  });
+
+  it('截断 / 非图片 / 空数据一律 null（宁可漏判不可误判）', () => {
+    expect(detectAnimatedContainer(new Uint8Array())).toBeNull();
+    expect(detectAnimatedContainer(new Uint8Array(20))).toBeNull();
+    expect(detectAnimatedContainer(PNG_SIG)).toBeNull();
   });
 });
