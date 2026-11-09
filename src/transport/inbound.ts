@@ -20,6 +20,7 @@ import {
   classifyContentType,
   isVoiceContentType,
   type DownloadedFile,
+  type DownloadedForwardFile,
   type MediaKind,
 } from './attachment.ts';
 import { clearGroupHistory } from '../features/history-store.ts';
@@ -71,6 +72,8 @@ interface MiddlewareState {
   processedAttachments?: ProcessedAttachment[];
   downloadedFiles?: DownloadedFile[];
   downloadedQuoteFiles?: DownloadedFile[];
+  /** 合并转发内下载成功的图（带「第几条消息」编号） */
+  downloadedForwardFiles?: DownloadedForwardFile[];
   [key: string]: unknown;
 }
 
@@ -156,6 +159,7 @@ export async function handleInbound(
         }
       : undefined,
     config.persona?.ownerOpenids,
+    config.vision.enabled,
   );
 
   // 把"先发的图"补进 agentBody，否则 agent 不知道这几张图的存在
@@ -272,6 +276,8 @@ function assembleAgentBody(
   lookupImage?: (md5s: string[]) => { id?: string; name?: string },
   /** 主人 openid 列表（命中时说话人标签带「·主人」—— 否则主人用小号说话她认不出来） */
   ownerIds?: readonly string[],
+  /** vision.enabled 开着才提示她用看图工具，避免指向一个没注册的工具 */
+  visionEnabled = false,
 ): string | null {
   const isGroup = scope === 'group';
   const wasMentioned = state.mention?.wasMentioned ?? false;
@@ -286,10 +292,11 @@ function assembleAgentBody(
     botOpenid || detectBotSelfId(state.history),
     lookupSender,
     lookupImage,
+    (state.downloadedForwardFiles ?? []).map(d => d.nodeIndex),
   );
   const userMessage = buildUserMessage(userContent, quotePart, msg.senderId, msg.senderName, isGroup, wasMentioned, ownerIds);
 
-  const dynamicCtx = buildDynamicCtx(msg, state);
+  const dynamicCtx = buildDynamicCtx(msg, state, visionEnabled);
 
   const base = dynamicCtx ? `${dynamicCtx}${userMessage}` : userMessage;
   const agentBody = buildAgentBody(base, state.history, isGroup, wasMentioned, anchor);
@@ -377,6 +384,8 @@ export function buildQuotePart(
   botSelfId?: string,
   lookupSender?: (quotedText: string) => { id?: string; name?: string },
   lookupImage?: (md5s: string[]) => { id?: string; name?: string },
+  /** 已下载成功的转发图所在条号（1-based）；有图时在占位符上挂 #N 锚点 */
+  forwardImageNumbers?: readonly number[],
 ): string {
   if (!quote?.text && !quote?.entry?.content) return '';
 
@@ -476,7 +485,11 @@ export function buildQuotePart(
           who = labelOf(content, quote.entry?.senderId, quote.entry?.senderName);
         }
 
-        lines.push(`${head}\n[消息内容] （${who}发了一张${zh}）[${zh}]`);
+        // 下载成功的图挂一个 #N 锚点，和下方 [Forward images] 里的编号对应。
+        // 转发里常有多张不同消息/不同场次的图，没有编号模型会把它们混着说。
+        const nodeNo = Number(head.match(/消息\s*(\d+)/)?.[1]) || i + 1;
+        const anchor = forwardImageNumbers?.includes(nodeNo) === true ? ` #${nodeNo}` : '';
+        lines.push(`${head}\n[消息内容] （${who}发了一张${zh}）[${zh}${anchor}]`);
         return;
       }
 
@@ -553,7 +566,11 @@ function buildUserMessage(
 /**
  * Layer 4: 媒体元数据上下文（图片/视频/文件本地路径 + 语音 ASR + 引用附件）
  */
-function buildDynamicCtx(msg: ProcessedMessage, state: MiddlewareState): string {
+function buildDynamicCtx(
+  msg: ProcessedMessage,
+  state: MiddlewareState,
+  visionEnabled: boolean,
+): string {
   const lines: string[] = [];
 
   if (msg.attachments && msg.attachments.length > 0) {
@@ -597,6 +614,25 @@ function buildDynamicCtx(msg: ProcessedMessage, state: MiddlewareState): string 
       }
       lines.push(`  - ${renderMediaLine(kind, qa.filename, d?.localPath, qa.url, undefined)}`);
     }
+  }
+
+  // 合并转发内的图：按「第几条」编号列出，和引文占位符上的 #N 对应。
+  // 一条转发里常有多张来自不同消息的图（例如几场不同的战绩截图），
+  // 平铺成一串路径会让模型把 A 图的内容安到 B 图上 —— 显式分开 + 写清护栏。
+  const forwardFiles = state.downloadedForwardFiles ?? [];
+  if (forwardFiles.length > 0) {
+    lines.push('[Forward images]');
+    for (const f of [...forwardFiles].sort((a, b) => a.nodeIndex - b.nodeIndex)) {
+      lines.push(`  #${f.nodeIndex}: Image: ${f.localPath}`);
+    }
+    lines.push('（# 编号对应上面合并转发里的图片；不同 # 是不同消息、不同的图，不要混在一起描述）');
+  }
+
+  // 图片进上下文的是「本地路径」这行文字，不是像素。要真看懂，得让她主动把路径
+  // 交给看图工具；否则模型只会照着文件名/占位符猜（群里那些「看不到」多半就是这么来的）。
+  // 只有 vision.enabled 开着、工具确实注册了才给这条提示。
+  if (visionEnabled && lines.some(l => l.includes('Image: '))) {
+    lines.push('[看图] 要看清图里的内容就调用 qqbot_describe_image，image 传上面的本地绝对路径；别只凭文件名或占位符猜。');
   }
 
   return lines.length > 0 ? lines.join('\n') + '\n\n' : '';
