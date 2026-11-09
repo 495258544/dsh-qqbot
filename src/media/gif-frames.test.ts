@@ -1,14 +1,16 @@
 /**
  * GIF 动图抽帧回归用例。
  *
- * 背景：2026-11-09 群里一张 62 帧动图被当成静态图（只落首帧）描述成「挥手送别」。
- * 这里锁住：多帧必须抽成 PNG 联系表、抽样含首尾、解码失败必须静默回退。
+ * 背景：2026-11-09 群里一张 62 帧动图被当成静态图（只落首帧）描述成「挥手送别」；
+ * 第二轮实测发现 4 帧均匀采样间隔 0.86s 仍会漏掉中段短暂动作。这里锁住：
+ * 多帧必须抽成 PNG 网格联系表、抽样含首尾、变化峰值帧补空隙、解码失败静默回退。
  */
 import { describe, it, expect } from 'vitest';
 import { inflateSync } from 'node:zlib';
 import {
   gifToContactSheet,
   sampleFrameIndices,
+  selectSampledFrames,
   animatedImagePrompt,
   ANIMATED_FALLBACK_PROMPT,
   GIF_SAMPLE_COUNT,
@@ -81,28 +83,91 @@ describe('sampleFrameIndices', () => {
   });
 });
 
+describe('selectSampledFrames', () => {
+  it('默认送 8 帧（均匀基线 + 差分补空隙）', () => {
+    expect(GIF_SAMPLE_COUNT).toBe(8);
+    const s = selectSampledFrames(62, new Array<number>(62).fill(0), GIF_SAMPLE_COUNT);
+    expect(s.length).toBe(8);
+    expect(s[0]).toBe(0);
+    expect(s[s.length - 1]).toBe(61);
+    expect(s).toEqual([...s].sort((a, b) => a - b));
+    expect(new Set(s).size).toBe(s.length);
+  });
+
+  it('帧间变化峰值会被补进均匀采样的空隙', () => {
+    const diffs = new Array<number>(62).fill(0);
+    diffs[30] = 100; // 不在 6 帧均匀基线里
+    const s = selectSampledFrames(62, diffs, 8);
+    expect(s).toContain(30);
+    expect(s.length).toBe(8);
+    expect(s[0]).toBe(0);
+    expect(s[s.length - 1]).toBe(61);
+  });
+
+  it('峰值紧贴已有采样点时被最小间隔挡掉，不扎堆', () => {
+    const diffs = new Array<number>(62).fill(0);
+    diffs[1] = 100; // 紧贴首帧
+    const s = selectSampledFrames(62, diffs, 8);
+    expect(s).not.toContain(1);
+    expect(s.length).toBe(8);
+  });
+
+  it('抽样数不超过均匀基线时退化为纯均匀', () => {
+    expect(selectSampledFrames(62, new Array<number>(62).fill(1), 4)).toEqual([0, 20, 41, 61]);
+  });
+
+  it('整段几乎不动也能凑够帧数，时间覆盖不塌', () => {
+    const s = selectSampledFrames(62, new Array<number>(62).fill(0), 8);
+    expect(s.length).toBe(8);
+    expect(s[0]).toBe(0);
+    expect(s[s.length - 1]).toBe(61);
+  });
+});
+
 describe('gifToContactSheet', () => {
-  it('多帧 GIF → PNG 联系表，抽到的帧内容各不相同', () => {
+  it('多帧 GIF → PNG 网格联系表，抽到的帧内容各不相同', () => {
     const sheet = gifToContactSheet(new Uint8Array(FOUR_FRAME_GIF));
     expect(sheet).not.toBeNull();
     expect(sheet!.totalFrames).toBe(4);
     expect(sheet!.sampledFrames).toEqual([0, 1, 2, 3]);
+    expect(sheet!.columns).toBe(2);
+    expect(sheet!.sampledTimes).toHaveLength(4);
+    expect(sheet!.sampledTimes![0]).toBe(0);
     expect([...sheet!.data.subarray(0, 8)]).toEqual(PNG_MAGIC);
 
     const img = decodePng(sheet!.data);
-    // 4 帧 × 8px + 3 条 6px 灰缝 = 50px 宽
-    expect(img.width).toBe(50);
-    expect(img.height).toBe(8);
-    const colors = [0, 1, 2, 3].map((k) => pixel(img.rgb, img.width, k * 14, 0).join(','));
+    // 2 列 × 2 行：每格 8px + 6px 灰缝 → 22x22
+    expect(img.width).toBe(22);
+    expect(img.height).toBe(22);
+    const colors = [0, 1, 2, 3].map((k) => pixel(
+      img.rgb, img.width, (k % 2) * 14, Math.floor(k / 2) * 14,
+    ).join(','));
     expect(new Set(colors).size).toBe(4);
-    // 分隔条是浅灰底
+    // 水平灰缝仍是浅灰底
     expect(pixel(img.rgb, img.width, 10, 0)).toEqual([0xf2, 0xf2, 0xf2]);
   });
 
   it('限制抽样数时只抽指定帧数', () => {
     const sheet = gifToContactSheet(new Uint8Array(FOUR_FRAME_GIF), { samples: 2 });
     expect(sheet!.sampledFrames).toEqual([0, 3]);
+    expect(sheet!.columns).toBe(2);
     expect(decodePng(sheet!.data).width).toBe(22);
+  });
+
+  it('单行会超宽时自动换成多行网格，单帧不被整体缩小', () => {
+    const sheet = gifToContactSheet(new Uint8Array(FOUR_FRAME_GIF), { maxWidth: 20 });
+    expect(sheet!.columns).toBe(1);
+    const img = decodePng(sheet!.data);
+    // 4 帧竖排：8 x (4*8 + 3*6) = 8x50，无需整体降采样
+    expect(img.width).toBe(8);
+    expect(img.height).toBe(50);
+  });
+
+  it('超出宽/高上限时等比缩小到能看清的范围', () => {
+    const sheet = gifToContactSheet(new Uint8Array(FOUR_FRAME_GIF), { maxHeight: 10 });
+    expect(sheet!.width).toBe(10);
+    expect(sheet!.height).toBe(10);
+    expect(decodePng(sheet!.data).width).toBe(10);
   });
 
   it('单帧 GIF / 非 GIF / 截断数据都返回 null（回退，不抛错）', () => {
@@ -111,23 +176,41 @@ describe('gifToContactSheet', () => {
     expect(gifToContactSheet(new Uint8Array(FOUR_FRAME_GIF.subarray(0, 40)))).toBeNull();
     expect(gifToContactSheet(new Uint8Array())).toBeNull();
   });
-
-  it('超宽拼图会被等比缩小到 maxWidth 以内', () => {
-    const sheet = gifToContactSheet(new Uint8Array(FOUR_FRAME_GIF), { maxWidth: 20 });
-    expect(sheet!.width).toBe(20);
-    const img = decodePng(sheet!.data);
-    expect(img.width).toBe(20);
-  });
 });
 
 describe('动图 prompt 护栏', () => {
-  it('说明帧序号与顺序，并明确禁止把单帧编成剧情', () => {
-    const p = animatedImagePrompt({ data: new Uint8Array(), totalFrames: 62, sampledFrames: [0, 20, 41, 61], width: 50, height: 8 });
+  it('说明帧序号/时刻与网格顺序，并明确禁止把单帧编成剧情', () => {
+    const p = animatedImagePrompt({
+      data: new Uint8Array(),
+      totalFrames: 62,
+      sampledFrames: [0, 12, 24, 37, 49, 61],
+      sampledTimes: [0, 0.5, 1.0, 1.54, 2.04, 2.54],
+      columns: 3,
+      width: 50,
+      height: 50,
+    });
     expect(p).toContain('62 帧');
-    expect(p).toContain('1、21、42、62');
-    expect(p).toContain('从左到右');
-    expect(p).toContain('不要');
+    expect(p).toContain('2.54 秒');
+    expect(p).toContain('第 38 帧');
+    expect(p).toContain('1.54s');
+    expect(p).toContain('从左到右、从上到下');
+    expect(p).toContain('每行 3 张');
+    expect(p).toContain('多数帧');
+    expect(p).toContain('短暂动作');
     expect(p).toContain('挥手');
+  });
+
+  it('没有时刻信息时仍给帧序号，不编造秒数', () => {
+    const p = animatedImagePrompt({
+      data: new Uint8Array(),
+      totalFrames: 4,
+      sampledFrames: [0, 1, 2, 3],
+      columns: 2,
+      width: 22,
+      height: 22,
+    });
+    expect(p).toContain('第 1 帧');
+    expect(p).not.toContain('秒');
   });
 
   it('解码失败的兜底护栏同样禁止脑补动作', () => {

@@ -65,8 +65,10 @@ const DESCRIPTION =
   + 'image text, or photo understanding. Always pass an explicit `prompt` with a precise '
   + 'instruction (e.g. "transcribe all text", "extract the table as CSV", "translate the text '
   + 'into Chinese") instead of relying on the generic default. '
-  + 'Animated GIFs are automatically sampled into a left-to-right frame contact sheet; '
-  + 'describe the visible motion across frames and never invent a storyline from a single frame.';
+  + 'Animated GIFs are automatically sampled into a grid contact sheet (left-to-right, '
+  + 'top-to-bottom) with frame indices and timestamps stated in the prompt; describe the '
+  + 'visible motion across frames, watch for brief actions that appear in only a few frames, '
+  + 'and never invent a storyline from a single frame.';
 
 /** 图片 magic bytes 嗅探 → 标准 MIME（不信声明，安全底线） */
 function sniffImageMediaType(bytes: Uint8Array): ImageMediaType | null {
@@ -351,7 +353,8 @@ export function registerDescribeImageTool(ctx: Context, vision: VisionConfig, lo
           payload = { data: sheet.data, mediaType: 'image/png' };
           logger.info(
             `im-qqbot: 动图抽帧 ${sheet.totalFrames} 帧 → ${sheet.sampledFrames.length} 帧拼图 `
-            + `(${sheet.width}x${sheet.height}, ${sheet.data.length} bytes)`,
+            + `(${sheet.width}x${sheet.height}, ${sheet.columns} 列, `
+            + `帧 ${sheet.sampledFrames.join('/')}, ${sheet.data.length} bytes)`,
           );
         } else {
           logger.warn('im-qqbot: 动图抽帧失败，按静态图回退（prompt 会禁止脑补动作）');
