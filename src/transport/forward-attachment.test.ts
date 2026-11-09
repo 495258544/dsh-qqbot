@@ -122,4 +122,21 @@ describe('buildQuotePart · 转发图锚点', () => {
     expect(buildQuotePart(quote)).toContain('[图片]');
     expect(buildQuotePart(quote)).not.toContain('#1');
   });
+
+  it('QQ 的「类型:动图」要标成动图，别和静态图片混成一回事', () => {
+    const gifQuote = {
+      text: [
+        '=== 消息 1 ===',
+        '[消息内容] 这次全都收到了',
+        '',
+        '=== 消息 2 ===',
+        '[附件1] 类型:动图 文件名:5574898799B3806A35053EF9C34106DE.gif 尺寸:180x242 大小:1.3MB URL:'
+          + url('GIF'),
+      ].join('\n'),
+    };
+    const out = buildQuotePart(gifQuote, [], undefined, undefined, undefined, [2]);
+    expect(out).toContain('发了一张动图');
+    expect(out).toContain('[动图 #2]');
+    expect(out).not.toContain('[图片 #2]');
+  });
 });

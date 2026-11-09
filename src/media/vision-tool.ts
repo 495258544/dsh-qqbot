@@ -24,6 +24,11 @@ import type {
 } from '@deepseek-ai/dsh-llm';
 import type { VisionConfig } from '../config.ts';
 import type { Logger } from '../types.ts';
+import {
+  animatedImagePrompt,
+  ANIMATED_FALLBACK_PROMPT,
+  gifToContactSheet,
+} from './gif-frames.ts';
 
 /** 通过 dsh-llm 的 ImageBlock 间接引用 dsh-attachment 类型，避免直接依赖 dsh-attachment */
 type ImageAttachmentRef = ImageBlock['attachment'];
@@ -59,7 +64,9 @@ const DESCRIPTION =
   + 'or when a task needs OCR, chart/diagram reading, screenshot or UI analysis, translation of '
   + 'image text, or photo understanding. Always pass an explicit `prompt` with a precise '
   + 'instruction (e.g. "transcribe all text", "extract the table as CSV", "translate the text '
-  + 'into Chinese") instead of relying on the generic default.';
+  + 'into Chinese") instead of relying on the generic default. '
+  + 'Animated GIFs are automatically sampled into a left-to-right frame contact sheet; '
+  + 'describe the visible motion across frames and never invent a storyline from a single frame.';
 
 /** 图片 magic bytes 嗅探 → 标准 MIME（不信声明，安全底线） */
 function sniffImageMediaType(bytes: Uint8Array): ImageMediaType | null {
@@ -308,13 +315,21 @@ export function registerDescribeImageTool(ctx: Context, vision: VisionConfig, lo
           image: { type: 'string' },
           mimeType: { type: 'string', enum: ['image/png', 'image/jpeg', 'image/gif', 'image/webp'] },
           bytes: { type: 'integer' },
+          animated: { type: 'boolean' },
+          totalFrames: { type: 'integer' },
+          sampledFrames: { type: 'array', items: { type: 'integer' } },
         },
         required: ['text', 'model', 'image', 'mimeType', 'bytes'],
         additionalProperties: false,
       },
-      render: (_args: unknown, value: unknown): ContentBlock[] => [
-        { type: 'text', text: (value as { text: string }).text },
-      ],
+      render: (_args: unknown, value: unknown): ContentBlock[] => {
+        const v = value as { text: string; animated?: boolean; totalFrames?: number; sampledFrames?: number[] };
+        // 动图元信息必须进模型可见的文本：render 只吐 text，光放字段里她看不到
+        const head = v.animated === true
+          ? `[动图｜共 ${v.totalFrames ?? '?'} 帧，以下描述基于抽取的 ${v.sampledFrames?.length ?? '?'} 帧]\n`
+          : '';
+        return [{ type: 'text', text: head + v.text }];
+      },
     },
     async execute(args: unknown, exec: { signal: AbortSignal }): Promise<Record<string, unknown>> {
       const { image, prompt } = args as DescribeImageArgs;
@@ -323,13 +338,49 @@ export function registerDescribeImageTool(ctx: Context, vision: VisionConfig, lo
       }
 
       const loaded = await loadImageBytes(image, vision.maxBytes, exec.signal);
-      const ref = await attachments.saveImage({
+      // 动图：整份 GIF 送进图片通道通常只落首帧，模型会把静态首帧脑补成动作
+      // （2026-11-09 群里「挥手送别」翻车）。抽首/中/末帧拼成 PNG 再送。
+      let payload: { data: Uint8Array; mediaType: ImageMediaType } = {
         data: loaded.data,
         mediaType: loaded.mediaType,
+      };
+      let sheet: ReturnType<typeof gifToContactSheet> = null;
+      if (loaded.mediaType === 'image/gif') {
+        sheet = gifToContactSheet(loaded.data);
+        if (sheet !== null) {
+          payload = { data: sheet.data, mediaType: 'image/png' };
+          logger.info(
+            `im-qqbot: 动图抽帧 ${sheet.totalFrames} 帧 → ${sheet.sampledFrames.length} 帧拼图 `
+            + `(${sheet.width}x${sheet.height}, ${sheet.data.length} bytes)`,
+          );
+        } else {
+          logger.warn('im-qqbot: 动图抽帧失败，按静态图回退（prompt 会禁止脑补动作）');
+        }
+      }
+
+      const ref = await attachments.saveImage({
+        data: payload.data,
+        mediaType: payload.mediaType,
         name: /^https?:\/\//i.test(image) ? undefined : basename(image),
       });
-      const text = await callVision(llm, vision, prompt ?? vision.defaultPrompt, ref, exec.signal);
-      return { text, model: vision.model, image, mimeType: loaded.mediaType, bytes: loaded.data.length };
+      // 动图护栏永远追加在用户 prompt 之后，避免自定义 prompt 把它盖掉
+      const note = loaded.mediaType === 'image/gif'
+        ? (sheet !== null ? animatedImagePrompt(sheet) : ANIMATED_FALLBACK_PROMPT)
+        : '';
+      const finalPrompt = note === ''
+        ? (prompt ?? vision.defaultPrompt)
+        : `${prompt ?? vision.defaultPrompt}\n\n${note}`;
+      const text = await callVision(llm, vision, finalPrompt, ref, exec.signal);
+      return {
+        text,
+        model: vision.model,
+        image,
+        mimeType: loaded.mediaType,
+        bytes: loaded.data.length,
+        ...(sheet !== null
+          ? { animated: true, totalFrames: sheet.totalFrames, sampledFrames: sheet.sampledFrames }
+          : {}),
+      };
     },
   };
 

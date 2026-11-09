@@ -466,7 +466,11 @@ export function buildQuotePart(
       if (hasAttachment && !content.includes('[消息内容]')) {
         // 类型字段直接就是中文（"类型:图片"），不是英文 image/video
         const kind = content.match(/类型:([^\s]+)/)?.[1] ?? '';
-        const zh = /图/.test(kind) ? '图片' : /视频/.test(kind) ? '视频' : /文件/.test(kind) ? '文件' : '附件';
+        // QQ 的动图是「类型:动图」，要和静态图片分开说 —— 否则她会把一帧当成整张图
+        const zh = /动图/.test(kind) ? '动图'
+          : /图/.test(kind) ? '图片'
+            : /视频/.test(kind) ? '视频'
+              : /文件/.test(kind) ? '文件' : '附件';
 
         // 图片归属：文件名就是内容 MD5 → 直接对索引，不需要下载（URL 会过期）
         const md5s = [...content.matchAll(/文件名:([A-Fa-f0-9]{32})/g)].map((m) => m[1]!.toLowerCase());
@@ -622,10 +626,17 @@ function buildDynamicCtx(
   const forwardFiles = state.downloadedForwardFiles ?? [];
   if (forwardFiles.length > 0) {
     lines.push('[Forward images]');
+    let hasGif = false;
     for (const f of [...forwardFiles].sort((a, b) => a.nodeIndex - b.nodeIndex)) {
-      lines.push(`  #${f.nodeIndex}: Image: ${f.localPath}`);
+      // localPath 的扩展名已按 magic bytes 校正，判动图以它为准（contentType 只有 image/video/file）
+      const animated = /\.gif$/i.test(f.localPath);
+      if (animated) hasGif = true;
+      lines.push(`  #${f.nodeIndex}: Image: ${f.localPath}${animated ? '（动图）' : ''}`);
     }
     lines.push('（# 编号对应上面合并转发里的图片；不同 # 是不同消息、不同的图，不要混在一起描述）');
+    if (hasGif) {
+      lines.push('（标了「动图」的是会动的图，不是静态截图；看图工具会自动抽帧，别把某一帧说成整张动图，也别凭一帧编动作）');
+    }
   }
 
   // 图片进上下文的是「本地路径」这行文字，不是像素。要真看懂，得让她主动把路径
@@ -633,6 +644,10 @@ function buildDynamicCtx(
   // 只有 vision.enabled 开着、工具确实注册了才给这条提示。
   if (visionEnabled && lines.some(l => l.includes('Image: '))) {
     lines.push('[看图] 要看清图里的内容就调用 qqbot_describe_image，image 传上面的本地绝对路径；别只凭文件名或占位符猜。');
+    if (lines.some(l => /\.gif($|\s|（)/i.test(l))) {
+      lines.push('（.gif 是动图：看图工具会自动抽首/中/末帧拼成一张图；描述时说清动作变化，'
+        + '不要把某一帧当成整张动图，更不要凭一帧编「挥手送别」这类剧情）');
+    }
   }
 
   return lines.length > 0 ? lines.join('\n') + '\n\n' : '';

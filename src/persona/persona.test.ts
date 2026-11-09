@@ -128,7 +128,8 @@ describe('Waker · 该不该说话', () => {
   });
 
   it('@ 必醒 / 名字必醒 / owner 不@也潜水', () => {
-    const w = new Waker({ names: ['小鱼'], ownerIds: ['boss'] });
+    // probability 必须固定为 0：默认概率带随机，会让「owner 潜水」这条偶发假失败
+    const w = new Waker({ names: ['小鱼'], ownerIds: ['boss'], probability: 0 });
     expect(w.shouldWake({ key: 'group:1', userId: 'u2', text: '@小鱼 在吗', isAtMe: true }).reason).toBe('atMention');
     expect(w.shouldWake({ key: 'group:1', userId: 'u2', text: '小鱼你看' }).reason).toContain('name:');
     // 方案A：潜水优先——owner 说话不再强制必醒，不@ 就走潜水
