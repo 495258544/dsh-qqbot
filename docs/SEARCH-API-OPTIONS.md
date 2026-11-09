@@ -171,3 +171,50 @@ doubao → tinyfish → jina → bing → anysearch → ddg → ddg-lite → sea
 两个都得对：provider id 必须合法，engine 必须显式传 auto。
 
 生效方式：profile 是 `patchReload: startup`，**改完要重启**。
+## 八、最终根因：中文池里没有豆包（2026-11-06）
+
+小羽自己修好了 `ctx.web` 注入（她的提交 `1a50621`：`inject` 里没有 `'web'`，
+cordis 访问守卫直接拒绝读 `ctx.web`，而我那个 try/catch 把它吞成了 undefined
+→ `webSearch` 恒为 undefined → 永远走 Bing）。这是对的，且比我三个轮的
+「软注入/配置/阈值」都更根本。
+
+但今早她 surf 定时轮次仍跑偏，`debug-surf.jsonl` 实录：
+
+    10:31  "一刀流 三段式 手冲 区别"
+           → 首条「技术实现思路1、本发明提供一种三作业线三段式的备刀方法」
+           ← 这是**机械加工专利**，跟手冲咖啡毫无关系
+
+排查到最后一块拼图（`dsh-free-search/lib/index.js:383`）：
+
+    const DEFAULT_ZH_POOL = ["bing", "baidu", "aliyun", "anysearch"];
+
+**中文查询走 `zhPool`，而默认中文池里根本没有豆包。** 所以：
+- 只配 `fallbackOrder` 没用 —— 豆包排第一，但中文查询压根不会路由到它；
+- 中文池第一个是 `bing`，本机连不上/断词 → 给「一」的字典页或备刀专利；
+- 豆包配了 key 也一直轮不到。
+
+### 修法：显式配 zhPool
+
+```yaml
+- id: web-search-free
+  config:
+    doubaoApiKey: '<key>'
+    fallbackOrder: [doubao, exa, anysearch, bing, ddg]
+    zhPool: [doubao, baidu, anysearch, bing]   # ← 关键，把豆包塞进中文池首位
+```
+
+### 修复前后对照（真实 cordis + 真实 WebRuntime + 真实 free-search 验证）
+
+| 查询 | 修复前 | 修复后 |
+|---|---|---|
+| 一刀流 三段式 手冲 区别 | 三作业线三段式的**备刀**方法（机械专利） | 常见的手冲咖啡冲煮方法 一刀流和段式的区别 |
+| 手冲咖啡的细节参数 | 咖啡先生…（泛科普） | 手冲咖啡进阶指南:从研磨到注水（CSDN） |
+| 研磨度 C40 刻度 | — | 那些年我用过的手摇磨豆机之 德国 司令官 C40 |
+
+### 这一轮踩的教训
+
+1. `auto` 不是「随便试所有引擎」，它先按**语言池**分组，只在池内按 fallback 排序。
+   配了引擎的 key 却不进对应语言池 = 白配。
+2. 我之前用「手写的假 web 对象」验证，得出「provider unavailable」的结论 ——
+   那是自己编的，纯属自欺。这轮改用真 cordis + 真 WebRuntime + 真 free-search 才看到真相。
+3. 进程 stdout 是管道，`logger.info` 不落盘；诊断必须 `appendFileSync` 写文件。
