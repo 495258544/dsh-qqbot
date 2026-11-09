@@ -300,6 +300,11 @@ src/
 │   ├── question-channel.ts     # ask_user_question 问答通道
 │   ├── approval-channel.ts     # approval 审批确认通道
 │   └── answer-parser.ts        # 答案解析
+├── xhh/                        # 小黑盒只读（不碰账号）
+│   ├── sign.ts                 # Web 端 hkey 签名（改坏只会得到 show_captcha）
+│   ├── client.ts               # 搜索/首页/读正文与评论；节流与验证码静默
+│   ├── images.ts               # 帖子图 → 表情库（域名白名单 + 内容嗅探）
+│   └── tools.ts                # qq_xhh_search / qq_xhh_feed / qq_xhh_read / qq_xhh_save_sticker
 ├── media/                      # 多媒体
 │   ├── vision-tool.ts          # 图片视觉理解
 │   ├── send-file-tool.ts       # 发送本地文件
