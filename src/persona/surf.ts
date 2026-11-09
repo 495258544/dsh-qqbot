@@ -30,7 +30,7 @@
  *   - 息屏：只能走 curl / ego-browser（虚拟屏1分钟后也会黑）
  */
 import { execFileSync } from 'node:child_process';
-import { locateEgo } from './ego-locate.ts';
+import { locateEgo } from '../shared/ego-locate.ts';
 import { appendFileSync } from 'node:fs';
 import type { SelfProfileService } from './self.ts';
 import { DEFAULT_TZ, hourInTz, isHourInRange } from './clock.ts';

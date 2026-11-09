@@ -19,8 +19,18 @@ import { registerBindRoutes, type WebServerLike } from './bind-routes.ts';
 import { createBrowserPresenter, createTerminalPresenter, isDesktopHost } from './presenters.ts';
 import { persistCredentialsToProfile, type SetupCredentials } from './persist.ts';
 import { getProfileDir } from '../shared/index.ts';
-import { clearCredentials, genQrSession, ngaStatus, renderQrPng } from '../persona/nga-capture.ts';
-import { currentQrSession, forgetQrSession, pollQrSession, rememberQrSession, saveCredentials, QR_TTL_SEC } from '../persona/tools.ts';
+import {
+  clearCredentials,
+  currentQrSession,
+  forgetQrSession,
+  genQrSession,
+  ngaStatus,
+  pollQrSession,
+  rememberQrSession,
+  renderQrPng,
+  saveCredentials,
+  QR_TTL_SEC,
+} from '../nga/index.ts';
 
 export type { SetupCredentials } from './persist.ts';
 export { persistCredentialsToProfile } from './persist.ts';
@@ -122,7 +132,7 @@ export async function ensureCredentials(
  *   用 lateBind holder —— bootstrapGateway 完成后由调用方回填实现，
  *   回填前返回 503（面板显示"不可用"，不阻塞）。
  */
-// 扫码会话表与 TTL 与 persona 工具**共用同一份**（见 persona/tools.ts 的说明）：
+// 扫码会话表与 TTL 与 persona 工具**共用同一份**（见 nga/tools.ts 的说明）：
 // 她在聊天里生成的二维码，主人在设置面板扫完之后，两边看到的是同一张。
 export function registerBoundCredentialRoutes(ctx: Context, logger: Logger, appId: string, config: Record<string, unknown>): void {
   // bootstrap 完成后由 gateway 回填（persona 相关能力的延迟绑定）

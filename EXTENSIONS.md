@@ -8,6 +8,36 @@
 
 > 约定：`work` 分支放我们的改动；`main` 只用于同步上游，不直接提交业务改动。
 
+## 〇、模块边界（2026-11-10 定稿，cherry-pick 先读这节）
+
+src 按目录分成两层，**接缝只有一处**（`bootstrap.ts`）：
+
+```
+src/
+├─ 聊天核心（改这里 = 同步"聊天修订"）          ← work 分支 cherry-pick 的范围
+│   transport/  session/  persona/  commands/
+│   middleware/  features/  media/  ops/  host/
+└─ 平台扩展（每个目录自成一体，挂了不牵连聊天）  ← 按平台单独挑
+    nga/    NGA 读帖/搜索/扫码登录（自带 registerNgaTools）
+    xhh/    小黑盒只读（registerXhhTools）
+    steam/  群友 Steam 状态（registerSteamTools）
+    dota/   Dota 战绩（registerDotaTools）
+    bili/   B站输出字段自检（checkBiliHealth，主体走官方 MCP）
+    shared/ego-locate.ts  ego 可选依赖定位（surf 用，非平台）
+```
+
+三条硬规矩：
+
+1. **平台模块禁止被聊天核心 import**。聊天核心（persona/transport/session…）不得
+   `import '../nga/…'` 之类——反向依赖（平台 → 核心）同样禁止，平台只准依赖
+   `types.ts`、`config.ts` 类型与 `shared/`。
+2. **每个平台自带 `register*Tools`**，bootstrap 统一接线（steam/dota/xhh/nga 已对齐；
+   bili 无工具只有自检）。平台挂了 = 它自己的工具不可用，聊天/日记/记忆照常。
+3. **只同步聊天修订**（比如到 work 分支）：挑 `transport/ session/ persona/ commands/
+   middleware/ features/ media/` 下的提交即可，平台目录整个跳过；冲突概率最高的
+   共享文件只有 `config.ts`（各平台配置段集中、字段互不重叠）和 `bootstrap.ts`
+   （接线段分块注释，按块取舍）。
+
 ## 一、模块清单
 
 | 模块 | 文件 | 作用 | 合并风险 |
@@ -21,8 +51,10 @@
 | 配置扩展 | `src/config.ts` 的 `steam`、`dota`、`persona.dotaDigest*`、`persona.dotaKeywords` | 上述功能的开关与参数 | **高**（上游常加字段，同文件必合） |
 | 接线 | `src/gateway/bootstrap.ts` | 构造/启动 Steam、Dota、digest、群活跃度 | **中** |
 | CLI | `scripts/steam-config.mjs`、`scripts/steam-friends-export.mjs` | 管理 Steam 凭据/主人账号；导出好友对照表 | 低 |
-| NGA | `src/persona/nga.ts`（读帖/列版面/**站内搜索**）、`src/persona/nga-capture.ts`（纯 HTTP 扫码登录）、`src/persona/ego-locate.ts`（ego 可选依赖定位，NGA 已不依赖它） | 游客态可读帖列版面；登录后可搜全站/版面；登录走手机扫码，不碰密码、不需要浏览器 | 中（在 `src/persona` 下，上游常改）。**改它之前先读第五节** |
+| NGA | `src/nga/nga.ts`（读帖/列版面/**站内搜索**）、`src/nga/nga-capture.ts`（纯 HTTP 扫码登录）、`src/nga/tools.ts`（qq_nga / qq_nga_login + 工具/面板共用的扫码会话表） | 游客态可读帖列版面；登录后可搜全站/版面；登录走手机扫码，不碰密码、不需要浏览器 | 低（**已出 persona**，独立目录上游不碰）。**改它之前先读第五节** |
 | 小黑盒只读 | `src/xhh/{sign,client,images,tools,index}.ts` | 搜帖/刷首页/读正文与评论/把图收进表情库；匿名接口，不碰账号 | 低（全新目录，上游不碰） |
+| B站自检 | `src/bili/bili-health.ts` | 输出字段自检（字幕 from、pages title…bili 升级改字段时报警）；主体接入走官方 MCP（cordis.patch.yml 的 mcp-bili），不占本插件代码 | 低 |
+| ego 可选依赖 | `src/shared/ego-locate.ts` | 定位宿主 `dsh-ego-browser`（surf 深度抓正文用）；缺席不报错，功能降级不消失 | 低 |
 | 人格资产 | `persona/rolecard-xiaoyu.md`（角色卡正本，线上 `rolecard-default.md` 是它的软链）、`persona/PERSONA-CHANGELOG.md`（人设变更日志） | 小羽的人设入库；`roleCardPath` 支持绝对/`~/`/相对仓库根三种路径写法 | 低（上游不碰 `persona/`；**并行会话改卡只改这个正本**，改完 5 秒生效不用重启） |
 | 安装引导 | `SETUP.md` | 给其他用户/agent 的安装配置说明 | 低 |
 

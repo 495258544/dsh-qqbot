@@ -33,9 +33,9 @@ import { DeliverablesDeliverer } from '../transport/deliverables.ts';
 import { PersonaService } from '../persona/service.ts';
 import { bindPersonaWeb } from '../persona/web-wiring.ts';
 import { registerPersonaTools } from '../persona/tools.ts';
-import { NgaClient, loadCredentials } from '../persona/nga.ts';
+import { NgaClient, loadCredentials, registerNgaTools } from '../nga/index.ts';
 import { bindPersonaRuntimeProviders } from '../setup/index.ts';
-import { checkBiliHealth, formatHealthIssues } from '../persona/bili-health.ts';
+import { checkBiliHealth, formatHealthIssues } from '../bili/index.ts';
 import { SteamService, registerSteamTools } from '../steam/index.ts';
 import { createDotaService, registerDotaTools, type DotaService } from '../dota/index.ts';
 import { createXhhClient, registerXhhTools } from '../xhh/index.ts';
@@ -369,13 +369,18 @@ export async function bootstrapGateway(
     const ngaCreds = loadCredentials();
     if (ngaCreds) logger.info(`nga: 已加载登录凭证（uid=${ngaCreds.uid}）`);
     else logger.info('nga: 游客态（列版面/读帖可用；搜索需登录凭证，见设置面板「NGA」）');
+    // 聊天核心与平台工具分开注册（2026-11-10 模块边界）：
+    // persona/tools.ts 只管聊天；NGA 自带 registerNgaTools（src/nga/），挂了不牵连聊天。
     registerPersonaTools(
       ctx,
       persona,
       (agent) => manager.findByAgent(agent as Parameters<SessionManager['findByAgent']>[0]),
       logger,
-      new NgaClient(ngaCreds ? { credentials: ngaCreds } : {}),
     );
+    registerNgaTools(ctx, {
+      ngaClient: new NgaClient(ngaCreds ? { credentials: ngaCreds } : {}),
+      logger,
+    });
 
     // M36：bili 输出字段自检。
     //

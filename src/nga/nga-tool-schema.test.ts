@@ -21,10 +21,10 @@
  */
 import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
-import { registerPersonaTools } from './tools.ts';
+import { registerNgaTools } from './tools.ts';
 
 const SRC = readFileSync(
-  '/root/Documents/deepseek-harness/default-workspace/dsh-qqbot/src/persona/tools.ts',
+  '/root/Documents/deepseek-harness/default-workspace/dsh-qqbot/src/nga/tools.ts',
   'utf8',
 );
 
@@ -55,21 +55,13 @@ function registeredTools(): RegisteredTool[] {
     get: () => ({
       register: (def: RegisteredTool) => { tools.push(def); },
     }),
-  } as unknown as Parameters<typeof registerPersonaTools>[0];
+  } as unknown as Parameters<typeof registerNgaTools>[0];
 
-  // 桩：只用到 self / budget 上极少数方法，这里用 Proxy 吞掉一切访问
-  const personaStub = new Proxy({}, {
-    get: () => new Proxy(() => ({ ok: true }), { get: () => () => ({ ok: true }) }),
-  }) as unknown as Parameters<typeof registerPersonaTools>[1];
-
-  registerPersonaTools(
-    fakeCtx,
-    personaStub,
-    () => undefined,
-    {
+  registerNgaTools(fakeCtx, {
+    logger: {
       info: () => undefined, warn: () => undefined, error: () => undefined, debug: () => undefined,
-    } as unknown as Parameters<typeof registerPersonaTools>[3],
-  );
+    } as unknown as Parameters<typeof registerNgaTools>[1]['logger'],
+  });
   return tools;
 }
 
@@ -137,7 +129,7 @@ describe('真实返回数据能通过 schema 校验', () => {
 describe('负数 fid 在工具层也要放过（不只是 client 层）', () => {
   it('tools.ts 的 fid 校验不能用 <= 0（否则负数版面被当成"没给"）', () => {
     const src = readFileSync(
-      '/root/Documents/deepseek-harness/default-workspace/dsh-qqbot/src/persona/tools.ts',
+      '/root/Documents/deepseek-harness/default-workspace/dsh-qqbot/src/nga/tools.ts',
       'utf8',
     );
     // 找 qq_nga 的 execute，确认校验条件是 fid === 0 而不是 fid <= 0
@@ -152,7 +144,7 @@ describe('负数 fid 在工具层也要放过（不只是 client 层）', () => 
 
   it('search 的 fid 判断也允许负数', () => {
     const src = readFileSync(
-      '/root/Documents/deepseek-harness/default-workspace/dsh-qqbot/src/persona/tools.ts',
+      '/root/Documents/deepseek-harness/default-workspace/dsh-qqbot/src/nga/tools.ts',
       'utf8',
     );
     const i = src.indexOf("name: 'qq_nga',");

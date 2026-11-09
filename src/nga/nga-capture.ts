@@ -43,7 +43,7 @@
 
 import { mkdirSync, unlinkSync, writeFileSync, existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { defaultNgaDir, decodeByCharset, loadCredentials, type NgaCredentials } from '../persona/nga.ts';
+import { defaultNgaDir, decodeByCharset, loadCredentials, type NgaCredentials } from './nga.ts';
 
 const NGA_BASE = 'https://bbs.nga.cn';
 
