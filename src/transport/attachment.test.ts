@@ -151,3 +151,39 @@ describe('归档 · 扩展名必须取自校正后的内容（H2 回归）', () 
     }
   });
 });
+
+describe('DNS 校验 · resolve4 被网络策略拒绝时回退系统 resolver', () => {
+  it('resolve4 抛 ECONNREFUSED、lookup 能解析 → 图片正常下载', async () => {
+    vi.spyOn(dns.promises, 'resolve4').mockRejectedValue(new Error('ECONNREFUSED'));
+    vi.spyOn(dns.promises, 'lookup').mockResolvedValue([{ address: '8.8.8.8', family: 4 }] as never);
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(new Uint8Array(png))));
+
+    const results = await downloadMediaAttachments(
+      [{ url: 'https://example.com/x', filename: 'photo.png', content_type: 'image/png', size: png.length }],
+      { enabled: true, maxMB: 1, ttlHours: 24 },
+      logger,
+    );
+
+    expect(results).toHaveLength(1);
+    expect(readFileSync(results[0]!.localPath)).toEqual(png);
+  });
+
+  it('回退后仍拦私网 IPv4 / IPv6（SSRF 防护不能因换 DNS 方式而失效）', async () => {
+    vi.spyOn(dns.promises, 'resolve4').mockRejectedValue(new Error('ECONNREFUSED'));
+    for (const addr of [
+      [{ address: '127.0.0.1', family: 4 }],
+      [{ address: '10.0.0.5', family: 4 }],
+      [{ address: '::1', family: 6 }],
+      [{ address: 'fd00::1', family: 6 }],
+    ]) {
+      vi.spyOn(dns.promises, 'lookup').mockResolvedValue(addr as never);
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(new Uint8Array(png))));
+      const results = await downloadMediaAttachments(
+        [{ url: 'https://example.com/x', filename: 'photo.png', content_type: 'image/png', size: png.length }],
+        { enabled: true, maxMB: 1, ttlHours: 24 },
+        logger,
+      );
+      expect(results).toEqual([]);
+    }
+  });
+});
