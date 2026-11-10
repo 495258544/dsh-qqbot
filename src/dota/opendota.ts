@@ -21,6 +21,31 @@ const MAX_RETRY_WAIT_MS = 3000;
 /** 429 最多重试 1 次：重试是给「瞬时抖动」留的余地，不是用来对抗真限流的 */
 const MAX_RETRY_ON_429 = 1;
 
+/**
+ * 传输层瞬时错误（timeout / network / 5xx）的重试上限。
+ * 注意：默认**不启用**，只有显式传 RequestPolicy 的调用（凌晨预热）才重试。
+ * 群聊里问一句战绩，让她挂在那儿等 3×15 秒比直接说"没查到"更糟，
+ * 所以交互查询保持"一次往返、失败就失败"的老行为。
+ */
+const MAX_TRANSIENT_RETRIES = 2;
+const RETRY_BASE_DELAY_MS = 500;
+const MAX_RETRY_BACKOFF_MS = 4000;
+
+/** 单次请求策略（可选覆盖；不传 = 构造时的 timeoutMs + 零重试） */
+export interface RequestPolicy {
+  /** 覆盖本次请求超时(ms) —— 预热允许比群聊等得更久 */
+  timeoutMs?: number;
+  /** 瞬时错误最多重试几次（会被 MAX_TRANSIENT_RETRIES 截断） */
+  retries?: number;
+  /** 指数退避基数(ms) */
+  retryBaseDelayMs?: number;
+}
+
+function isTransient(err: unknown): boolean {
+  return err instanceof OpenDotaError
+    && (err.kind === 'timeout' || err.kind === 'network' || err.kind === 'server');
+}
+
 export type OpenDotaErrorKind =
   | 'rate-limit'    // 429，或本地闸门判定超限
   | 'not-found'     // 404：account_id 不存在
@@ -275,12 +300,12 @@ export class OpenDotaApi {
   }
 
   /** 单次 HTTP 往返，不重试；只负责把传输层错误翻译成 timeout / network */
-  private async send(path: string): Promise<Response> {
+  private async send(path: string, timeoutMs: number): Promise<Response> {
     const url = `${API_BASE}${path}`;
     let res: Response;
     try {
       res = await globalThis.fetch(url, {
-        signal: AbortSignal.timeout(this.timeoutMs),
+        signal: AbortSignal.timeout(timeoutMs),
         headers: {
           accept: 'application/json',
           'user-agent': this.userAgent,
@@ -291,7 +316,7 @@ export class OpenDotaApi {
       const reason = err instanceof Error ? err.message : String(err);
       // AbortSignal.timeout 抛的是 TimeoutError；外部取消是 AbortError。对上层都是"没拿到"
       if (name === 'TimeoutError' || name === 'AbortError') {
-        throw new OpenDotaError('timeout', `请求 OpenDota 超时（${this.timeoutMs}ms）: ${path}`);
+        throw new OpenDotaError('timeout', `请求 OpenDota 超时（${timeoutMs}ms）: ${path}`);
       }
       throw new OpenDotaError('network', `请求 OpenDota 失败: ${reason}`);
     }
@@ -313,12 +338,12 @@ export class OpenDotaApi {
   }
 
   /**
-   * GET + 错误分类。
+   * GET + 错误分类（单次尝试）。
    * 429 只在 Retry-After 明确给出且 ≤3 秒时重试 1 次；否则立刻抛 rate-limit。
    * 理由：群聊场景下让一条消息等十几秒比直接说"太频繁了"更糟。
    */
-  private async get(path: string): Promise<unknown> {
-    let res = await this.send(path);
+  private async getOnce(path: string, timeoutMs: number): Promise<unknown> {
+    let res = await this.send(path, timeoutMs);
     let retried = 0;
 
     if (res.status === 429) {
@@ -326,7 +351,7 @@ export class OpenDotaApi {
       if (waitMs !== null && waitMs <= MAX_RETRY_WAIT_MS && retried < MAX_RETRY_ON_429) {
         retried += 1;
         await new Promise<void>((resolve) => setTimeout(resolve, waitMs));
-        res = await this.send(path);
+        res = await this.send(path, timeoutMs);
       }
     }
 
@@ -355,20 +380,48 @@ export class OpenDotaApi {
     }
   }
 
+  /**
+   * GET 入口：默认零重试（群聊），传 policy 才启用瞬时错误重试（凌晨预热）。
+   *
+   * 只重试 timeout / network / 5xx —— 这三类是"抖一下就好"；
+   * 429 有自己的短重试策略、404 / 形状错误 / 参数错误重试多少次都不会变，
+   * 一律不进这个循环。本地限流计数归 service 层，重试不额外计数。
+   */
+  private async get(path: string, policy?: RequestPolicy): Promise<unknown> {
+    const timeoutMs = policy?.timeoutMs ?? this.timeoutMs;
+    const wanted = policy?.retries ?? 0;
+    const retries = Number.isFinite(wanted)
+      ? Math.max(0, Math.min(MAX_TRANSIENT_RETRIES, Math.floor(wanted)))
+      : 0;
+    const base = Math.max(0, policy?.retryBaseDelayMs ?? RETRY_BASE_DELAY_MS);
+
+    let attempt = 0;
+    for (;;) {
+      try {
+        return await this.getOnce(path, timeoutMs);
+      } catch (err) {
+        if (!isTransient(err) || attempt >= retries) throw err;
+        const wait = Math.min(base * 2 ** attempt, MAX_RETRY_BACKOFF_MS);
+        attempt += 1;
+        await new Promise<void>((resolve) => setTimeout(resolve, wait));
+      }
+    }
+  }
+
   // ── 端点 ──────────────────────────────────────────────────
 
   /**
    * 最近比赛（默认 OpenDota 给 20 条，可用 limit 收窄）。
    * 空数据账号返回 `200 []`，不是 404 —— 这点很重要：调用方不能把它当错误。
    */
-  async recentMatches(accountId: number, limit?: number): Promise<RawMatch[]> {
+  async recentMatches(accountId: number, limit?: number, policy?: RequestPolicy): Promise<RawMatch[]> {
     this.assertAccountId(accountId);
     const params = new URLSearchParams();
     if (typeof limit === 'number' && Number.isFinite(limit)) {
       params.set('limit', String(Math.max(1, Math.min(100, Math.floor(limit)))));
     }
     const suffix = params.toString() === '' ? '' : `?${params.toString()}`;
-    const data = await this.get(`/players/${accountId}/recentMatches${suffix}`);
+    const data = await this.get(`/players/${accountId}/recentMatches${suffix}`, policy);
 
     if (!Array.isArray(data)) {
       throw new OpenDotaError('bad-response', 'recentMatches 返回的不是数组');
@@ -444,12 +497,12 @@ export class OpenDotaApi {
    * 调用方要靠 `radiantGoldAdv === null` 判断，而不是硬算出一个假的曲线。
    * 找不到该场（404）抛 not-found，由上层翻译成"这场查不到/还没被收录"。
    */
-  async matchDetails(matchId: number): Promise<RawMatchDetail> {
+  async matchDetails(matchId: number, policy?: RequestPolicy): Promise<RawMatchDetail> {
     const id = Number(matchId);
     if (!Number.isSafeInteger(id) || id <= 0) {
       throw new OpenDotaError('bad-request', `match_id 必须是正整数，收到 ${String(matchId)}`);
     }
-    const data = await this.get(`/matches/${id}`);
+    const data = await this.get(`/matches/${id}`, policy);
     if (data === null || typeof data !== 'object') {
       throw new OpenDotaError('bad-response', 'match 详情返回的不是对象');
     }

@@ -77,6 +77,7 @@ describe('own-life · 时段锚点模式', () => {
     expect(delivered).toHaveLength(0);
   });
 
+  // 同样受 Windows /tmp 目录 IO 拖累，全量并发时偶发 >5s，显式放宽
   it('跨天：昨天的 usedSlots 不影响今天，槽重新可用', async () => {
     const statePath = `/tmp/ol-slots-${Math.random().toString(36).slice(2)}.json`;
     const { h, delivered } = mk({ slots: ['10:00'], statePath });
@@ -89,7 +90,7 @@ describe('own-life · 时段锚点模式', () => {
       expect(delivered).toHaveLength(2);
       expect(h.snapshot().usedSlots).toEqual({ day: '2026-11-05', idx: [0] });
     } finally { fs.rmSync(statePath, { force: true }); }
-  });
+  }, 20_000);
 
   it('槽触发同样计入 daily-cap', async () => {
     const { h, delivered } = mk({ slots: ['10:00', '14:00'], maxPerDay: 1 });

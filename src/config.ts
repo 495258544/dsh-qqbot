@@ -3,6 +3,7 @@
  */
 import Schema from '@deepseek-ai/schemastery';
 import { DEFAULT_DOTA_CONFIG, type DotaConfig } from './dota/index.ts';
+import { DEFAULT_WARMUP_CONFIG } from './dota/warmup.ts';
 import { DEFAULT_XHH_CONFIG, type XhhConfig } from './xhh/index.ts';
 
 export interface AccessControlConfig {
@@ -527,9 +528,13 @@ export const ConfigSchema: Schema<ImQQBotConfig> = Schema.object({
     rateLimitPerMin: Schema.natural().default(DEFAULT_DOTA_CONFIG.rateLimitPerMin).description('本地限流：每分钟最多几次 OpenDota 请求（匿名额度 60/分钟，默认留 10 次余量）'),
     includeWinLoss: Schema.boolean().default(DEFAULT_DOTA_CONFIG.includeWinLoss).description('是否附带生涯总胜负（每人多一次请求）'),
     warmup: Schema.object({
-      enabled: Schema.boolean().default(true).description('凌晨预热：把昨天打过的比赛提前请求一遍，触发 OpenDota 入队解析——不预热的话，白天查局只能拿到"半解析"数据（KDA 有、技能/团战没有）'),
-      hour: Schema.natural().default(3).description('几点跑（北京时间，默认凌晨 3 点）'),
-      withinHours: Schema.natural().default(30).description('预热最近多少小时内的局（30 ≈ 覆盖"昨天白天+昨晚"）'),
+      enabled: Schema.boolean().default(DEFAULT_WARMUP_CONFIG.enabled).description('凌晨预热：把昨天打过的比赛提前请求一遍，触发 OpenDota 入队解析——不预热的话，白天查局只能拿到"半解析"数据（KDA 有、技能/团战没有）'),
+      hour: Schema.natural().default(DEFAULT_WARMUP_CONFIG.hour).description('几点跑（北京时间，默认凌晨 3 点）'),
+      withinHours: Schema.natural().default(DEFAULT_WARMUP_CONFIG.withinHours).description('预热最近多少小时内的局（30 ≈ 覆盖"昨天白天+昨晚"）'),
+      timeoutMs: Schema.natural().default(DEFAULT_WARMUP_CONFIG.timeoutMs).description('预热专用单次请求超时(ms)；只影响后台预热，群聊查询仍用 dota.timeoutMs'),
+      retries: Schema.natural().default(DEFAULT_WARMUP_CONFIG.retries).description('预热专用瞬时错误（超时/网络/5xx）重试次数；群聊查询不重试'),
+      retryBaseDelayMs: Schema.natural().default(DEFAULT_WARMUP_CONFIG.retryBaseDelayMs).description('重试指数退避基数(ms)'),
+      retryCooldownMs: Schema.natural().default(DEFAULT_WARMUP_CONFIG.retryCooldownMs).description('失败账号隔多久才在同一晚自动补跑(ms)'),
     }).description('OpenDota 解析预热（OpenDota 的解析是按需的：一场比赛不被请求就永远停在半解析状态）'),
   }).description('Dota2 战绩配置（数据源 OpenDota，免 key；对方需在游戏内开启「公开比赛数据」）'),
   // 默认关：同步了模块但不擅自给线上增加常驻工具，需要时在 profile 里把 xhh.enabled 打开

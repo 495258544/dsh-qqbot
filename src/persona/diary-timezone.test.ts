@@ -12,6 +12,8 @@ import { Diary } from './diary.ts';
 const TMP = '/tmp/diary-tz-test';
 
 describe('Diary · 按北京时区算日期', () => {
+  // 这个用例要在 Windows 上反复 rmSync /tmp 目录；全量并发时 IO 偶尔 >5s，
+  // 与被测逻辑无关，显式放宽超时避免偶发假红（2026-11-10 实测）
   it('UTC 23:53（北京次日 07:53）应算作次日', () => {
     fs.rmSync(TMP, { recursive: true, force: true });
     const d = new Diary(TMP);
@@ -19,7 +21,7 @@ describe('Diary · 按北京时区算日期', () => {
     const e = d.add({ text: '时区测试', t: Date.UTC(2026, 10, 1, 23, 53) });
     expect(e.day).toBe('2026-11-02');
     expect(e.time).toMatch(/^07:5/);
-  });
+  }, 20_000);
 
   it('北京时间正午应算作当天', () => {
     fs.rmSync(TMP, { recursive: true, force: true });
@@ -27,5 +29,5 @@ describe('Diary · 按北京时区算日期', () => {
     const e = d.add({ text: '时区测试2', t: Date.UTC(2026, 10, 2, 4, 0) });   // UTC 04:00 = 北京 12:00
     expect(e.day).toBe('2026-11-02');
     expect(e.time).toMatch(/^12:0/);
-  });
+  }, 20_000);
 });

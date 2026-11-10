@@ -427,6 +427,8 @@ export async function bootstrapGateway(
   // 这两个定时器必须在下面的 lifecycle teardown 里显式停掉。
   // 2026-11-09 实测：热重载只换插件代码、不重启进程，旧实例的 setInterval 还活着，
   // 于是凌晨 3:00 预热跑了两遍（19:00:14Z / 19:00:34Z）。每重载一次都会再攒一个。
+  // 2026-11-10 追加：光 stop() 不够（旧实例不一定走到 teardown），
+  // warmup 已改为「文件锁 + 落盘按账号状态」，跨实例/跨进程都幂等，只补失败账号。
   let dotaDigest: ReturnType<typeof createDotaDigest> | undefined;
   let dotaWarmup: ReturnType<typeof createDotaWarmup> | undefined;
 
@@ -534,6 +536,8 @@ export async function bootstrapGateway(
   if (dota && config.dota.warmup?.enabled !== false) {
     dotaWarmup = createDotaWarmup({
       config: config.dota.warmup ?? {},
+      // 与 ability-records.json 同目录：热重载换代码后新实例照样读得到当天进度
+      dataDir: resolve(homedir(), '.dsh-qqbot', 'dota'),
       logger,
       bindings: () =>
         steam
@@ -548,7 +552,8 @@ export async function bootstrapGateway(
     dotaWarmup.start();
     const wcfg = config.dota.warmup ?? {};
     logger.info(
-      `dota-warmup: 已武装（每天 ${wcfg.hour ?? 3}:00 预热最近 ${wcfg.withinHours ?? 30}h 的比赛，触发 OpenDota 解析）`,
+      `dota-warmup: 已武装（每天 ${wcfg.hour ?? 3}:00 预热最近 ${wcfg.withinHours ?? 30}h 的比赛`
+      + `，超时 ${wcfg.timeoutMs ?? 20_000}ms / 最多 ${(wcfg.retries ?? 2) + 1} 次尝试，跨实例幂等）`,
     );
   }
 
