@@ -142,6 +142,7 @@ function harness(o: {
   config?: Partial<DotaDigestConfig>;
   bindings?: DotaDigestDeps['bindings'];
   forms?: Record<number, DotaForm | Error>;
+  queryForm?: DotaDigestDeps['queryForm'];
   pickGroup?: DotaDigestDeps['pickGroup'];
   deliver?: DotaDigestDeps['deliver'];
   /** 想断言日志的用例自己传一个 */
@@ -156,12 +157,12 @@ function harness(o: {
     dataDir,
     logger: o.logger ?? silentLogger,
     bindings: o.bindings ?? (() => []),
-    queryForm: async (accountId: number) => {
+    queryForm: o.queryForm ?? (async (accountId: number) => {
       const f = forms[accountId];
       if (f === undefined) throw new Error(`测试没有准备 account ${accountId} 的战绩`);
       if (f instanceof Error) throw f;
       return f;
-    },
+    }),
     pickGroup: o.pickGroup ?? (() => 'group-openid-1'),
     deliver:
       o.deliver
@@ -302,7 +303,7 @@ describe('tickQuery · 提炼', () => {
     expect(items[0]?.kind).toBe('carry');
   });
 
-  it('一条亮点都没有 → 不落盘 + no-highlight', async () => {
+  it('一条亮点都没有 → 落**空摘要**标记 + no-highlight（2026-11-10 从 work 同步）', async () => {
     const h = harness({
       bindings: () => [{ openid: 'u_a', alias: '小周', steamId: STEAM_A }],
       forms: {
@@ -315,7 +316,47 @@ describe('tickQuery · 提炼', () => {
 
     const res = await h.handle.tickQuery(QUERY_AT);
     expect(res).toEqual({ ran: false, count: 0, reason: 'no-highlight' });
-    expect(exists(h.dataDir)).toBe(false);
+    // 关键：无亮点也要落盘 —— 空摘要就是「今天查过了」的标记
+    expect(exists(h.dataDir)).toBe(true);
+    const saved = JSON.parse(fs.readFileSync(path.join(h.dataDir, 'dota-digest.json'), 'utf8'));
+    expect(saved.items).toEqual([]);
+  });
+
+  it('无亮点落盘后，同窗口内再 tick → already-prepared（不再每分钟重查 OpenDota）', async () => {
+    let queries = 0;
+    const h = harness({
+      bindings: () => [{ openid: 'u_a', alias: '小周', steamId: STEAM_A }],
+      forms: {
+        1: mkForm(1, [
+          // 有战绩但毫无亮点（非连败/连胜/carry，普通局）
+          mkMatch({ matchId: 101, at: QUERY_AT - 2 * 3600e3, win: true, k: 4, d: 4, a: 6 }),
+        ]),
+      },
+      queryForm: async (id, limit) => { queries += 1; return mkForm(Number(id) - 76561197960265728, [
+        mkMatch({ matchId: 101, at: QUERY_AT - 2 * 3600e3, win: true, k: 4, d: 4, a: 6 }),
+      ]); },
+    });
+
+    await h.handle.tickQuery(QUERY_AT);
+    const again = await h.handle.tickQuery(QUERY_AT + 60 * 1000);   // 1 分钟后再 tick
+    expect(again).toEqual({ ran: false, count: 0, reason: 'already-prepared' });
+    expect(queries, '第二次 tick 不得再打 OpenDota（修复前每分钟全量重查）').toBe(1);
+  });
+
+  it('空摘要在投递窗口 → no-items，不发出空消息', async () => {
+    const h = harness({
+      bindings: () => [{ openid: 'u_a', alias: '小周', steamId: STEAM_A }],
+      forms: {
+        1: mkForm(1, [
+          mkMatch({ matchId: 101, at: QUERY_AT - 2 * 3600e3, win: true, k: 4, d: 4, a: 6 }),
+        ]),
+      },
+    });
+    await h.handle.tickQuery(QUERY_AT);   // 落空摘要（forDay = 今天）
+    // 空摘要的 forDay 是查询日当天 —— 当天投递窗口直接能碰到它
+    const res = await h.handle.tickDeliver(cst(2026, 3, 10, 10, 30));
+    expect(res).toEqual({ sent: false, reason: 'no-items' });
+    expect(h.deliverCalls).toEqual([]);
   });
 
   it('同一天已备好摘要 → already-prepared，不重复查', async () => {
@@ -520,7 +561,8 @@ describe('recentHours · 只要新鲜的', () => {
     const res = await h.handle.tickQuery(QUERY_AT);
     expect(res.ran).toBe(false);
     expect(res.reason).toBe('no-highlight');
-    expect(exists(h.dataDir)).toBe(false);
+    // 2026-11-10 行为变更：无亮点也落空摘要（防查询窗口内每分钟重查 OpenDota）
+    expect(exists(h.dataDir)).toBe(true);
   });
 
   it('recentHours=24 时，20 小时前打的 Carry 局可以播', async () => {

@@ -507,10 +507,19 @@ export function createDotaDigest(deps: DotaDigestDeps): DotaDigestHandle {
       const fresh = items.filter((it) => !recentlySent(it, now));
       const picked = sortItems(fresh).slice(0, Math.max(0, Math.floor(cfg.maxItems)));
       if (picked.length === 0) {
+        // 查完没亮点也要落一个「今天查过了」的**空摘要** ——
+        // 否则 tickQuery 每次都判"还没备好"（digest === null）而重查，
+        // 查询窗口内每分钟跑一遍 Steam + OpenDota（work 分支 2026-11-03 实测约 120 次/天）。
+        // forDay 必须是**今天**而不是 dayAfter：空摘要只要挡住今天剩下的 tick；
+        // 明天 forDay(昨天) < today → 自然重新开查，不会被 already-prepared 卡死。
+        // tickDeliver 见到空 items 走 no-items 分支，不会发出空消息。
+        const forDay = dayInTz(new Date(now), cfg.tz);
+        digest = { version: 1, queriedAt: now, forDay, items: [] };
+        save();
         if (items.length > 0) {
-          logger.info(`dota-digest: 这晚只有 ${items.length} 条亮点，但最近 3 天都播过了，不重复发`);
+          logger.info(`dota-digest: 这晚只有 ${items.length} 条亮点，但最近 3 天都播过了，不重复发（今天不再重查）`);
         } else {
-          logger.info('dota-digest: 这一晚没有值得说的战绩，不落盘');
+          logger.info(`dota-digest: 这一晚没有值得说的战绩（最近 ${cfg.recentHours}h 内无亮点），今天不再重查`);
         }
         return { ran: false, count: 0, reason: 'no-highlight' };
       }
@@ -530,6 +539,8 @@ export function createDotaDigest(deps: DotaDigestDeps): DotaDigestHandle {
   async function tickDeliver(nowTs?: number): Promise<{ sent: boolean; reason?: string }> {
     if (!cfg.enabled) return { sent: false, reason: 'disabled' };
     if (digest === null) return { sent: false, reason: 'no-digest' };
+    // 无亮点的空摘要（「今天查过了」的标记）不能走到发消息那一步
+    if (digest.items.length === 0) return { sent: false, reason: 'no-items' };
 
     const now = Number(nowTs ?? nowFn()) || nowFn();
     if (!inWindow(now, cfg.deliverHours)) return { sent: false, reason: 'not-deliver-window' };
