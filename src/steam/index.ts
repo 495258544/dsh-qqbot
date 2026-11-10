@@ -8,7 +8,7 @@
 export { SteamService } from './service.ts';
 export type { PersonStatus, SteamLookupOptions, SteamLookupResult } from './service.ts';
 export { registerSteamTools } from './tools.ts';
-export { BindingStore } from './bindings.ts';
+export { BindingStore, primaryName } from './bindings.ts';
 export type { SteamBinding, BindingHit } from './bindings.ts';
 export { SteamApi, SteamApiError, personaStateText } from './steam-api.ts';
 export { SettingsStore } from './settings.ts';

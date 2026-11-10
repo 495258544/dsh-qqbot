@@ -33,7 +33,7 @@ import path from 'node:path';
 import type { Logger } from '../types.ts';
 import type { DotaService } from './service.ts';
 import type { RequestPolicy } from './opendota.ts';
-import { DEFAULT_TZ, dayInTz, hourInTz } from '../persona/clock.ts';
+import { DEFAULT_TZ, dayInTz, hourInTz } from '../shared/clock.ts';
 
 const STEAM_ID64_BASE = 76561197960265728n;
 const STATE_FILE = 'dota-warmup.json';

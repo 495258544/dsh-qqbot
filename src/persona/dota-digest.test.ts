@@ -8,13 +8,26 @@ import { afterEach, describe, expect, it } from 'vitest';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import type { DotaForm, DotaMatchSummary } from '../dota/service.ts';
 import type { Logger } from '../types.ts';
 import {
   createDotaDigest,
   type DotaDigestConfig,
   type DotaDigestDeps,
+  type DigestForm,
+  type DigestMatchSummary,
 } from './dota-digest.ts';
+
+/**
+ * 平台能力在测试里的等价实现。测试不 import 平台，
+ * 线上由 bootstrap.ts 注入真正的 steamIdToAccountId / primaryName。
+ */
+const toAccountId = (steamId: string): number | null => {
+  if (!/^\d{17}$/.test(steamId)) return null;
+  const id = BigInt(steamId) - 76561197960265728n;
+  return id > 0n && id <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(id) : null;
+};
+const primaryAlias = (alias: string | undefined): string =>
+  String(alias ?? '').split(/[、,，/]/)[0]?.trim() ?? '';
 
 const TZ = 'Asia/Shanghai';
 
@@ -58,7 +71,7 @@ function mkMatch(o: {
   k?: number;
   d?: number;
   a?: number;
-}): DotaMatchSummary {
+}): DigestMatchSummary {
   const kills = o.k ?? 5;
   const deaths = o.d ?? 5;
   const assists = o.a ?? 5;
@@ -83,7 +96,7 @@ function mkMatch(o: {
   };
 }
 
-function mkForm(accountId: number, matches: DotaMatchSummary[], empty = false): DotaForm {
+function mkForm(accountId: number, matches: DigestMatchSummary[], empty = false): DigestForm {
   const wins = matches.filter((m) => m.win).length;
   const losses = matches.length - wins;
   let streak = 0;
@@ -141,7 +154,7 @@ interface Harness {
 function harness(o: {
   config?: Partial<DotaDigestConfig>;
   bindings?: DotaDigestDeps['bindings'];
-  forms?: Record<number, DotaForm | Error>;
+  forms?: Record<number, DigestForm | Error>;
   pickGroup?: DotaDigestDeps['pickGroup'];
   deliver?: DotaDigestDeps['deliver'];
   /** 想断言日志的用例自己传一个 */
@@ -169,6 +182,8 @@ function harness(o: {
         deliverCalls.push({ groupId, text });
         return { ok: true };
       }),
+    toAccountId,
+    primaryAlias,
     now: () => QUERY_AT,
   };
 
@@ -463,6 +478,8 @@ describe('持久化', () => {
       ]),
       pickGroup: () => 'group-openid-1',
       deliver: async () => ({ ok: true }),
+      toAccountId,
+      primaryAlias,
       now: () => QUERY_AT,
     });
     expect((await first.tickQuery(QUERY_AT)).count).toBe(1);
@@ -482,6 +499,8 @@ describe('持久化', () => {
         calls.push(text);
         return { ok: true };
       },
+      toAccountId,
+      primaryAlias,
       now: () => cst(2026, 3, 10, 10, 30),
     });
 
@@ -500,6 +519,8 @@ describe('持久化', () => {
       queryForm: async () => mkForm(1, []),
       pickGroup: () => null,
       deliver: async () => ({ ok: true }),
+      toAccountId,
+      primaryAlias,
     });
     expect(third.snapshot().digest).toBeNull();
   });
@@ -509,7 +530,7 @@ describe('持久化', () => {
 
 describe('recentHours · 只要新鲜的', () => {
   it('recentHours=24 时，30 小时前打过的被过滤掉', async () => {
-    const forms: Record<number, DotaForm> = {
+    const forms: Record<number, DigestForm> = {
       // 30 小时前（QUERY_AT 03-10 03:30 往前推 30h = 03-08 21:30）
       1: mkForm(1, [mkMatch({ matchId: 1, at: cst(2026, 3, 8, 21, 30), win: true, k: 10, d: 1, a: 10 })]),
     };
@@ -526,7 +547,7 @@ describe('recentHours · 只要新鲜的', () => {
   });
 
   it('recentHours=24 时，20 小时前打的 Carry 局可以播', async () => {
-    const forms: Record<number, DotaForm> = {
+    const forms: Record<number, DigestForm> = {
       // 20 小时前（03-09 07:30）
       1: mkForm(1, [mkMatch({ matchId: 2, at: cst(2026, 3, 9, 7, 30), win: true, k: 10, d: 1, a: 10 })]),
     };
@@ -543,7 +564,7 @@ describe('recentHours · 只要新鲜的', () => {
 
 describe('跨天去重 · 同人同类 3 天内不重复播', () => {
   it('播过一次连败后，下次同样是连败就不再播；换成连胜仍可播', async () => {
-    const forms: Record<number, DotaForm> = {};
+    const forms: Record<number, DigestForm> = {};
     const h = harness({
       config: { recentHours: 48 },
       forms,
@@ -585,7 +606,7 @@ describe('跨天去重 · 同人同类 3 天内不重复播', () => {
   });
 
   it('去重历史落盘，重启后依然生效', async () => {
-    const forms: Record<number, DotaForm> = {
+    const forms: Record<number, DigestForm> = {
       1: mkForm(1, [
         mkMatch({ matchId: 1, at: cst(2026, 3, 10, 1, 0), win: false }),
         mkMatch({ matchId: 2, at: cst(2026, 3, 9, 23, 0), win: false }),
@@ -616,6 +637,8 @@ describe('跨天去重 · 同人同类 3 天内不重复播', () => {
       queryForm: async () => forms[1]!,
       pickGroup: () => 'group-openid-1',
       deliver: async () => ({ ok: true }),
+      toAccountId,
+      primaryAlias,
     });
     const res = await second.tickQuery(cst(2026, 3, 12, 3, 30));
     expect(res.ran).toBe(false);

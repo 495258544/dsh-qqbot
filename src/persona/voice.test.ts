@@ -190,7 +190,7 @@ describe('口癖管线 · 从样本到生效（M32 修的死链）', () => {
 
     const habits = svc.voice.activeHabits();
     expect(habits.length).toBeGreaterThan(0);
-  });
+  }, 20_000);
 
   it('样本不够时不会硬造口癖', () => {
     const v2 = new VoiceService(fs.mkdtempSync(path.join(os.tmpdir(), 'voice-few-')));

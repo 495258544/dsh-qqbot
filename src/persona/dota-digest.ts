@@ -19,10 +19,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import type { Logger } from '../types.ts';
-import type { DotaForm, DotaMatchSummary } from '../dota/service.ts';
-import { steamIdToAccountId } from '../dota/opendota.ts';
 import { DEFAULT_TZ, dayInTz, hourInTz, isHourInRange } from './clock.ts';
-import { primaryName } from '../steam/bindings.ts';
 
 const HOUR_MS = 3600 * 1000;
 /** 两个定时器都是每分钟醒一次 */
@@ -35,6 +32,54 @@ const MAX_DELIVER_ATTEMPTS_PER_DAY = 3;
 const GRINDER_WINDOW_MS = 24 * HOUR_MS;
 /** alias 缺失时的兜底称呼（刻意不含任何标识） */
 const FALLBACK_ALIAS = '有位群友';
+
+/**
+ * 战绩摘要的镜像结构（persona 层不 import 平台）。
+ *
+ * 2026-11-10 模块边界整改：原来这里直接 import 平台模块的类型、账号换算和
+ * 取名函数，让聊天核心反向依赖了平台。改成「形状镜像 + deps 注入」后，
+ * bootstrap.ts 是唯一接线点；字段与 DotaService 返回值逐项对齐，
+ * TS 结构类型保证线上对象可以直接传进来。
+ */
+export interface DigestMatchSummary {
+  matchId: number;
+  heroId: number;
+  heroName: string;
+  win: boolean;
+  kills: number;
+  deaths: number;
+  assists: number;
+  kdaRatio: number;
+  durationSec: number;
+  durationText: string;
+  startedAt: string;
+  startedAtText: string;
+  gameMode: number;
+  gameModeText: string;
+  lobbyType: number;
+  lobbyTypeText: string;
+  isRanked: boolean;
+}
+
+export interface DigestForm {
+  accountId: number;
+  displayName: string;
+  rankTier: number | null;
+  rankText: string | null;
+  totalWin?: number;
+  totalLose?: number;
+  matches: DigestMatchSummary[];
+  wins: number;
+  losses: number;
+  winRate: number;
+  avgKda: number;
+  streak: number;
+  bestMatch?: DigestMatchSummary;
+  worstMatch?: DigestMatchSummary;
+  empty: boolean;
+  note?: string;
+  summaryText: string;
+}
 
 export interface DotaDigestConfig {
   enabled: boolean;
@@ -105,7 +150,11 @@ export interface DotaDigestDeps {
   /** 已绑定群友：openid → steamId（含可选别名） */
   bindings: () => Array<{ openid: string; alias?: string; steamId: string }>;
   /** 查某人最近战绩（bootstrap 注入 DotaService.recentForm） */
-  queryForm: (accountId: number, limit: number) => Promise<DotaForm>;
+  queryForm: (accountId: number, limit: number) => Promise<DigestForm>;
+  /** SteamID64 → account_id（bootstrap 注入 dota 平台的换算，persona 不 import 平台） */
+  toAccountId: (steamId: string) => number | null;
+  /** 别名取主名（bootstrap 注入 steam 平台的取名，persona 不 import 平台） */
+  primaryAlias: (alias: string | undefined) => string;
   /** 选目标群：返回群 openid 或 null（bootstrap 注入，按 Dota 相关度评分） */
   pickGroup: () => string | null;
   /** 把一段「内部提示」投递进群会话；ok=false 表示跳过（不算失败） */
@@ -157,12 +206,12 @@ function msOfIso(iso: string): number {
   return Number.isFinite(ms) ? ms : 0;
 }
 
-function line(kda: DotaMatchSummary): string {
+function line(kda: DigestMatchSummary): string {
   return `${kda.heroName} ${kda.kills}/${kda.deaths}/${kda.assists}`;
 }
 
 /** KDA 的原始写法：只给数字，语气留给 agent 自己决定 */
-function kdaText(m: DotaMatchSummary): string {
+function kdaText(m: DigestMatchSummary): string {
   return `${m.kills}/${m.deaths}/${m.assists}`;
 }
 
@@ -213,7 +262,7 @@ export function buildDeliverText(items: DigestItem[]): string {
  * `now` 只用于「最近 24h 打了几局」的窗口判断。
  */
 function highlightOf(input: {
-  form: DotaForm;
+  form: DigestForm;
   openid: string;
   alias: string;
   steamId: string;
@@ -257,7 +306,7 @@ function highlightOf(input: {
   }
 
   // 3) Carry：赢局里 KDA 最高的那局，且要够高（>= 5）
-  let bestCarry: DotaMatchSummary | undefined;
+  let bestCarry: DigestMatchSummary | undefined;
   for (const m of form.matches) {
     if (!m.win || m.kdaRatio < 5) continue;
     if (bestCarry === undefined || m.kdaRatio > bestCarry.kdaRatio) bestCarry = m;
@@ -275,7 +324,7 @@ function highlightOf(input: {
   }
 
   // 4) 拉胯局：输、KDA < 0.8、死 >= 8；取最惨的那局
-  let worstGame: DotaMatchSummary | undefined;
+  let worstGame: DigestMatchSummary | undefined;
   for (const m of form.matches) {
     if (m.win || m.kdaRatio >= 0.8 || m.deaths < 8) continue;
     if (worstGame === undefined || m.kdaRatio < worstGame.kdaRatio) worstGame = m;
@@ -512,13 +561,13 @@ export function createDotaDigest(deps: DotaDigestDeps): DotaDigestHandle {
         if (seenSteam.has(steamId)) continue;
         seenSteam.add(steamId);
 
-        const accountId = steamIdToAccountId(steamId);
+        const accountId = deps.toAccountId(steamId);
         if (accountId === null) {
           logger.warn(`dota-digest: ${openid} 的 steamId「${steamId}」不是合法 SteamID64，跳过`);
           continue;
         }
 
-        let form: DotaForm;
+        let form: DigestForm;
         try {
           form = await queryForm(accountId, cfg.matchLimit);
         } catch (err) {
@@ -540,7 +589,7 @@ export function createDotaDigest(deps: DotaDigestDeps): DotaDigestHandle {
         // 时效过滤：只分析「当天或前一天打过」的人
         if (now - lastPlayedAt > cfg.recentHours * HOUR_MS) continue;
 
-        const alias = primaryName(typeof b.alias === 'string' ? b.alias : '') || FALLBACK_ALIAS;
+        const alias = deps.primaryAlias(typeof b.alias === 'string' ? b.alias : '') || FALLBACK_ALIAS;
         const item = highlightOf({ form, openid, alias, steamId, now });
         if (item !== null) items.push(item);
       }

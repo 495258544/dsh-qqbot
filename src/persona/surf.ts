@@ -33,13 +33,7 @@ import { execFileSync } from 'node:child_process';
 import { appendFileSync } from 'node:fs';
 import type { SelfProfileService } from './self.ts';
 import { DEFAULT_TZ, hourInTz, isHourInRange } from './clock.ts';
-
-/** ego-browser 入口（vendored Linux 版，package.json 无 bin 字段） */
-const EGO_BIN =
-  '/root/.dsh/profiles/web/node_modules/dsh-ego-browser/runtime/ego-linux/bin/ego-browser.mjs';
-/** root 下必须用的 chrome wrapper（否则 --no-sandbox 缺失会假装 DevTools 超时） */
-const EGO_CHROME =
-  '/root/.dsh/profiles/web/node_modules/dsh-ego-browser/bin/ego-chrome-wrapper.sh';
+import { locateEgo } from '../shared/ego-locate.ts';
 
 /**
  * 宿主 web 搜索的最小接口（只取我们要用的那一个方法）。
@@ -421,8 +415,14 @@ export function isMeaningful(
 /**
  * Layer 2：用 ego-browser 抓某个 URL 的正文（返回纯文本，截断）。
  * 前置：EGO_LINUX_HEADLESS=1 + EGO_LINUX_CHROME=wrapper，否则必失败。
+ *
+ * 2026-11-10：入口不再硬编码 `/root/.dsh/...`，改走 shared/ego-locate.ts
+ * 从宿主 profile 解析。ego 是可选依赖，缺席时返回空串由调用方退回列表摘要，
+ * 不再抛 ENOENT（Windows / 未安装该宿主插件的机器上原本必然失败）。
  */
 export function fetchPageText(url: string, maxChars = 2000, timeoutMs = 120000): string {
+  const ego = locateEgo();
+  if (ego === undefined) return '';
   const q = JSON.stringify(url);
   const script = `
 await taskSpaces.useOrCreate('surf')
@@ -431,9 +431,9 @@ await page.waitForTimeout(400)
 const body = await page.evaluate('document.body.innerText.slice(0, ${Number(maxChars)})')
 console.log(JSON.stringify({body}))
 `;
-  const out = execFileSync('node', [EGO_BIN], {
+  const out = execFileSync('node', [ego.bin], {
     input: script,
-    env: { ...process.env, EGO_LINUX_HEADLESS: '1', EGO_LINUX_CHROME: EGO_CHROME },
+    env: { ...process.env, EGO_LINUX_HEADLESS: '1', EGO_LINUX_CHROME: ego.chrome },
     encoding: 'utf8',
     timeout: timeoutMs,
   });

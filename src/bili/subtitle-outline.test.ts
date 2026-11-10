@@ -14,7 +14,7 @@
  *     用户要的导航单位是分钟（"第 15 分钟在讲 ACL"），不是字符数。
  */
 import { describe, expect, it } from 'vitest';
-import { condenseSubtitlesByMinute } from './tools.ts';
+import { condenseSubtitlesByMinute } from './subtitles.ts';
 
 /** 造一段逐句字幕 */
 const mk = (rows: Array<[number, string]>) => rows.map(([from, content]) => ({ from, to: from + 2, content }));

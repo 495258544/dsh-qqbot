@@ -33,10 +33,11 @@ import { DeliverablesDeliverer } from '../transport/deliverables.ts';
 import { PersonaService } from '../persona/service.ts';
 import { bindPersonaWeb } from '../persona/web-wiring.ts';
 import { registerPersonaTools } from '../persona/tools.ts';
+import { registerBiliTools } from '../bili/index.ts';
 import { createXhhClient, registerXhhTools } from '../xhh/index.ts';
 import { bindPersonaRuntimeProviders } from '../setup/index.ts';
-import { SteamService, registerSteamTools } from '../steam/index.ts';
-import { createDotaService, registerDotaTools, type DotaService } from '../dota/index.ts';
+import { SteamService, registerSteamTools, primaryName } from '../steam/index.ts';
+import { createDotaService, registerDotaTools, steamIdToAccountId, type DotaService } from '../dota/index.ts';
 import { createDotaWarmup } from '../dota/warmup.ts';
 import { createBridgeProbe, renderScreenNudge } from '../persona/screen-watch.ts';
 import { createDotaDigest } from '../persona/dota-digest.ts';
@@ -334,6 +335,11 @@ export async function bootstrapGateway(
     registerPersonaTools(ctx, persona, (agent) => manager.findByAgent(agent as Parameters<SessionManager['findByAgent']>[0]), logger);
   }
 
+  // ── B 站平台工具（qq_bili_check）──
+  // 2026-11-10 从 persona/tools.ts 拆到 src/bili/：平台自带 register*Tools，
+  // 不依赖 persona。注册顺序仍是「persona 16 个 → B 站 1 个」，工具清单不变。
+  registerBiliTools(ctx, logger);
+
   // ── Steam 工具（qq_steam_bind / forget / lookup / friends / owner）──
   // 主人账号（qq_steam_owner）只有主人能改。QQ 的 openid 按 bot/appid + 会话类型(群/私聊)
   // 隔离，所以把「私聊白名单」和「persona 主人 openid」合并判断，任一处填了都算主人。
@@ -473,6 +479,9 @@ export async function bootstrapGateway(
       logger,
       bindings: boundList,
       queryForm: (accountId, limit) => dotaSvc.recentForm(accountId, limit),
+      // 平台能力由接线层注入，persona/ 不反向 import dota/ 与 steam/
+      toAccountId: steamIdToAccountId,
+      primaryAlias: primaryName,
       pickGroup: () => {
         // 1) 手工指定优先（明确要发哪个群）
         const fixed = config.persona.dotaDigestGroupId.trim();
