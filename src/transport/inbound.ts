@@ -14,6 +14,7 @@ import { appendFileSync } from 'node:fs';
 import type { SessionManager } from '../session/index.ts';
 import type { ImQQBotConfig } from '../config.ts';
 import type { ChatScope, Logger, QuotedAttachment, RawAttachment, ReplyTarget } from '../types.ts';
+import { formatAnimationMeta, probeAnimationSync } from '../media/animation-probe.ts';
 import {
   classifyContentType,
   isVoiceContentType,
@@ -29,7 +30,7 @@ import type { MiddlewareContext } from '@tencent-connect/qqbot-nodejs';
 
 // ── 类型定义 ──
 
-interface ProcessedMessage {
+export interface ProcessedMessage {
   rawEventType: string;
   kind: 'c2c' | 'group';
   senderId: string;
@@ -61,6 +62,8 @@ interface HistoryEntry {
 
 interface MentionState {
   wasMentioned?: boolean;
+  /** mentionGate 的隐式提及（"小羽…"这种不带 @ 但确实在叫她） */
+  implicit?: boolean;
 }
 
 interface MiddlewareState {
@@ -87,12 +90,319 @@ interface ProcessedAttachment {
   size?: number;
 }
 
+// ══════════════════════════════════════════════════════════════
+// 群聊同人连发聚合窗口（2026-11-12）
+// ══════════════════════════════════════════════════════════════
+//
+// 为什么需要：群里同一个人常连着发好几条短句（实测 61 对相邻消息里 33 对
+// 间隔 < 15 秒，中位 11 秒）。每条都各触发一次 agent turn、各烧一次被动回复
+// 额度，于是撞上官方「群聊每条消息最多被动回复 5 次 / 有效期 5 分钟」的限制，
+// 超出的部分被迫降级成主动推送（2026-10-31 凌晨的真实事故：连发 30+ 条，
+// 她一条条追着回，最后自己说「啊 这就超限了」）。
+//
+// 聚合窗口把这串连发压成**一次**处理：同一个人 500ms 内不再说话才真正开口，
+// 攒起来的几条按原顺序拼成一段（换行分隔）交给下游。
+//
+// 私聊不聚合：实测私聊 132 对相邻消息里 0 对 < 15 秒（中位 808 秒），
+// 聚合只会白白延后她的回应，而且私聊每条消息本来能回 4 次，不缺额度。
+//
+// ── 聚合发生在「唤醒判定之前」还是「之后」？ ──
+// 答：**之后**（personaWakeGate 是中间件，见 gateway/middleware-setup.ts 第 7.5 步，
+// handleInbound 是链尾的 message 事件处理器）。这里必须把这个事实写明，
+// 因为它决定了聚合能覆盖到哪些消息：
+//
+//   · 没被唤醒的群消息在门禁处就 ctx.stop() 了，根本到不了这里 —— 但它们
+//     **本来也不会产生回复**（只进 historyBuffer / 归属索引），不烧被动回复额度。
+//     所以"能烧额度的消息集合"恰好等于"能走到聚合点的消息集合"，聚合的目的成立。
+//     这串没醒的消息仍然会以群聊历史的形式被模型看到（historyBuffer 在门禁之前、
+//     recordOnSkip: true），不会丢上下文。
+//   · 门禁自身的逐条副作用（budget.markReplied / memory.touch / 被嫌吵检测 /
+//     emotion）刻意保持**逐条**执行：那是社交层记账与情绪刺激，压成一次会让
+//     「被嫌吵」这类信号漏判、把三个人的互动记成一次。
+//   · 真正贵且吃配额的环节（followup → agent turn → 出站分条发送）全在这里下游，
+//     一次聚合只走一遍，这才是要省的东西。
+//
+// 限制（照实写在这里，别以为已经根治）：如果一批里**第一条**没唤醒她、
+// 第二条才 @ 她，第一条到不了聚合点，只会出现在群历史里，不会拼进本批正文。
+// 若要连这条也拼进去，得把窗口提到门禁之前做（middleware），那是另一个改动。
+
+/** 聚合窗口配置（已做防御性归一，见 resolveGroupDebounce） */
+interface GroupDebounceOptions {
+  /** 滑动窗口(ms)：同人再发一条就重置；0 = 关闭聚合 */
+  windowMs: number;
+  /** 最长等待(ms)：有人一直打字也最多等这么久 */
+  maxWaitMs: number;
+  /** 最多攒几条 */
+  maxBatch: number;
+}
+
+const DEFAULT_GROUP_DEBOUNCE_MS = 500;
+const DEFAULT_GROUP_DEBOUNCE_MAX_WAIT_MS = 2000;
+const DEFAULT_GROUP_DEBOUNCE_MAX_BATCH = 3;
+
+/** 一批里的一条消息（ctx 与它的 message/state 是同一对象引用） */
+interface DebounceItem {
+  ctx: MiddlewareContext;
+  msg: ProcessedMessage;
+  state: MiddlewareState;
+}
+
+interface PendingBatch {
+  items: DebounceItem[];
+  timer: NodeJS.Timeout | null;
+  /** 第一批到达的时间——maxWait 从这里算，不受滑动窗口重置影响 */
+  startedAt: number;
+  manager: SessionManager;
+  config: ImQQBotConfig;
+  logger: Logger;
+}
+
+/** 缓冲 key = scope + peerId + senderId（同一群多人同时连发互不干扰） */
+const pendingBatches = new Map<string, PendingBatch>();
+
+/**
+ * 同一 peer 的处理串行链。
+ *
+ * 为什么要它：聚合后 handleInbound 会**提前返回**（把真正的工作交给定时器），
+ * SDK 的 concurrencyGuard（middleware-setup 第 9 步，key = scope:targetId）
+ * 因此在这一轮立刻释放锁 —— 而它存在的意义正是避免同一个群同时开两条
+ * stream_messages 把平台打成 500。这里按 peer 补一条串行链，保住那个不变量。
+ */
+const peerChains = new Map<string, Promise<void>>();
+
+/**
+ * 仅供测试：清空聚合缓冲与串行链。
+ *
+ * 这两个 Map 是模块级的（跨消息存在），测试里不清理会从上一个用例串到下一个
+ * ——比如"攒满 3 条"的用例留下未 flush 的批次，后面"关闭聚合"的用例就会
+ * 数到意外的 followup 次数。生产代码不调用它。
+ */
+export function resetGroupDebounceForTest(): void {
+  for (const batch of pendingBatches.values()) {
+    if (batch.timer) clearTimeout(batch.timer);
+  }
+  pendingBatches.clear();
+  peerChains.clear();
+}
+
+/** 从配置读窗口参数；缺项、非法值一律回落默认（配置改错不该让 bot 不开口） */
+function resolveGroupDebounce(config: ImQQBotConfig): GroupDebounceOptions {
+  const persona = config.persona as Partial<ImQQBotConfig['persona']> | undefined;
+  const num = (v: unknown, fallback: number): number =>
+    (typeof v === 'number' && Number.isFinite(v) && v >= 0 ? v : fallback);
+
+  const windowMs = num(persona?.groupDebounceMs, DEFAULT_GROUP_DEBOUNCE_MS);
+  const rawMaxWait = num(persona?.groupDebounceMaxWaitMs, DEFAULT_GROUP_DEBOUNCE_MAX_WAIT_MS);
+  const rawMaxBatch = num(persona?.groupDebounceMaxBatch, DEFAULT_GROUP_DEBOUNCE_MAX_BATCH);
+
+  return {
+    windowMs,
+    // maxWait 为 0 时按窗口处理：窗口本身已经是"静止多久才开口"，再叠 0 没有意义
+    maxWaitMs: rawMaxWait > 0 ? rawMaxWait : windowMs,
+    maxBatch: Math.max(1, Math.floor(rawMaxBatch)),
+  };
+}
+
+/** 聚合 key：同群同人 */
+function debounceKey(scope: ChatScope, peerId: string, senderId: string): string {
+  return `${scope}:${peerId}:${senderId}`;
+}
+
+/**
+ * 把这一条塞进缓冲；到点（静止 / 攒满 / 等超时）就交给 processInbound。
+ *
+ * 注意这是同步函数、不 await：真正的处理在定时器/立即 flush 里发生，
+ * 所以 handleInbound 会先返回（见上面 peerChains 的注释）。
+ */
+function bufferGroupMessage(
+  ctx: MiddlewareContext,
+  manager: SessionManager,
+  config: ImQQBotConfig,
+  logger: Logger,
+  opts: GroupDebounceOptions,
+): void {
+  const msg = ctx.message as unknown as ProcessedMessage;
+  const peerId = msg.groupOpenid ?? msg.senderId;
+  const key = debounceKey('group', peerId, msg.senderId);
+  const now = Date.now();
+
+  let batch = pendingBatches.get(key);
+  if (!batch) {
+    batch = { items: [], timer: null, startedAt: now, manager, config, logger };
+    pendingBatches.set(key, batch);
+  }
+
+  batch.items.push({ ctx, msg, state: ctx.state as MiddlewareState });
+
+  // 上限①：攒满了立刻处理（"先到先处理"）
+  if (batch.items.length >= opts.maxBatch) {
+    logger.debug(`debounce: ${key} 攒满 ${batch.items.length} 条 → 立即处理`);
+    flushBatch(key);
+    return;
+  }
+
+  // 上限②：从第一条算起等太久了
+  const elapsed = now - batch.startedAt;
+  if (elapsed >= opts.maxWaitMs) {
+    logger.debug(`debounce: ${key} 已等 ${elapsed}ms ≥ ${opts.maxWaitMs}ms → 立即处理`);
+    flushBatch(key);
+    return;
+  }
+
+  // 滑动窗口：每来一条就重置计时；但不得超过 maxWait 的剩余时间
+  const delay = Math.min(opts.windowMs, opts.maxWaitMs - elapsed);
+  if (batch.timer) clearTimeout(batch.timer);
+  batch.timer = setTimeout(() => flushBatch(key), delay);
+  // 项目惯例：定时器不阻止进程退出（见 persona/own-life.ts）
+  batch.timer.unref?.();
+}
+
+/** 取出缓冲、按顺序拼成一条，再交给下游（同一 peer 串行） */
+function flushBatch(key: string): void {
+  const batch = pendingBatches.get(key);
+  if (!batch) return;
+  pendingBatches.delete(key);
+  if (batch.timer) {
+    clearTimeout(batch.timer);
+    batch.timer = null;
+  }
+  if (batch.items.length === 0) return;
+
+  const { manager, config, logger } = batch;
+  const merged = mergeBatch(batch.items, logger);
+
+  // 同 peer 串行：上一批的 turn 收敛后再跑这一批
+  const prev = peerChains.get(merged.peerKey) ?? Promise.resolve();
+  const run = prev.then(
+    () => processInbound(merged.ctx, manager, config, logger),
+    // 上一批自己失败了也不能卡住后面的人（finally 那一路同样要吞掉异常，
+    // 否则会变成 unhandled rejection 把进程搞崩）
+    () => processInbound(merged.ctx, manager, config, logger),
+  ).catch((err: unknown) => {
+    logger.error(`debounce: 处理失败 peer=${merged.peerKey}: ${err instanceof Error ? err.message : String(err)}`);
+  });
+  peerChains.set(merged.peerKey, run);
+  void run.then(() => {
+    if (peerChains.get(merged.peerKey) === run) peerChains.delete(merged.peerKey);
+  });
+}
+
+/**
+ * 把一批同人消息合成一条。
+ *
+ * 三条硬要求：
+ *   1. **按顺序**拼正文（换行分隔），一条都不能丢；
+ *   2. 附件/下载结果全部带过去（一批里混了带图的、纯图的，图不能消失）；
+ *   3. 只动"本批最后一条"那个 ctx（它也提供最新 msgId 作被动回复目标），
+ *      其余 ctx 只读。
+ *
+ * 为什么用最后一条做载体：被动回复窗口绑在 msgId 上，取最新的那条，
+ * 5 分钟有效期才最宽。前几条的 msgId 也已被 bootstrap 里的 cacheMsgId 记着，
+ * 出站侧仍能取到。
+ */
+function mergeBatch(
+  items: DebounceItem[],
+  logger: Logger,
+): { ctx: MiddlewareContext; peerKey: string } {
+  const carrier = items[items.length - 1]!;
+  const ctx = carrier.ctx;
+  const msg = carrier.msg;
+  const state = carrier.state;
+  const peerId = msg.groupOpenid ?? msg.senderId;
+
+  if (items.length === 1) {
+    return { ctx, peerKey: `group:${peerId}` };
+  }
+
+  const texts: string[] = [];
+  const attachments: RawAttachment[] = [];
+  const downloadedFiles: DownloadedFile[] = [];
+  const downloadedQuoteFiles: DownloadedFile[] = [];
+  const processedAttachments: ProcessedAttachment[] = [];
+  let wasMentioned = false;
+  let implicit = false;
+  let anyWoken = false;
+  let quote: ResolvedQuote | undefined;
+
+  for (const item of items) {
+    const text = (item.msg.content ?? '').trim();
+    if (text) texts.push(text);
+
+    if (item.msg.attachments && item.msg.attachments.length > 0) {
+      attachments.push(...item.msg.attachments);
+    }
+    const df = item.state.downloadedFiles;
+    if (df && df.length > 0) downloadedFiles.push(...df);
+    const dqf = item.state.downloadedQuoteFiles;
+    if (dqf && dqf.length > 0) downloadedQuoteFiles.push(...dqf);
+    const pa = item.state.processedAttachments;
+    if (pa && pa.length > 0) processedAttachments.push(...pa);
+
+    if (item.state.mention?.wasMentioned === true) wasMentioned = true;
+    if (item.state.mention?.implicit === true) implicit = true;
+    if ((item.state as Record<string, unknown>).collectOnly !== true) anyWoken = true;
+
+    // 引用块：取本批里第一个真正的引用（最后一条常常是「？」这种空引用追问，
+    // 丢掉前一条的引用就丢掉了"她在回应哪句话"这个关键归属）
+    if (!quote && (item.state.quote?.text || item.state.quote?.entry?.content)) {
+      quote = item.state.quote;
+    }
+  }
+
+  // ── 正文按原顺序拼接 ──
+  msg.content = texts.join('\n');
+
+  // ── 附件全量带过去（按到达顺序，与正文对齐）──
+  if (attachments.length > 0) msg.attachments = attachments;
+  if (downloadedFiles.length > 0) state.downloadedFiles = downloadedFiles;
+  if (downloadedQuoteFiles.length > 0) state.downloadedQuoteFiles = downloadedQuoteFiles;
+  if (processedAttachments.length > 0) state.processedAttachments = processedAttachments;
+
+  // ── 唤醒状态：本批任一条醒过就算醒（否则纯收集模式会吞掉正文）──
+  state.mention = { ...(state.mention ?? {}), wasMentioned, implicit };
+
+  // ── 引用块补齐 ──
+  if (quote && !state.quote) state.quote = quote;
+
+  // ── 只收图模式：整批都是"只收集"才沿用，混进唤醒消息就正常回话 ──
+  (state as Record<string, unknown>).collectOnly = !anyWoken;
+
+  logger.info(
+    `debounce: 聚合 ${items.length} 条 → scope=group peerId=${peerId} sender=${msg.senderId} `
+    + `text="${texts.join(' / ').slice(0, 120)}" attachments=${attachments.length}`,
+  );
+
+  return { ctx, peerKey: `group:${peerId}` };
+}
+
 // ── 主处理函数 ──
 
 /**
- * 处理 QQ 入站消息（已经过 SDK 中间件链）
+ * 处理 QQ 入站消息（已经过 SDK 中间件链）。
+ *
+ * 群聊走「同人连发聚合窗口」（见文件上部那段长注释），私聊立即处理。
  */
 export async function handleInbound(
+  ctx: MiddlewareContext,
+  manager: SessionManager,
+  config: ImQQBotConfig,
+  logger: Logger,
+): Promise<void> {
+  const msg = ctx.message as unknown as ProcessedMessage;
+  const scope: ChatScope = msg.kind === 'group' ? 'group' : 'c2c';
+  const debounce = resolveGroupDebounce(config);
+
+  // 私聊 / 关闭聚合（groupDebounceMs: 0）→ 原来的立即处理路径，一行不差
+  if (scope === 'group' && debounce.windowMs > 0) {
+    bufferGroupMessage(ctx, manager, config, logger, debounce);
+    return;
+  }
+
+  await processInbound(ctx, manager, config, logger);
+}
+
+/** 真正干活的部分：组装 agentBody → 会话 → followup → 等 turn 收敛 */
+async function processInbound(
   ctx: MiddlewareContext,
   manager: SessionManager,
   config: ImQQBotConfig,
@@ -657,6 +967,18 @@ function buildDynamicCtx(msg: ProcessedMessage, state: MiddlewareState): string 
 /**
  * 渲染单个媒体附件（image/video/file）的上下文行内容，不含列表前缀。
  * 当前消息与引用消息共用，保证附件格式统一。语音不在此处理（见 buildDynamicCtx）。
+ *
+ * ## 动图标注（2026-11-12）
+ *
+ * 以前这里只输出 `Image: /path/x.gif`，视觉模型按单图处理 → 只取首帧，
+ * 42 帧的动图丢掉 41 帧。她的原话："这中间做了什么动作我全不知道……
+ * 所以这张图给我的信息量，其实和一张截图差不多。"
+ *
+ * 根因是她**不知道收到的是动图**，不是不会抽帧。所以这里只加一行零成本的
+ * 元信息（帧数/时长/尺寸 + 想看动作用哪个工具），不自动抽帧 —— 抽帧要视觉
+ * 调用，成本和延迟都该由她自己决定要不要付（见 qq_watch_animation）。
+ *
+ * 静态图输出**一个字符都不变**。探测任何异常都静默退化（见 animation-probe）。
  */
 function renderMediaLine(
   kind: Exclude<MediaKind, 'voice'>,
@@ -666,10 +988,14 @@ function renderMediaLine(
   size: number | undefined,
 ): string {
   switch (kind) {
-    case 'image':
-      return localPath
-        ? `Image: ${localPath}`
-        : `Image: ${url ?? filename ?? 'image'}`;
+    case 'image': {
+      if (!localPath) return `Image: ${url ?? filename ?? 'image'}`;
+      const anim = safeProbeAnimation(localPath);
+      if (anim === null) return `Image: ${localPath}`;
+      // 时长读不到时 formatAnimationMeta 会省略，不会写出假的 0.00s
+      return `Image: ${localPath} (${formatAnimationMeta(anim)} —— 你可能只看到第一帧，`
+        + `想看动作用 qq_watch_animation)`;
+    }
     case 'video':
       return localPath
         ? `Video: ${localPath}`
@@ -678,6 +1004,21 @@ function renderMediaLine(
       return localPath
         ? `File: ${localPath}`
         : `File: ${filename ?? 'file'} (${formatFileSize(size ?? 0)})`;
+  }
+}
+
+/**
+ * 动图探测的**兜底封装**：任何异常都退回「不知道」（= 按静态图渲染）。
+ *
+ * 为什么要这一层：附件行渲染在消息主路径上，它抛异常会连累整条消息进不来。
+ * probeAnimationSync 自己已经全部 catch 过，这里再兜一次是防未来改动
+ * （比如有人在里面加了个会抛的调用）—— 渲染失败绝不能比看不懂动图更严重。
+ */
+function safeProbeAnimation(localPath: string): ReturnType<typeof probeAnimationSync> {
+  try {
+    return probeAnimationSync(localPath);
+  } catch {
+    return null;
   }
 }
 

@@ -249,6 +249,66 @@ const DAMPEN_RATE = 0.15;
 /** 称呼被叫多少次才进入"候选"（还需她表态接受） */
 const NAME_ACCEPT_THRESHOLD = 3;
 
+// ───────────── findings 去重（2026-11-12）─────────────
+//
+// 实测的坏样子：`self.json` 里「咖啡」8 条 findings 只有 3 条内容不同，
+// 「读书 书单」8 条里只有 4 条不同；11-12 08:06 那轮把 11-11 21:29 的
+// 同一批网页**原样又写了一遍**。
+//
+// 根因不是"写多了"，是 `addFinding` 里**根本没有内容判据**：
+// 它只按 topic 找条目，然后 `push` + `shift`。于是同一个 URL 每轮冲浪
+// 都占一格，8 格很快被 3~4 篇网页的重复副本填满 —— 剩下的真新内容
+// 反而被 shift 挤掉。也就是说"重复"不只是难看，它**让记忆变少**。
+//
+// 判据（按可靠性排序，不是按字符串相等）：
+//   1. `source`（URL）—— 同一个网页就是同一条情报，即使标题被搜索引擎
+//      改写过、摘要截断位置不同；
+//   2. 摘要的规范化前缀 —— 没有 URL 的（如 qq_mark_interest 的 note）
+//      退回文本比对：去掉空白与标点后取前 N 字。
+//      去标点是因为同一句话被抓取两次，标点（全角/半角、引号方向）
+//      常会变，而汉字不会。
+//
+// 命中重复时**不 push**，只把那条的 `at` 推到 now ——
+// "又看了一遍"是续命信号，不是新情报，但这仍然算一次投入。
+/** findings 上限（防膨胀） */
+const MAX_FINDINGS = 8;
+/** 摘要去重时取规范化后的前多少字（标题一般在最前面，够分辨） */
+const FINDING_SUMMARY_KEY_LEN = 40;
+
+/**
+ * 摘要的比对键：去掉空白与标点/符号后取前 N 字。
+ *
+ * 只用于比对，**不写回数据** —— findings 里存的仍是原始 summary。
+ */
+function findingSummaryKey(summary: string): string {
+  // \p{P} 标点、\p{S} 符号（含全角标点、箭头、表情等），\s 空白
+  return String(summary ?? '')
+    .replace(/[\s\p{P}\p{S}]+/gu, '')
+    .slice(0, FINDING_SUMMARY_KEY_LEN);
+}
+
+/**
+ * URL 的比对键：只把「确实等价」的差异抹平。
+ *
+ * 去掉的：首尾空白、尾部斜杠、协议（http/https）、`www.` 前缀、
+ * 以及 host 的大小写 —— 这几样是同一个页面的常见写法差异
+ * （同一篇被抓两次，一次 http 一次 https；或尾部多一个 `/`）。
+ *
+ * **路径与查询串保持原样**（含大小写）：很多站点路径区分大小写
+ * （`/wiki/Coffee` vs `/wiki/coffee` 是两篇），把它们抹平会
+ * 把不同页面误并成一条 —— 那是**丢数据**，比留一条重复更糟。
+ */
+function findingSourceKey(source?: string): string {
+  const raw = String(source ?? '').trim();
+  if (!raw) return '';
+  const m = /^(?:https?:\/\/)?([^/?#]+)(.*)$/i.exec(raw);
+  if (!m) return raw;
+  const host = (m[1] ?? '').toLowerCase().replace(/^www\./, '');
+  // 尾部斜杠去掉（但保留根路径为空时的形状）
+  const rest = (m[2] ?? '').replace(/\/+$/, '');
+  return `${host}${rest}`;
+}
+
 /** 默认画像 */
 function emptyProfile(): SelfProfile {
   return {
@@ -633,16 +693,53 @@ export class SelfProfileService {
    * 而 lastAt 是衰减的计时基准 —— 结果是"她越研究某个话题，
    * 那个话题在数据上越接近过期"，因为她查得越多、旧时间戳显得越旧。
    * 语义上"主动查资料"本来就是对这个话题最强的投入信号，必须续命。
+   *
+   * M-dup（2026-11-12）修的 bug：**同一批网页每轮冲浪都原样再写一遍**。
+   * 现在写入前先比对已有 findings（先看 source/URL，再看摘要规范化前缀）：
+   *   · 命中 → 不 push，只把那条的 `at` 推到 now（"又看了一遍"= 续命，不是新情报）
+   *   · 没命中 → 正常 push，超上限才 shift
+   * 无论哪种，`lastAt` / `lastSurfAt` 一律照旧刷新 —— 重复阅读同样是投入，
+   * 这条语义不能因为去重而丢（否则"她越查越接近过期"的老 bug 会以新形式回来）。
    */
   addFinding(topic: string, summary: string, source?: string): void {
     const e = this.data.interests.find((i) => i.topic === topic);
     if (!e) return;
     const now = Date.now();
     e.findings = e.findings ?? [];
-    e.findings.push({ at: now, summary, source });
-    // 上限 8 条，防膨胀
-    while (e.findings.length > 8) e.findings.shift();
-    // 续命：主动查 = 投入，等价于一次 ACCESS 事件
+    // 去重：URL 优先，其次摘要规范化前缀
+    const srcKey = findingSourceKey(source);
+    const sumKey = findingSummaryKey(summary);
+    const isSame = (f: { at: number; summary: string; source?: string }): boolean => {
+      const fSrc = findingSourceKey(f.source);
+      // 判据一（优先）：同一个 URL 就是同一条情报 —— 标题被搜索引擎改写、
+      // 摘要截断位置不同，都不算新内容。
+      if (srcKey && fSrc) return srcKey === fSrc;
+      // 判据二（其次，仅当 URL 不可比时）：规范化摘要前缀相同即为同一段话。
+      // 这是 qq_mark_interest 的 note 路径（没有 URL），以及老数据里缺 source 的条目。
+      //
+      // 为什么两边都有 URL 时**不**退回文本：那是"优先 URL"的另一半含义 ——
+      // 不同 URL 就是不同网页（同一篇被转载也是两个出处），
+      // 宁可留下两个出处，也不要因为开头 40 字一样就把其中一条吞掉。
+      const fSum = findingSummaryKey(f.summary);
+      if (sumKey && fSum && sumKey === fSum) return true;
+      // 两边都没有内容：空写入也不该一格一格堆起来
+      return !srcKey && !fSrc;
+    };
+    // 命中可能不止一条（旧数据里已经堆了重复），全部续上时间
+    let hit = false;
+    for (const f of e.findings) {
+      if (!isSame(f)) continue;
+      f.at = now;
+      // 旧条目缺出处时补上（同一件事，不会写成两件）
+      if (srcKey && !findingSourceKey(f.source)) f.source = source;
+      hit = true;
+    }
+    if (!hit) {
+      e.findings.push({ at: now, summary, source });
+      // 上限 8 条，防膨胀
+      while (e.findings.length > MAX_FINDINGS) e.findings.shift();
+    }
+    // 续命：主动查 = 投入，等价于一次 ACCESS 事件（重复阅读也算）
     e.lastAt = now;
     if (e.frozen && this.strengthOf(e) >= REVIVE_THRESHOLD) e.frozen = false;
     this.data.lastSurfAt = now;

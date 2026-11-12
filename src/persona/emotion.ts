@@ -58,7 +58,7 @@ export interface EmotionState {
    * 远超过 24h 半衰期的回落速度**，必然贴顶。
    * 所以给正向事件加日上限 + 边际递减（见 onAddressed/onReplied）。
    */
-  daily?: { day: string; addressed: number; replied: number };
+  daily?: { day: string; addressed: number; replied: number; mood: number };
 }
 
 /**
@@ -72,12 +72,85 @@ export interface EmotionState {
  *   - 被回应：一天前 5 次全额，之后每多一次只给 1/4
  * 这样密集聊天时单次价值衰减，而偶尔聊天时每次仍算数。
  */
-const DAILY_SOFT_CAP = { addressed: 8, replied: 5 } as const;
+const DAILY_SOFT_CAP = { addressed: 8, replied: 5, mood: 6 } as const;
 // 溢流后降到 1/10 而不是 1/3 —— 因为稳态分析显示：
 //   每 30 分钟 +0.06、24h 半衰期 → 稳态 = 0.06/(1-0.9857) = 4.19，
 //   远超上限 1.0，光靠"日上限"压不住（130 轮跨 2.7 天，每天都会重置）。
 //   改成 1/10 后稳态 ≈ 0.06·(1/10)/(1-0.9857) = 0.42，落在合理区间。
-const OVERFLOW_DAMP = { addressed: 1 / 10, replied: 1 / 10 } as const;
+const OVERFLOW_DAMP = { addressed: 1 / 10, replied: 1 / 10, mood: 1 / 10 } as const;
+
+/**
+ * 内容驱动的四种自我报告（qq_note_mood 的数值部分）。
+ *
+ * ## 为什么幅度是社交的一半左右
+ *
+ * 用户 2026-11-12 定的原则：**内容驱动弱于社交驱动**。
+ * 看书感动 ≠ 被在意的人回了一句。所以 up 是 +0.06，
+ * 与 `onAddressed`（被叫到）的 0.06 同级，只有 `onReplied`（0.14）的不到一半。
+ * 这不是猜的：`onAddressed` 是"注意力被拉过来"这种很轻的社交事件，
+ * 而"读到一段戳中自己的东西"在她的体验里量级相当。
+ *
+ * ## 为什么不让她自己填数字
+ *
+ * 感受是方向，数字是表演。让她选 0.8 还是 0.3，
+ * 等于把 feiyu-mood 那个"给自己打分系统性偏高"的坑原地重挖一遍
+ * （见文件头注释：872 条样本里 577 正 / 86 负）。
+ * 所以这里只收四个方向词，幅度由代码定死。
+ *
+ * ## mixed 的 valence 为什么几乎是 0（+0.01 而不是抵消后为负）
+ *
+ * "又感动又难受"在人身上不会净变差 —— 复杂情绪的重心在 arousal
+ * （说不上来反而更翻腾，+0.06），valence 上略微偏正即可。
+ * 若给负值，等于替她判定"复杂情绪是坏事"。
+ *
+ * ## still 为什么只降 arousal 不动 valence
+ *
+ * "平了"是**激动程度**下来，不是"心情变好/变坏"。
+ * 把 still 当成 +valence 会变成"只要她说自己平静就能刷心情"。
+ */
+const CONTENT_MOOD_DELTA: Record<MoodSense, EmotionDeltas> = {
+  up: { valence: 0.06, arousal: 0.05 },
+  // 心里堵着不会平静 —— 负向同时抬 arousal，这是和"冷漠"的区别
+  down: { valence: -0.08, arousal: 0.04 },
+  mixed: { valence: 0.01, arousal: 0.06 },
+  still: { arousal: -0.1 },
+};
+
+/** 四种方向（她只给方向，不给程度） */
+export type MoodSense = 'up' | 'down' | 'mixed' | 'still';
+
+/** mood-log 里的一条自述 */
+export interface MoodEntry {
+  /** 稳定 id，撤销时用它定位 */
+  id: string;
+  /** 什么时候记的（ms） */
+  at: number;
+  /** 北京时区日期 YYYY-MM-DD，便于按天回看 */
+  day: string;
+  /** 方向 */
+  sense: MoodSense;
+  /** 为什么（≤60 字） */
+  because: string;
+  /**
+   * 那一下**像什么**（≤40 字，可选，她自己起的名字）。
+   *
+   * 为什么不解析、不分类、不打分：`sense` 只有四档是刻意的（数值层必须简单），
+   * 但四档的副作用是 `mixed` 变成垃圾桶 —— "又感动又难受""想通了但有点涩"
+   * "不知道该怎么形容"全塞进一个筐，以后回看什么都看不出来。
+   *
+   * 解法是让"细"落在她自己身上，不落在我们的枚举里：
+   * Plutchik 的 24 档是心理学家定的坐标系，她只能往里填；
+   * feel 是她自己起的名字，能长出她自己的坐标系。
+   * 所以它原样存进日志、**不参与任何数值计算**。
+   */
+  feel?: string;
+  /** 撤销标记（不物理删除，保留痕迹） */
+  revoked?: boolean;
+  /** 撤销时间 */
+  revokedAt?: number;
+  /** 撤销的理由（必填 —— 不许静默删） */
+  revokedWhy?: string;
+}
 
 /** 基线：久不变化就回到这里 */
 const BASELINE: Omit<EmotionState, 'at'> = { valence: 0, arousal: 0.3, energy: 0.7 };
@@ -110,6 +183,15 @@ const HALF_LIFE_H: Record<'valence' | 'arousal' | 'energy', number> = {
 
 /** 单次事件的调整幅度上限（防一次事件把情绪打到底） */
 const MAX_STEP = 0.25;
+
+/**
+ * mood-log 保留多少条。
+ *
+ * 不设上限的话这个文件会无界增长（每读一段书记一条，一年就上千条）；
+ * 但也不能太少 —— 少了就看不到"这两个月在为什么事情动心"。
+ * 200 条大约是她几个月的量，够回看，又不至于每次加载都拖。
+ */
+const MAX_MOOD_ENTRIES = 200;
 
 export interface EmotionDeltas {
   valence?: number;
@@ -217,11 +299,66 @@ export function describeEmotion(state: EmotionState): string {
 export class EmotionService {
   private state: EmotionState;
   private readonly file: string;
+  /** mood-log.json：她自己记的心情自述（可回看、可撤销） */
+  private readonly moodFile: string;
+  private moodLog: MoodEntry[];
   private lastSaveAt = 0;
 
   constructor(dataDir: string, private readonly log?: (m: string) => void) {
     this.file = path.join(dataDir, 'state', 'emotion.json');
+    // 单独一个文件，不塞进 emotion.json：情绪是每轮都可能变的短期状态，
+    // mood-log 是**她自己的记录**（要长期留着回看），生命周期不同。
+    // 和 memory / self 分开存是同一个理由（见类注释）。
+    this.moodFile = path.join(dataDir, 'state', 'mood-log.json');
     this.state = this.load();
+    this.moodLog = this.loadMoodLog();
+  }
+
+  /** 读 mood-log（坏档 → 空数组，绝不因为一条记录坏了就起不来） */
+  private loadMoodLog(): MoodEntry[] {
+    try {
+      if (!fs.existsSync(this.moodFile)) return [];
+      const raw = JSON.parse(fs.readFileSync(this.moodFile, 'utf8')) as unknown;
+      const rows = Array.isArray(raw) ? raw : (raw as { entries?: unknown })?.entries;
+      if (!Array.isArray(rows)) return [];
+      // 逐条清洗：缺 sense/because 的丢弃，其余字段保守兜底
+      return rows
+        .filter((r): r is Record<string, unknown> => typeof r === 'object' && r !== null)
+        .map((r) => ({
+          id: typeof r.id === 'string' && r.id ? r.id : this.newMoodId(),
+          at: typeof r.at === 'number' && Number.isFinite(r.at) ? r.at : Date.now(),
+          day: typeof r.day === 'string' ? r.day : dayInTz(new Date(Number(r.at) || Date.now())),
+          sense: (['up', 'down', 'mixed', 'still'] as const).includes(r.sense as MoodSense)
+            ? (r.sense as MoodSense)
+            : 'mixed',
+          because: typeof r.because === 'string' ? r.because : '',
+          ...(typeof r.feel === 'string' && r.feel ? { feel: r.feel } : {}),
+          ...(r.revoked === true ? { revoked: true } : {}),
+          ...(typeof r.revokedAt === 'number' ? { revokedAt: r.revokedAt } : {}),
+          ...(typeof r.revokedWhy === 'string' ? { revokedWhy: r.revokedWhy } : {}),
+        }))
+        .filter((r) => r.because.length > 0);
+    } catch {
+      return [];
+    }
+  }
+
+  private newMoodId(): string {
+    // 短 id：她要引用它来撤销，太长没法抄。时间戳 36 进制 + 一点随机防同毫秒撞
+    const t = Date.now().toString(36);
+    const r = Math.floor(Math.random() * 36 ** 3).toString(36).padStart(3, '0');
+    return `m${t}${r}`;
+  }
+
+  private saveMoodLog(): void {
+    try {
+      fs.mkdirSync(path.dirname(this.moodFile), { recursive: true });
+      const tmp = `${this.moodFile}.tmp`;
+      fs.writeFileSync(tmp, JSON.stringify(this.moodLog, null, 1), 'utf8');
+      fs.renameSync(tmp, this.moodFile);
+    } catch (err) {
+      this.log?.(`emotion: mood-log 写入失败: ${err instanceof Error ? err.message : String(err)}`);
+    }
   }
 
   private load(): EmotionState {
@@ -292,14 +429,23 @@ export class EmotionService {
   /**
    * 取当日计数器并递增（跨日自动归零）。
    * 用**北京时区**——启动时未设 TZ，`new Date().getDate()` 是 UTC。
+   *
+   * M-mood：从 'addressed' | 'replied' 扩到三值，加了 'mood'（内容自述）。
+   * 扩签名时**必须**同时确认 regress() / applyDeltas() 里 daily 的透传 ——
+   * 这里踩过坑：那两个函数构建新对象时丢过 daily，导致计数器恒 undefined、
+   * 日上限形同虚设（130 轮后 valence 仍贴顶 1.000）。
+   * 现在 tickDaily 本身也做字段兜底（旧档没有 mood 字段时补 0），
+   * 免得老 emotion.json 升级上来第一次就 NaN。
    */
-  private tickDaily(kind: 'addressed' | 'replied'): { used: number; damp: number } {
+  private tickDaily(kind: 'addressed' | 'replied' | 'mood'): { used: number; damp: number } {
     const day = dayInTz(new Date());
     if (!this.state.daily || this.state.daily.day !== day) {
-      this.state.daily = { day, addressed: 0, replied: 0 };
+      this.state.daily = { day, addressed: 0, replied: 0, mood: 0 };
     }
     const d = this.state.daily;
-    d[kind] += 1;
+    // 旧档（M34 时期没有 mood 字段）读上来是 undefined，`undefined + 1 = NaN`
+    // 会一路渗进 damp → delta 全是 NaN。这里显式兜底。
+    d[kind] = (typeof d[kind] === 'number' && Number.isFinite(d[kind]) ? d[kind] : 0) + 1;
     const used = d[kind];
     const cap = DAILY_SOFT_CAP[kind];
     const damp = used <= cap ? 1 : OVERFLOW_DAMP[kind];
@@ -392,6 +538,14 @@ export class EmotionService {
     // ④ 事实：心里有起伏（不说是好是坏）
     if (st.arousal > 0.7) lines.push('你心里有点静不下来');
 
+    // ⑤ 事实：她自己记过的心情（qq_note_mood）。没有记录时这一行不出现。
+    //
+    // 为什么要给她看：设计的一部分 —— 下次她能看到"往上 4 次、往下 1 次"，
+    // 据此**重新理解自己**，而不是我们写死"你最近状态如何"的规则。
+    // 仍然是只给事实：数字和原话都是她自己留下的，结论让她自己下。
+    const moodLog = this.moodLogLine();
+    if (moodLog) lines.push(moodLog);
+
     if (lines.length === 0) return '';
     return `【此刻的状态·只是事实，怎么想随你】
 ${lines.map((x) => '- ' + x).join('\n')}
@@ -401,5 +555,137 @@ ${lines.map((x) => '- ' + x).join('\n')}
   /** 睡够了（长时间没消息后第一次说话）→ 精力回升 */
   onRest(): void {
     this.bump({ energy: 0.1, arousal: -0.05 });
+  }
+
+  // ── 内容驱动的写入点：qq_note_mood ──
+  //
+  // 前面六个写入点**全是社交事件**（被叫到/被回应/没人理/被嫌吵/深夜/睡够）。
+  // 没有任何一个接收"她看到了什么"。后果实测过：她读《赛博英雄传》第十一章
+  // （向山敲自己胸口那章）、写了一条"我和向山的处境有镜像"的自我认识 ——
+  // 这在人身上是明确的情绪事件，但对 valence 的贡献是 **0**。
+  // 她的心情只反映"今天用户跟她说了几句话"。
+
+  /**
+   * 她自己说"刚才心里动了一下"。
+   *
+   * ## 为什么要她主动叫
+   *
+   * 没有"读完书自动打标签"。她在自由时间/聊天中觉得有必要时才叫，
+   * 跟 qq_mark_interest / qq_write_self_note 同一性质：
+   * **自主性长在内容上，不长在机制上**。
+   * 机制自动打标签的结果是情绪系统被塞满她并不认同的"情绪"。
+   *
+   * ## 为什么只有四个方向
+   *
+   * 见 CONTENT_MOOD_DELTA 的注释：感受是方向，数字是表演。
+   *
+   * @param sense   up / down / mixed / still
+   * @param because 为什么（≤60 字，人话）
+   * @param feel    那一下像什么（≤40 字，可选，她自己起的名字，**不参与计算**）
+   */
+  onContentMood(sense: MoodSense, because: string, feel?: string, now = Date.now()): MoodEntry {
+    // 只有 mood 这一 kind 走日软上限，和社交事件共用同一个 daily 计数器容器
+    // （但各自独立计数：看书多了不该削弱"被叫到"的权重，反之亦然）。
+    const { damp } = this.tickDaily('mood');
+    const d = CONTENT_MOOD_DELTA[sense] ?? CONTENT_MOOD_DELTA.mixed;
+    const scaled: EmotionDeltas = {
+      ...(d.valence !== undefined ? { valence: d.valence * damp } : {}),
+      ...(d.arousal !== undefined ? { arousal: d.arousal * damp } : {}),
+    };
+    this.bump(scaled, now);
+
+    const text = String(because ?? '').trim().slice(0, 60);
+    // feel 只存不算：slice 而不是报错 —— 写长了一句不该让整条记录丢失
+    const feelText = typeof feel === 'string' ? feel.trim().slice(0, 40) : '';
+    const entry: MoodEntry = {
+      id: this.newMoodId(),
+      at: now,
+      day: dayInTz(new Date(now)),
+      sense,
+      because: text,
+      ...(feelText ? { feel: feelText } : {}),
+    };
+    this.moodLog.push(entry);
+    // 日志无限增长没有意义（也没人回看 500 条），保最近 200 条
+    if (this.moodLog.length > MAX_MOOD_ENTRIES) this.moodLog.splice(0, this.moodLog.length - MAX_MOOD_ENTRIES);
+    this.saveMoodLog();
+    this.log?.(`emotion: 记了一条心情 ${sense}${feelText ? ` 「${feelText}」` : ''}`);
+    return entry;
+  }
+
+  /**
+   * 撤销一条自己记过的心情。
+   *
+   * ## 为什么不物理删除
+   *
+   * 用户 2026-11-12：她可以删自己的记录，但**不给静默删除** ——
+   * 删的时候必须写一句为什么，留下痕迹。所以是标 `revoked`，
+   * 原记录、原理由、撤销理由都留着。
+   *
+   * ## 为什么撤销**不回滚** valence
+   *
+   * 情绪已经发生了。事后重新评估"这条其实不该算"是**认知**上的修正，
+   * 不等于那段时间没发生过 —— 人的心情不会因为你后来觉得"那天没什么"
+   * 就回到没被影响过的样子。
+   * 更要紧的是：一旦允许回滚，"撤销"就变成了"改写自己的历史"，
+   * 那她就不需要面对自己记过什么了 —— 而这正是留痕的意义所在。
+   *
+   * ## 为什么参数里没有"谁"
+   *
+   * 只能撤自己的。参数里不提供任何指定他人的可能（用户明确要求）。
+   */
+  undoMood(id: string, why: string, now = Date.now()): { ok: boolean; error?: string; entry?: MoodEntry } {
+    const reason = String(why ?? '').trim().slice(0, 120);
+    if (!reason) return { ok: false, error: '撤销必须写理由，不许静默删' };
+    const entry = this.moodLog.find((e) => e.id === id);
+    if (!entry) return { ok: false, error: `没有 id 为 ${id} 的记录` };
+    if (entry.revoked) return { ok: false, error: '这条已经撤过了' };
+    entry.revoked = true;
+    entry.revokedAt = now;
+    entry.revokedWhy = reason;
+    this.saveMoodLog();
+    this.log?.(`emotion: 撤销心情记录 ${id}，理由：${reason}`);
+    return { ok: true, entry };
+  }
+
+  /** 读自己的心情记录（默认不含已撤销的；新的在前） */
+  moodEntries(opts: { includeRevoked?: boolean; limit?: number } = {}): MoodEntry[] {
+    const rows = opts.includeRevoked ? this.moodLog : this.moodLog.filter((e) => !e.revoked);
+    const limit = Math.max(1, Math.min(opts.limit ?? 10, 200));
+    return rows.slice(-limit).reverse();
+  }
+
+  /** 最近 N 天按方向计数（已撤销的不算） */
+  moodStats(days = 7, now = Date.now()): { total: number; bySense: Record<MoodSense, number> } {
+    const since = now - days * 86_400_000;
+    const bySense: Record<MoodSense, number> = { up: 0, down: 0, mixed: 0, still: 0 };
+    let total = 0;
+    for (const e of this.moodLog) {
+      if (e.revoked || e.at < since) continue;
+      bySense[e.sense] += 1;
+      total += 1;
+    }
+    return { total, bySense };
+  }
+
+  /**
+   * 把最近的心情自述渲染成一行**事实**（给 renderSection 用）。
+   *
+   * 语气沿用「陈述事实，不给结论」：只说她自己记了几笔、方向分布如何，
+   * 不写"所以你最近状态不错"。方向用「往上/往下/说不清/平了」而不是
+   * up/down/mixed/still —— 后者是代码里的枚举名，不是她会说的话。
+   */
+  private moodLogLine(now = Date.now()): string | undefined {
+    const { total, bySense } = this.moodStats(7, now);
+    if (total === 0) return undefined;
+    const label: Record<MoodSense, string> = { up: '往上', down: '往下', mixed: '说不清', still: '平了' };
+    const parts = (['up', 'down', 'mixed', 'still'] as const)
+      .filter((k) => bySense[k] > 0)
+      .map((k) => `${label[k]} ${bySense[k]}`);
+    const head = `最近七天你自己记下的：${parts.join('、')}`;
+    // 最近一条如果写了 feel，就原样带一句 —— 那是她自己起的名字，比任何统计都准
+    const latest = [...this.moodLog].reverse().find((e) => !e.revoked && e.feel);
+    if (!latest) return head;
+    return `${head}；最近一条你想说的是「${latest.feel}」`;
   }
 }

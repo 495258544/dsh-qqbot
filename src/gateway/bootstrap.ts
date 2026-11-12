@@ -29,6 +29,7 @@ import { startMediaCleanup } from '../media/media-cleaner.ts';
 import { ensureVisionInputModal, registerDescribeImageTool } from '../media/vision-tool.ts';
 import { registerSendFileTool, type MediaSenderLike } from '../media/send-file-tool.ts';
 import { registerStickerTool, registerArchiveTool } from '../media/sticker-tool.ts';
+import { registerWatchAnimationTool } from '../media/animation-tool.ts';
 import { DeliverablesDeliverer } from '../transport/deliverables.ts';
 import { PersonaService } from '../persona/service.ts';
 import { bindPersonaWeb } from '../persona/web-wiring.ts';
@@ -353,6 +354,12 @@ export async function bootstrapGateway(
   // ── 视觉工具注册（qqbot_describe_image，复用 dsh llm + attachments） ──
   ensureVisionInputModal(config.vision, logger);
   registerDescribeImageTool(ctx, config.vision, logger);
+
+  // ── 动图理解（qq_watch_animation：抽关键帧 + 拼图 + 逐帧描述） ──
+  // 和 describe_image 并列注册，但**行为不同**：图片元信息已由入站管线自动
+  // 带上（见 transport/inbound.ts 的 renderMediaLine），抽帧要视觉调用，
+  // 由她自己决定什么时候付这个成本。
+  registerWatchAnimationTool(ctx, config.vision, logger);
 
   // ── 附件发送工具注册（qqbot_send_file，发送器见上方 mediaSender） ──
   registerSendFileTool(ctx, mediaSender, manager, config, logger);

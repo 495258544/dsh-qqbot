@@ -179,6 +179,19 @@ export interface PersonaConfig {
   dotaDigestRecentHours: number;
   /** 判断「这群人在聊 Dota」的关键词表（可改；默认含「打刀」等群里的习惯说法） */
   dotaKeywords: string[];
+  /**
+   * 群聊「同一发送者连发聚合窗口」(ms)：同一个人连发几条时，等这么久没新消息
+   * 才真正开口一次，别再一条条回。滑动窗口（每来一条重置），默认 500。
+   * 设 0 = 关闭聚合，恢复立即处理。私聊不受影响。
+   *
+   * 为什么需要：群聊被动回复上限是「每条消息 5 次 / 5 分钟」，连发 30 条时
+   * 逐条回复会瞬间烧光，超出部分被迫降级成主动推送（实测事故见 inbound.ts）。
+   */
+  groupDebounceMs: number;
+  /** 聚合窗口最长等待(ms)：有人一直打字也不能永远不开口，默认 2000 */
+  groupDebounceMaxWaitMs: number;
+  /** 聚合窗口最多攒几条，攒满先处理，默认 3 */
+  groupDebounceMaxBatch: number;
 }
 
 /**
@@ -446,6 +459,9 @@ export const ConfigSchema: Schema<ImQQBotConfig> = Schema.object({
     dotaDigestMatchLimit: Schema.number().default(10).description('每人查最近几局（默认 10）'),
     dotaDigestRecentHours: Schema.number().default(24).description('只分析最近这么多小时内打过 Dota 的人（默认 24：只播新鲜的，避免拿旧战绩炒冷饭）'),
     dotaKeywords: Schema.array(Schema.string()).default([]).description('判断「这群人在聊 Dota」的关键词表。留空 = 用内置默认表（已含 dota/刀塔/打刀/开黑/上号/天梯/战绩 等）。不同群叫法不同时可在这里覆盖'),
+    groupDebounceMs: Schema.number().default(500).description('群聊同人连发聚合窗口(ms)：同一个人连发时，等这么久没新消息才开口一次（滑动窗口，每来一条重置）。默认 500；设 0 = 关闭聚合恢复逐条处理。私聊不受影响。用来避免逐条回复把「每条群消息只能被动回复 5 次」的额度烧光'),
+    groupDebounceMaxWaitMs: Schema.number().default(2000).description('聚合窗口最长等待(ms)：有人一直在打字也最多等这么久就开口，默认 2000'),
+    groupDebounceMaxBatch: Schema.number().default(3).description('聚合窗口最多攒几条消息，攒满立即处理，默认 3'),
   }).default({
     enabled: false,
     dataDir: '',
@@ -493,6 +509,9 @@ export const ConfigSchema: Schema<ImQQBotConfig> = Schema.object({
     dotaDigestMatchLimit: 10,
     dotaDigestRecentHours: 24,
     dotaKeywords: [],
+    groupDebounceMs: 500,
+    groupDebounceMaxWaitMs: 2000,
+    groupDebounceMaxBatch: 3,
   }).description('活人感 persona 配置（移植自 ai-companion-kit，默认关）'),
   steam: Schema.object({
     enabled: Schema.boolean().default(true).description('Steam 集成总开关（关=不注册 Steam 工具）'),
