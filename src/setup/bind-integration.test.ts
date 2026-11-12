@@ -7,6 +7,9 @@
  * cordis.patch.yml 上不破坏其他插件配置（#53 回归）。
  */
 import { describe, expect, it, vi, afterEach } from 'vitest';
+
+// 真实落盘 + 大列表用例在 Windows 并发下会超过 5s；只放宽本文件。
+vi.setConfig({ testTimeout: 20_000 });
 import { mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';

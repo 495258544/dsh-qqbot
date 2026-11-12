@@ -10,6 +10,10 @@
  */
 import { existsSync, rmSync } from 'node:fs';
 import { describe, expect, it, beforeEach, afterEach, vi } from 'vitest';
+
+// Windows 上这组用例反复读写临时文件，单条就 1s+；全量并发时默认 5s 会假红。
+// 只放宽这个文件，别把全局超时调松（真卡死的用例还要靠它暴露）。
+vi.setConfig({ testTimeout: 20_000 });
 import {
   lookupByImageMd5,
   rememberForAttribution,

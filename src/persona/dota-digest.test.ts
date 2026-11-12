@@ -10,6 +10,7 @@ import os from 'node:os';
 import path from 'node:path';
 import type { Logger } from '../types.ts';
 import {
+  buildDeliverText,
   createDotaDigest,
   type DotaDigestConfig,
   type DotaDigestDeps,
@@ -159,8 +160,10 @@ function harness(o: {
   deliver?: DotaDigestDeps['deliver'];
   /** 想断言日志的用例自己传一个 */
   logger?: Logger;
+  /** 多实例用例共用目录时必须传，否则各拿各的临时目录 */
+  dataDir?: string;
 } = {}): Harness {
-  const dataDir = tmpDir();
+  const dataDir = o.dataDir ?? tmpDir();
   const deliverCalls: Array<{ groupId: string; text: string }> = [];
   const forms = o.forms ?? {};
 
@@ -351,6 +354,47 @@ describe('tickQuery · 提炼', () => {
     const again = await h.handle.tickQuery(QUERY_AT + 30 * 60 * 1000);
     expect(again.ran).toBe(false);
     expect(again.reason).toBe('already-prepared');
+  });
+
+  // 回归 2026-11-12：群里把 9 月 20 日的电炎绝手 15/0/4 说成「昨晚这把」。
+  // 原因是 carry 分支从全部 10 局里挑最高 KDA，lastPlayedAt 却沿用最近一局。
+  it('窗口外的最高 KDA 局不参与评选，时间用被选中那局', async () => {
+    const h = harness({
+      bindings: () => [{ openid: 'u_a', alias: '铭鑫', steamId: STEAM_A }],
+      forms: {
+        1: mkForm(1, [
+          mkMatch({ matchId: 201, at: QUERY_AT - 2 * 3600e3, win: true, hero: '巫医', k: 7, d: 1, a: 20 }),
+          mkMatch({ matchId: 202, at: QUERY_AT - 52 * 24 * 3600e3, win: true, hero: '电炎绝手', k: 15, d: 0, a: 4 }),
+        ]),
+      },
+    });
+
+    const res = await h.handle.tickQuery(QUERY_AT);
+    expect(res.ran).toBe(true);
+    const items = h.handle.snapshot().digest?.items ?? [];
+    expect(items).toHaveLength(1);
+    expect(items[0]?.matchId).toBe(201);
+    expect(items[0]?.lastPlayedAt).toBe(QUERY_AT - 2 * 3600e3);
+    expect(items[0]?.facts.match?.hero).toBe('巫医');
+    // 时间是这一局的实际开赛时间（北京时间），不是最近一局的拍脑袋值
+    expect(items[0]?.facts.match?.when).toMatch(/^\d{1,2}月\d{1,2}日 \d{2}:\d{2}$/);
+    expect(items[0]?.facts.match?.when).toContain('3月10日');
+  });
+
+  it('窗口内没有亮点 → no-highlight，不会把窗口外的旧局捞出来', async () => {
+    const h = harness({
+      bindings: () => [{ openid: 'u_a', alias: '铭鑫', steamId: STEAM_A }],
+      forms: {
+        1: mkForm(1, [
+          mkMatch({ matchId: 301, at: QUERY_AT - 2 * 3600e3, win: true, hero: '巫医', k: 4, d: 4, a: 6 }),
+          mkMatch({ matchId: 302, at: QUERY_AT - 52 * 24 * 3600e3, win: true, hero: '电炎绝手', k: 15, d: 0, a: 4 }),
+        ]),
+      },
+    });
+
+    const res = await h.handle.tickQuery(QUERY_AT);
+    expect(res.ran).toBe(false);
+    expect(res.reason).toBe('no-highlight');
   });
 });
 
@@ -724,5 +768,71 @@ describe('DotaDigest · 无亮点也要记住「今天查过了」', () => {
     const r = await h.handle.tickDeliver(cst(2026, 3, 10, 10, 30))
     expect(r).toEqual({ sent: false, reason: 'no-items' })
     expect(h.deliverCalls).toHaveLength(0)
+  })
+})
+
+describe('buildDeliverText · 时间与人数提示', () => {
+  const ITEM = {
+    openid: 'u_a',
+    alias: '铭鑫',
+    steamId: STEAM_A,
+    kind: 'carry' as const,
+    text: '',
+    facts: {
+      name: '铭鑫',
+      situation: '巫医 7/1/20',
+      match: { hero: '巫医', kda: '7/1/20', result: '赢' as const, when: '11月11日 22:11', matchId: 201 },
+    },
+    lastPlayedAt: QUERY_AT,
+    matchId: 201,
+  }
+
+  it('带上实际开赛时间，并要求按 when 说', () => {
+    const text = buildDeliverText([ITEM])
+    expect(text).toContain('match.when')
+    expect(text).toContain('11月11日 22:11')
+    expect(text).toContain('别把它们说成「这把」')
+  })
+
+  it('说明开黑人数不固定，不再断言「昨晚」', () => {
+    const text = buildDeliverText([ITEM])
+    expect(text).toContain('人数也不固定')
+    expect(text).not.toContain('昨晚的战绩')
+  })
+})
+
+// ── 多实例：落盘状态必须共享（回归 2026-11-12 同一分钟发 5 遍）────────────
+
+describe('多实例 · 落盘状态共享', () => {
+  const forms = {
+    1: mkForm(1, [
+      mkMatch({ matchId: 401, at: QUERY_AT - 2 * 3600e3, win: true, hero: '巫医', k: 7, d: 1, a: 20 }),
+    ]),
+  }
+  const bindings = () => [{ openid: 'u_a', alias: '铭鑫', steamId: STEAM_A }]
+
+  it('A 备好摘要后，B 不再重复查询', async () => {
+    const dir = tmpDir()
+    const a = harness({ dataDir: dir, bindings, forms })
+    const b = harness({ dataDir: dir, bindings, forms })
+
+    expect((await a.handle.tickQuery(QUERY_AT)).ran).toBe(true)
+    const res = await b.handle.tickQuery(QUERY_AT)
+    expect(res.ran).toBe(false)
+    expect(res.reason).toBe('already-prepared')
+  })
+
+  it('A 投递后，B 不再重复投递', async () => {
+    const dir = tmpDir()
+    const a = harness({ dataDir: dir, bindings, forms })
+    const b = harness({ dataDir: dir, bindings, forms })
+
+    await a.handle.tickQuery(QUERY_AT)
+    const first = await a.handle.tickDeliver(cst(2026, 3, 10, 10, 30))
+    expect(first.sent).toBe(true)
+
+    const second = await b.handle.tickDeliver(cst(2026, 3, 10, 10, 30))
+    expect(second).toEqual({ sent: false, reason: 'already-delivered' })
+    expect(b.deliverCalls).toHaveLength(0)
   })
 })

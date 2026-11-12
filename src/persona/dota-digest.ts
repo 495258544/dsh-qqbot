@@ -114,7 +114,20 @@ export interface DigestFacts {
   /** 最近 24h 打了几局 */
   games?: number;
   /** 关键的那一局 */
-  match?: { hero: string; kda: string; result: '赢' | '输' };
+  match?: {
+    hero: string;
+    kda: string;
+    result: '赢' | '输';
+    /**
+     * 这一局**实际开赛时间**（北京时间，形如「11月4日 21:58」）。
+     *
+     * 2026-11-12 修：以前 facts 里没有时间，模型只能靠「昨晚」这个提示词猜，
+     * 于是把 9 月 20 日的电炎绝手 15/0/4 说成「这把」。时间必须随数据走。
+     */
+    when: string;
+    /** 对局 ID：几份数据若相同，说明确实同一场，可以据此说「同一把」 */
+    matchId?: number;
+  };
 }
 
 export interface DigestItem {
@@ -210,6 +223,33 @@ function line(kda: DigestMatchSummary): string {
   return `${kda.heroName} ${kda.kills}/${kda.deaths}/${kda.assists}`;
 }
 
+/**
+ * 把 ISO 时间渲染成「M月D日 HH:mm」（按指定时区）。
+ *
+ * 用 Intl 逐字段取值，不依赖宿主进程的本地时区——服务器在 UTC、
+ * 人在北京时间时，直接 toLocaleString 会差 8 小时，把晚上的局说成下午。
+ */
+function whenText(iso: string, tz: string): string {
+  const ms = msOfIso(iso);
+  if (ms <= 0) return '';
+  try {
+    const parts = new Intl.DateTimeFormat('zh-CN', {
+      timeZone: tz,
+      month: 'numeric',
+      day: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false,
+    }).formatToParts(new Date(ms));
+    const get = (t: string): string => parts.find((p) => p.type === t)?.value ?? '';
+    const hour = get('hour').padStart(2, '0');
+    const minute = get('minute').padStart(2, '0');
+    return `${get('month')}月${get('day')}日 ${hour}:${minute}`;
+  } catch {
+    return '';
+  }
+}
+
 /** KDA 的原始写法：只给数字，语气留给 agent 自己决定 */
 function kdaText(m: DigestMatchSummary): string {
   return `${m.kills}/${m.deaths}/${m.assists}`;
@@ -247,9 +287,14 @@ export function buildDeliverText(items: DigestItem[]): string {
   // 只给数据，不给现成句子 —— 文案要她自己写，否则就是念稿。
   const data = items.map((it) => it.facts);
   return [
-    '[内部·你刚扫了眼昨晚的战绩，下面只是原始数据，别照抄，也别复述本提示]',
+    '[内部·你刚看了一眼群里这几个人最近两天的战绩，下面是原始数据，别照抄，也别复述本提示]',
     '数据：',
     JSON.stringify(data, null, 2),
+    // 2026-11-12 修：以前这里写「昨晚的战绩」，模型就一律说成「这把」。
+    // 实际窗口是 48 小时，bestCarry 也可能是两三天前那局 —— 时间要说对。
+    '每条 match.when 是那一局的实际开赛时间，可能不是昨晚，也可能是几天前。'
+    + '要提时间就按 when 说，别把它们说成「这把」「刚刚」「昨晚」。',
+    '这些局不一定同一场，开黑的人数也不固定（有时只有两三个）。别编成「你们五个」。',
     '用你自己的话，在群里挑一个人吐槽一句，像老朋友随口损他，不是客服播报，也不是战报。',
     '只说一个人，别念数据，别 @ 人。',
   ].join('\n');
@@ -267,94 +312,129 @@ function highlightOf(input: {
   alias: string;
   steamId: string;
   now: number;
+  recentHours: number;
+  tz: string;
 }): DigestItem | null {
-  const { form, openid, alias, steamId, now } = input;
-  const last = form.matches[0];
+  const { form, openid, alias, steamId, now, recentHours, tz } = input;
+
+  // 2026-11-12 修：候选局先落进「最近 N 小时」窗口。
+  //
+  // 以前只检查 form.matches[0]（最近一局）在不在窗口内，然后 carry 分支从
+  // **全部 10 局**里挑 KDA 最高的赢局。于是 9 月 20 日的电炎绝手 15/0/4
+  // 被当成「昨晚这把」播了出去，时间还沿用最近一局的时间。
+  // 现在：窗口外的局不参与评选，lastPlayedAt 也用被选中那局的时间。
+  const cutoff = now - recentHours * HOUR_MS;
+  const inWindow = form.matches.filter((m) => {
+    const at = msOfIso(m.startedAt);
+    return at > 0 && at >= cutoff && at <= now;
+  });
+  const last = inWindow[0];
   if (last === undefined) return null;
 
-  const lastPlayedAt = msOfIso(last.startedAt);
-  if (lastPlayedAt <= 0) return null;
+  /** 窗口内的连败/连胜：跨窗口的旧局不参与，否则「3 连败」可能是上个月的 */
+  let streak = 0;
+  for (const m of inWindow) {
+    if (streak === 0) {
+      streak = m.win ? 1 : -1;
+      continue;
+    }
+    if ((streak > 0) !== m.win) break;
+    streak += m.win ? 1 : -1;
+  }
 
-  const base = { openid, alias, steamId, lastPlayedAt };
+  /** 以「被选中的那一局」为准，时间不再借用最近一局 */
+  const at = (m: DigestMatchSummary): { openid: string; alias: string; steamId: string; lastPlayedAt: number } => ({
+    openid,
+    alias,
+    steamId,
+    lastPlayedAt: msOfIso(m.startedAt),
+  });
+  const matchOf = (m: DigestMatchSummary): NonNullable<DigestFacts['match']> => ({
+    hero: m.heroName,
+    kda: kdaText(m),
+    result: m.win ? '赢' : '输',
+    when: whenText(m.startedAt, tz),
+    matchId: m.matchId,
+  });
 
-  // 1) 连败：把最后一局的英雄/KDA 作为事实带上，怎么写由她自己决定
-  if (form.streak <= -3) {
+  // 1) 连败：把窗口内最近一局的英雄/KDA 作为事实带上，怎么写由她自己决定
+  if (streak <= -3) {
     return {
-      ...base,
+      ...at(last),
       kind: 'lose-streak',
-      text: `「${alias}」最近 ${-form.streak} 连败（最近一局 ${line(last)}）`,
-      facts: factsOf(alias, `${-form.streak} 连败`, {
-        streak: form.streak,
-        match: { hero: last.heroName, kda: kdaText(last), result: '输' },
+      text: `「${alias}」最近 ${-streak} 连败（最近一局 ${line(last)}）`,
+      facts: factsOf(alias, `${-streak} 连败`, {
+        streak,
+        match: matchOf(last),
       }),
       matchId: last.matchId,
     };
   }
 
   // 2) 连胜
-  if (form.streak >= 3) {
+  if (streak >= 3) {
     return {
-      ...base,
+      ...at(last),
       kind: 'win-streak',
-      text: `「${alias}」最近 ${form.streak} 连胜`,
-      facts: factsOf(alias, `${form.streak} 连胜`, {
-        streak: form.streak,
-        match: { hero: last.heroName, kda: kdaText(last), result: '赢' },
+      text: `「${alias}」最近 ${streak} 连胜`,
+      facts: factsOf(alias, `${streak} 连胜`, {
+        streak,
+        match: matchOf(last),
       }),
       matchId: last.matchId,
     };
   }
 
-  // 3) Carry：赢局里 KDA 最高的那局，且要够高（>= 5）
+  // 3) Carry：窗口内赢局里 KDA 最高的那局，且要够高（>= 5）
   let bestCarry: DigestMatchSummary | undefined;
-  for (const m of form.matches) {
+  for (const m of inWindow) {
     if (!m.win || m.kdaRatio < 5) continue;
     if (bestCarry === undefined || m.kdaRatio > bestCarry.kdaRatio) bestCarry = m;
   }
   if (bestCarry !== undefined) {
     return {
-      ...base,
+      ...at(bestCarry),
       kind: 'carry',
-      text: `「${alias}」用 ${bestCarry.heroName} 打出 ${bestCarry.kills}/${bestCarry.deaths}/${bestCarry.assists}（KDA ${bestCarry.kdaRatio.toFixed(2)}）Carry 局`,
+      text: `「${alias}」用 ${bestCarry.heroName} 打出 ${kdaText(bestCarry)}（KDA ${bestCarry.kdaRatio.toFixed(2)}）Carry 局`,
       facts: factsOf(alias, `${bestCarry.heroName} ${kdaText(bestCarry)}`, {
-        match: { hero: bestCarry.heroName, kda: kdaText(bestCarry), result: '赢' },
+        match: matchOf(bestCarry),
       }),
       matchId: bestCarry.matchId,
     };
   }
 
-  // 4) 拉胯局：输、KDA < 0.8、死 >= 8；取最惨的那局
+  // 4) 拉胯局：窗口内输、KDA < 0.8、死 >= 8；取最惨的那局
   let worstGame: DigestMatchSummary | undefined;
-  for (const m of form.matches) {
+  for (const m of inWindow) {
     if (m.win || m.kdaRatio >= 0.8 || m.deaths < 8) continue;
     if (worstGame === undefined || m.kdaRatio < worstGame.kdaRatio) worstGame = m;
   }
   if (worstGame !== undefined) {
     return {
-      ...base,
+      ...at(worstGame),
       kind: 'bad-game',
-      text: `「${alias}」用 ${worstGame.heroName} 打出 ${worstGame.kills}/${worstGame.deaths}/${worstGame.assists}（KDA ${worstGame.kdaRatio.toFixed(2)}），这局有点送`,
+      text: `「${alias}」用 ${worstGame.heroName} 打出 ${kdaText(worstGame)}（KDA ${worstGame.kdaRatio.toFixed(2)}），这局有点送`,
       facts: factsOf(alias, `${worstGame.heroName} ${kdaText(worstGame)}`, {
-        match: { hero: worstGame.heroName, kda: kdaText(worstGame), result: '输' },
+        match: matchOf(worstGame),
       }),
       matchId: worstGame.matchId,
     };
   }
 
-  // 5) 肝帝：最近 24 小时 >= 5 局
+  // 5) 肝帝：最近 24 小时 >= 5 局（用窗口内数据，窗口比 24h 宽也能算准）
   let grinded = 0;
-  for (const m of form.matches) {
-    const at = msOfIso(m.startedAt);
-    if (at > 0 && now - at <= GRINDER_WINDOW_MS) grinded += 1;
+  for (const m of inWindow) {
+    const t = msOfIso(m.startedAt);
+    if (t > 0 && now - t <= GRINDER_WINDOW_MS) grinded += 1;
   }
   if (grinded >= 5) {
     return {
-      ...base,
+      ...at(last),
       kind: 'grinder',
       text: `「${alias}」一天打了 ${grinded} 局`,
       facts: factsOf(alias, `一天打了 ${grinded} 局`, {
         games: grinded,
-        match: { hero: last.heroName, kda: kdaText(last), result: last.win ? '赢' : '输' },
+        match: matchOf(last),
       }),
       matchId: last.matchId,
     };
@@ -397,6 +477,38 @@ export function createDotaDigest(deps: DotaDigestDeps): DotaDigestHandle {
    * 反而把真正的线索淹掉。
    */
   let noGroupWarnDay = '';
+
+  /**
+   * 进程内跨实例注册表（2026-11-12）。
+   *
+   * 热重载不保证旧实例走到 teardown，旧的 setInterval 会一直活着。
+   * 11-09 的凌晨预热跑两遍、11-12 的播报发 5 遍，都是「每重载一次多一个」。
+   * 用 globalThis + Symbol.for 按 dataDir 登记：新实例启动时先停掉同目录的旧实例。
+   *
+   * 注意：这个登记表只对**装载了新代码的实例**有效。热重载前就已经存在的
+   * 旧实例没有登记过，停不掉 —— 那种情况只能靠 reloadFromDisk 的落盘判断兜底，
+   * 或者重启一次进程彻底清干净。
+   */
+  const INSTANCE_KEY = Symbol.for('dsh-qqbot.dota-digest.instances');
+  function instances(): Map<string, { stop: () => void }> {
+    const g = globalThis as unknown as Record<symbol, Map<string, { stop: () => void }> | undefined>;
+    let reg = g[INSTANCE_KEY];
+    if (reg === undefined) {
+      reg = new Map();
+      g[INSTANCE_KEY] = reg;
+    }
+    return reg;
+  }
+
+  /**
+   * 从磁盘重读摘要。
+   *
+   * tickQuery / tickDeliver 开头都要读一次：多实例并存时，别的实例写盘的
+   * `forDay` / `deliveredAt` 必须立刻可见，否则每个实例都会按自己的内存再发一遍。
+   */
+  function reloadFromDisk(): void {
+    digest = loadDigest();
+  }
 
   function loadDigest(): DigestFile | null {
     try {
@@ -537,6 +649,8 @@ export function createDotaDigest(deps: DotaDigestDeps): DotaDigestHandle {
     if (!inWindow(now, cfg.queryHours)) return { ran: false, count: 0, reason: 'not-query-window' };
 
     const today = dayInTz(new Date(now), cfg.tz);
+    // 多实例兜底：先看磁盘上有没有别的实例刚备好的摘要
+    reloadFromDisk();
     // 摘要还没过期（forDay 不早于今天）= 已经为这一次备好了，不重复查。
     // 这样凌晨的重启/连跑不会把「今天上午要发的那份」冲掉。
     if (digest !== null && digest.forDay >= today) {
@@ -590,7 +704,15 @@ export function createDotaDigest(deps: DotaDigestDeps): DotaDigestHandle {
         if (now - lastPlayedAt > cfg.recentHours * HOUR_MS) continue;
 
         const alias = deps.primaryAlias(typeof b.alias === 'string' ? b.alias : '') || FALLBACK_ALIAS;
-        const item = highlightOf({ form, openid, alias, steamId, now });
+        const item = highlightOf({
+          form,
+          openid,
+          alias,
+          steamId,
+          now,
+          recentHours: cfg.recentHours,
+          tz: cfg.tz,
+        });
         if (item !== null) items.push(item);
       }
 
@@ -629,10 +751,12 @@ export function createDotaDigest(deps: DotaDigestDeps): DotaDigestHandle {
 
   async function tickDeliver(nowTs?: number): Promise<{ sent: boolean; reason?: string }> {
     if (!cfg.enabled) return { sent: false, reason: 'disabled' };
-    if (digest === null) return { sent: false, reason: 'no-digest' };
 
     const now = Number(nowTs ?? nowFn()) || nowFn();
     if (!inWindow(now, cfg.deliverHours)) return { sent: false, reason: 'not-deliver-window' };
+    // 多实例兜底：先看磁盘上有没有别的实例刚投递过
+    reloadFromDisk();
+    if (digest === null) return { sent: false, reason: 'no-digest' };
 
     const today = dayInTz(new Date(now), cfg.tz);
     // 日期串是 YYYY-MM-DD，字典序即时间序
@@ -718,6 +842,19 @@ export function createDotaDigest(deps: DotaDigestDeps): DotaDigestHandle {
   function start(): void {
     if (queryTimer !== null || deliverTimer !== null) return;
 
+    // 同 dataDir 的旧实例先停掉：热重载后不留双份定时器
+    const reg = instances();
+    const key = path.resolve(dataDir);
+    const prev = reg.get(key);
+    if (prev !== undefined) {
+      try {
+        prev.stop();
+      } catch {
+        // 旧实例可能已经半停，忽略
+      }
+    }
+    reg.set(key, { stop });
+
     queryTimer = setInterval(() => {
       void tickQuery().catch(() => {});
     }, TICK_MS);
@@ -755,6 +892,10 @@ export function createDotaDigest(deps: DotaDigestDeps): DotaDigestHandle {
     deliverTimer = null;
     queryBoot = null;
     deliverBoot = null;
+    // 从跨实例登记表里撤掉自己，避免新实例停一个已经停过的旧实例
+    const reg = instances();
+    const key = path.resolve(dataDir);
+    if (reg.get(key)?.stop === stop) reg.delete(key);
     logger.info('dota-digest: 已停止');
   }
 

@@ -10,6 +10,7 @@ import type { Logger } from '../types.ts';
 import { chunkMarkdownText } from './chunker.ts';
 import { appendBotHistory } from '../features/history-store.ts';
 import { BOT_SELF_NAME, rememberOwnSend, resolveBotSelfId } from '../shared/attribution-out.ts';
+import { stripModelMonologue } from '../shared/monologue-guard.ts';
 import { OutboundBuffer, type QQBotSender } from './outbound-buffer.ts';
 import { formatToolResult, type ToolsRegistryLike, type ToolResultData } from './tool-presenter.ts';
 import type { DeliverablesDelivererLike } from './deliverables.ts';
@@ -382,10 +383,17 @@ class OutboundRouter {
    * bootstrap 包装过的 sender，每个气泡的 sendMarkdown 独立过三级兜底）。
    */
   private async send(record: SessionRecord, text: string, tag: string): Promise<void> {
+    // 2026-11-12：模型偶发把内部独白（英文自我对话）混进正文，出站前挖掉。
+    // 只处理文本回复；sendFile 之类的说明文字不碰，避免误伤文件名。
+    const safe = tag === 'sendMarkdown' ? stripModelMonologue(text) : text;
+    if (safe.trim() === '') {
+      this.logger.warn(`im-qqbot: 出站文本清理后为空，已丢弃（tag=${tag}）`);
+      return;
+    }
     const persona = this.manager.persona;
     const humanize = persona?.humanizer.enabled === true && tag === 'sendMarkdown';
     if (humanize && persona) {
-      await persona.humanizer.say(text, {
+      await persona.humanizer.say(safe, {
         send: async (bubble) => {
           for (const chunk of chunkMarkdownText(bubble, this.config.textChunkLimit)) {
             try {
@@ -402,7 +410,7 @@ class OutboundRouter {
       return;
     }
 
-    const chunks = chunkMarkdownText(text, this.config.textChunkLimit);
+    const chunks = chunkMarkdownText(safe, this.config.textChunkLimit);
     for (const chunk of chunks) {
       try {
         await this.bot.sendMarkdown(record.replyTarget, chunk);
