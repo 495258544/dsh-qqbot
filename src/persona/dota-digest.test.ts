@@ -873,6 +873,34 @@ describe('buildDeliverText · 时间与人数提示', () => {
     expect(text).toContain('开黑人数不固定')
     expect(text).not.toContain('昨晚的战绩')
   })
+
+  it('区分队内经济排名与输出排名（回归 2026-11-12「伤害还是队里第二」）', () => {
+    const text = buildDeliverText([ITEM])
+    expect(text).toContain('teamRank 是队内经济排名')
+    expect(text).toContain('damageRank 才是队内输出排名')
+    expect(text).toContain('别把 teamRank 说成「伤害第几」')
+  })
+
+  it('带 detail 的 facts 会原样带上 damageRank 供模型判断输出位次', () => {
+    const withDetail = {
+      ...ITEM,
+      facts: {
+        ...ITEM.facts,
+        match: {
+          ...ITEM.facts.match,
+          detail: {
+            parsed: true as const,
+            heroDamage: 18422,
+            teamRank: 2,
+            damageRank: 1,
+          },
+        },
+      },
+    }
+    const text = buildDeliverText([withDetail])
+    expect(text).toContain('"damageRank": 1')
+    expect(text).toContain('"heroDamage": 18422')
+  })
 })
 
 // ── 多实例：落盘状态必须共享（回归 2026-11-12 同一分钟发 5 遍）────────────

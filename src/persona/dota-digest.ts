@@ -113,6 +113,13 @@ export interface DigestMatchDetail {
   /** 队内经济排名 / 队伍人数（1 = 最富） */
   teamRank?: number;
   teamSize?: number;
+  /**
+   * 队内英雄伤害排名（1 = 输出最高）。
+   *
+   * 2026-11-12 修：投影里原先只给 teamRank（经济排名），模型把「队内经济第 2」
+   * 说成了「伤害还是队里第二」。两个排名是不同指标，必须分别给，别让它自己混。
+   */
+  damageRank?: number;
   /** 团战参与，如「参团 8/12」；未解析时不填 */
   teamfight?: string;
   /** OMG 技能组合的一句话概括（空 = 没拿到技能数据） */
@@ -367,6 +374,11 @@ export function buildDeliverText(items: DigestItem[]): string {
     + '开黑人数不固定，可能只有两三个，别编成「你们五个」。',
     'match.detail 是脚本取回的那一局详情。有就用它补一句（经济/伤害/团战），'
     + '没有就当没有，别自己编。detail.parsed=false 表示解析没完成，这时只说 KDA，别聊经济、团战、技能。',
+    // 2026-11-12 修：detail.teamRank 是「经济」排名，模型却说成「伤害还是队里第二」。
+    // 两个指标必须说清楚，同时把输出排名单独投影进来，让它有据可依。
+    '指标别混：detail.teamRank 是队内经济排名（1=最富），damageRank 才是队内输出排名（1=伤害最高）；'
+    + '别把 teamRank 说成「伤害第几」。要说伤害就用 heroDamage（伤害数值）或 damageRank，'
+    + 'gpm/xpm/netWorth 都是经济，teamfight 是参团次数，abilityMix 只是技能路子的概括。',
     '用你自己的话，在群里挑一个人吐槽一句，像老朋友随口损他，不是客服播报，也不是战报。',
     '只说一个人，别念数据，别 @ 人。',
   ].join('\n');

@@ -493,6 +493,9 @@ export async function bootstrapGateway(
           netWorth: f.player.netWorth,
           teamRank: f.teamRank.netWorth,
           teamSize: f.teamRank.teamSize,
+          // 队内输出排名和经济排名是两个指标：以前只给前者，模型把
+          // 「队内经济第 2」说成了「伤害还是队里第二」（2026-11-12 实锤）。
+          ...(f.teamRank.heroDamage > 0 ? { damageRank: f.teamRank.heroDamage } : {}),
           ...(f.teamfights !== null
             ? { teamfight: `参团 ${f.teamfights.participated}/${f.teamfights.count}` }
             : {}),
