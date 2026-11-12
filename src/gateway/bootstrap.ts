@@ -37,7 +37,7 @@ import { registerBiliTools } from '../bili/index.ts';
 import { createXhhClient, registerXhhTools } from '../xhh/index.ts';
 import { bindPersonaRuntimeProviders } from '../setup/index.ts';
 import { SteamService, registerSteamTools, primaryName } from '../steam/index.ts';
-import { createDotaService, registerDotaTools, steamIdToAccountId, type DotaService } from '../dota/index.ts';
+import { createDotaService, MatchCacheStore, registerDotaTools, steamIdToAccountId, type DotaService } from '../dota/index.ts';
 import { createDotaWarmup } from '../dota/warmup.ts';
 import { createBridgeProbe, renderScreenNudge } from '../persona/screen-watch.ts';
 import { createDotaDigest } from '../persona/dota-digest.ts';
@@ -479,6 +479,29 @@ export async function bootstrapGateway(
       logger,
       bindings: boundList,
       queryForm: (accountId, limit) => dotaSvc.recentForm(accountId, limit),
+      // 本地战绩库：与技能记录同目录，整个 dota/ 拷走即可迁移。
+      // 播报的「同场几个人」就靠它按 matchId 聚合，不再假设固定五人。
+      matchCache: new MatchCacheStore(resolve(homedir(), '.dsh-qqbot', 'dota'), logger),
+      // 脚本预取被选中那局的详情（经济/伤害/团战/技能）。
+      // 不交给模型自己去查：主动投递时它没有上下文，查错人/查错局的概率更高。
+      queryMatchDetail: async (accountId, matchId) => {
+        const f = await dotaSvc.matchDetail(matchId, accountId);
+        return {
+          gpm: f.player.gpm,
+          xpm: f.player.xpm,
+          heroDamage: f.player.heroDamage,
+          netWorth: f.player.netWorth,
+          teamRank: f.teamRank.netWorth,
+          teamSize: f.teamRank.teamSize,
+          ...(f.teamfights !== null
+            ? { teamfight: `参团 ${f.teamfights.participated}/${f.teamfights.count}` }
+            : {}),
+          ...(typeof f.player.abilityMix === 'string' && f.player.abilityMix !== ''
+            ? { abilityMix: f.player.abilityMix }
+            : {}),
+          parsed: f.teamfights !== null,
+        };
+      },
       // 平台能力由接线层注入，persona/ 不反向 import dota/ 与 steam/
       toAccountId: steamIdToAccountId,
       primaryAlias: primaryName,

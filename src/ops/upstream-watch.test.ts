@@ -6,7 +6,10 @@
  *  - 分级口径：NOISE 不留 MAYBE 悬空、feat(scope) 能被识别、重叠含未提交改动
  *  - 只读：任何一次巡检都不能改动工作树（含脏工作树）
  */
-import { describe, expect, it, beforeEach, afterEach } from 'vitest';
+import { describe, expect, it, beforeEach, afterEach, vi } from 'vitest';
+
+// 真实跑 git 命令，单条就 6s+；全量并发下默认 5s 会假红。
+vi.setConfig({ testTimeout: 20_000 });
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';

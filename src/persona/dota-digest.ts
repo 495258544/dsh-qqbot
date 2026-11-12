@@ -104,6 +104,52 @@ export type DigestKind = 'lose-streak' | 'win-streak' | 'carry' | 'bad-game' | '
  * 喂给 agent 的**原始数据**（不是写好的文案）。
  * 她要拿这些自己组织语言，所以只给事实：谁、什么情况、关键那局的英雄和 KDA。
  */
+/** 单场详情的精简投影（脚本预取，bootstrap 从 DotaService.matchDetail 映射） */
+export interface DigestMatchDetail {
+  gpm?: number;
+  xpm?: number;
+  heroDamage?: number;
+  netWorth?: number;
+  /** 队内经济排名 / 队伍人数（1 = 最富） */
+  teamRank?: number;
+  teamSize?: number;
+  /** 团战参与，如「参团 8/12」；未解析时不填 */
+  teamfight?: string;
+  /** OMG 技能组合的一句话概括（空 = 没拿到技能数据） */
+  abilityMix?: string;
+  /** false = OpenDota 还没解析完，只能看 KDA，不能聊经济/团战/技能 */
+  parsed: boolean;
+}
+
+/**
+ * 本地战绩库的**结构契约**（persona 不 import 平台）。
+ *
+ * 实现在 `src/dota/match-cache.ts`，由 bootstrap 注入。
+ * persona 只要这两个能力：写入合并、按 matchId 查参与者。
+ */
+export interface MatchCacheRow {
+  matchId: number;
+  /** OpenDota 原始 start_time（秒） */
+  startTime: number;
+  durationSec?: number;
+  gameMode?: number;
+  player: {
+    accountId: number;
+    alias?: string;
+    heroId: number;
+    heroName: string;
+    kills: number;
+    deaths: number;
+    assists: number;
+    win: boolean;
+  };
+}
+
+export interface MatchCacheLike {
+  upsertMany(items: readonly MatchCacheRow[]): void;
+  participantsOf(matchId: number): Array<{ accountId: number; alias?: string }>;
+}
+
 export interface DigestFacts {
   /** 群里怎么称呼 */
   name: string;
@@ -127,6 +173,17 @@ export interface DigestFacts {
     when: string;
     /** 对局 ID：几份数据若相同，说明确实同一场，可以据此说「同一把」 */
     matchId?: number;
+    /**
+     * 这一场里一起玩的**绑定群友人数**（含本人）。
+     *
+     * 2026-11-12：用户指出「不是每次开黑人都齐，有时只有两三个」。
+     * 这个数来自本地战绩库按 matchId 聚合，不是假设固定五人。
+     */
+    party?: number;
+    /** 同场的其他群友（不含本人） */
+    withWho?: string[];
+    /** 脚本预取的单场详情；缺席表示没取到，不许编 */
+    detail?: DigestMatchDetail;
   };
 }
 
@@ -172,6 +229,18 @@ export interface DotaDigestDeps {
   pickGroup: () => string | null;
   /** 把一段「内部提示」投递进群会话；ok=false 表示跳过（不算失败） */
   deliver: (groupId: string, text: string) => Promise<{ ok: boolean; reason?: string }>;
+  /**
+   * 预取某一局的详情（bootstrap 注入 DotaService.matchDetail 的精简投影）。
+   *
+   * 播报前由脚本取好，塞进 facts.match.detail —— 模型不自己去网上查，
+   * 因为主动投递时它没有上下文，查错人/查错局的概率比脚本高得多。
+   * 缺席或抛错都只是少一块细节，不影响播报。
+   */
+  queryMatchDetail?: (accountId: number, matchId: number) => Promise<DigestMatchDetail | undefined>;
+  /** 本地战绩库目录（默认 ~/.dsh-qqbot/dota，与技能记录同目录） */
+  matchCacheDir?: string;
+  /** 本地战绩库（bootstrap 注入 src/dota/match-cache.ts 的实例） */
+  matchCache?: MatchCacheLike;
   /** 可注入时钟（测试用），默认 Date.now */
   now?: () => number;
 }
@@ -294,7 +363,10 @@ export function buildDeliverText(items: DigestItem[]): string {
     // 实际窗口是 48 小时，bestCarry 也可能是两三天前那局 —— 时间要说对。
     '每条 match.when 是那一局的实际开赛时间，可能不是昨晚，也可能是几天前。'
     + '要提时间就按 when 说，别把它们说成「这把」「刚刚」「昨晚」。',
-    '这些局不一定同一场，开黑的人数也不固定（有时只有两三个）。别编成「你们五个」。',
+    'match.party 是那一场同场的群友人数（含本人），match.withWho 是他们。'
+    + '开黑人数不固定，可能只有两三个，别编成「你们五个」。',
+    'match.detail 是脚本取回的那一局详情。有就用它补一句（经济/伤害/团战），'
+    + '没有就当没有，别自己编。detail.parsed=false 表示解析没完成，这时只说 KDA，别聊经济、团战、技能。',
     '用你自己的话，在群里挑一个人吐槽一句，像老朋友随口损他，不是客服播报，也不是战报。',
     '只说一个人，别念数据，别 @ 人。',
   ].join('\n');
@@ -642,6 +714,56 @@ export function createDotaDigest(deps: DotaDigestDeps): DotaDigestHandle {
 
   // ── 阶段一：凌晨查询 ──────────────────────────────────────
 
+  /**
+   * 给被选中的条目补两块信息，都在脚本侧完成，不交给模型去猜：
+   *
+   *   1. `party` / `withWho`：同一 matchId 下有几个绑定群友 —— 直接回答
+   *      「不是每次开黑人都齐，有时只有两三个」。
+   *   2. `detail`：这一局的经济/伤害/团战/技能组合（预取，失败就算了）。
+   *
+   * 模型只负责组织语言；数据缺了就写「缺」，它没有编的余地。
+   */
+  async function enrichPicked(picked: DigestItem[]): Promise<void> {
+    if (picked.length === 0) return;
+
+    // 1) 同场人数：本地战绩库按 matchId 聚合，不假设固定五人
+    for (const it of picked) {
+      const match = it.facts.match;
+      if (match === undefined) continue;
+      const matchId = match.matchId ?? it.matchId;
+      if (matchId === undefined) continue;
+      const participants = deps.matchCache?.participantsOf(matchId) ?? [];
+      if (participants.length === 0) continue;
+      const self = deps.toAccountId(it.steamId);
+      const others = participants.filter((p) => p.accountId !== self);
+      match.party = participants.length;
+      if (others.length > 0) {
+        match.withWho = others.map((p) => p.alias ?? String(p.accountId));
+      }
+    }
+
+    // 2) 预取单场详情：最多 maxItems 条，并行；失败只是少一块细节，不影响播报
+    const query = deps.queryMatchDetail;
+    if (query === undefined) return;
+    await Promise.all(picked.map(async (it) => {
+      const match = it.facts.match;
+      if (match === undefined) return;
+      const accountId = deps.toAccountId(it.steamId);
+      if (accountId === null) return;
+      const matchId = match.matchId ?? it.matchId;
+      if (matchId === undefined) return;
+      try {
+        const detail = await query(accountId, matchId);
+        if (detail !== undefined) match.detail = detail;
+      } catch (err) {
+        logger.warn(
+          `dota-digest: 预取单场详情失败（不影响播报）match=${matchId}: `
+          + `${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }));
+  }
+
   async function tickQuery(nowTs?: number): Promise<{ ran: boolean; count: number; reason?: string }> {
     if (!cfg.enabled) return { ran: false, count: 0, reason: 'disabled' };
 
@@ -661,6 +783,8 @@ export function createDotaDigest(deps: DotaDigestDeps): DotaDigestHandle {
 
     try {
       const items: DigestItem[] = [];
+      /** 这一轮所有人窗口内的原始局，统一合并进本地战绩库（同场人数靠它算） */
+      const rows: MatchCacheRow[] = [];
       const seen = new Set<string>();
       /** 同一人可能绑了多个 openid（群聊/私聊各一个），按 steamId 去重，避免同一个人查两遍 */
       const seenSteam = new Set<string>();
@@ -704,6 +828,31 @@ export function createDotaDigest(deps: DotaDigestDeps): DotaDigestHandle {
         if (now - lastPlayedAt > cfg.recentHours * HOUR_MS) continue;
 
         const alias = deps.primaryAlias(typeof b.alias === 'string' ? b.alias : '') || FALLBACK_ALIAS;
+
+        // 收进本地战绩库：只记窗口内的局，避免把几个月前的旧数据灌进来。
+        // 同一个人反复查只是覆盖，不同人对同一场是追加 —— 于是「这场几个人」算得出来。
+        const cutoff = now - cfg.recentHours * HOUR_MS;
+        for (const m of form.matches) {
+          const at = msOfIso(m.startedAt);
+          if (at <= 0 || at < cutoff) continue;
+          rows.push({
+            matchId: m.matchId,
+            startTime: Math.floor(at / 1000),
+            durationSec: m.durationSec,
+            gameMode: m.gameMode,
+            player: {
+              accountId,
+              alias,
+              heroId: m.heroId,
+              heroName: m.heroName,
+              kills: m.kills,
+              deaths: m.deaths,
+              assists: m.assists,
+              win: m.win,
+            },
+          });
+        }
+
         const item = highlightOf({
           form,
           openid,
@@ -715,6 +864,9 @@ export function createDotaDigest(deps: DotaDigestDeps): DotaDigestHandle {
         });
         if (item !== null) items.push(item);
       }
+
+      // 合并进本地战绩库：这一轮所有人在窗口内的局都记下来
+      deps.matchCache?.upsertMany(rows);
 
       // 跨天去重：同一个人 + 同一类亮点 3 天内不重复播（连败/连胜最容易复读）
       const fresh = items.filter((it) => !recentlySent(it, now));
@@ -738,6 +890,8 @@ export function createDotaDigest(deps: DotaDigestDeps): DotaDigestHandle {
       // 当天查、当天发：forDay 就是今天（不再 +1 天）。
       // 10-12 点查昨晚的比赛，这会儿解析基本都完成了，趁热发才有"锐评"的味道。
       const forDay = dayInTz(new Date(now), cfg.tz);
+      // 先把「同场几个人」「这一局详情」补齐，再落盘 —— 落盘的就是播报用的事实
+      await enrichPicked(picked);
       digest = { version: 1, queriedAt: now, forDay, items: picked };
       save();
       logger.info(`dota-digest: 今日战绩摘要已备好 ${picked.length} 条，今天内投递`);

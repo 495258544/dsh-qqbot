@@ -35,6 +35,7 @@ import {
   type MatchDetailForm,
 } from './service.ts';
 import { registerDotaTools } from './tools.ts';
+import { MatchCacheStore } from './match-cache.ts';
 
 /** 配置默认值（上层 Schema 可直接复用，避免两处写死不同数字） */
 export const DEFAULT_DOTA_CONFIG: DotaConfig = {
@@ -77,6 +78,7 @@ export { steamIdToAccountId, accountIdToSteamId };
 
 export {
   DotaService,
+  MatchCacheStore,
   registerDotaTools,
   heroName,
   heroNameEn,
@@ -88,6 +90,12 @@ export {
   isWin,
   rankTierText,
 };
+
+export type {
+  CachedMatch,
+  CachedMatchInput,
+  CachedMatchPlayer,
+} from './match-cache.ts';
 
 export type {
   DotaConfig,

@@ -162,6 +162,10 @@ function harness(o: {
   logger?: Logger;
   /** 多实例用例共用目录时必须传，否则各拿各的临时目录 */
   dataDir?: string;
+  /** 本地战绩库替身（persona 测试不 import 平台） */
+  matchCache?: DotaDigestDeps['matchCache'];
+  /** 单场详情预取替身 */
+  queryMatchDetail?: DotaDigestDeps['queryMatchDetail'];
 } = {}): Harness {
   const dataDir = o.dataDir ?? tmpDir();
   const deliverCalls: Array<{ groupId: string; text: string }> = [];
@@ -188,6 +192,8 @@ function harness(o: {
     toAccountId,
     primaryAlias,
     now: () => QUERY_AT,
+    ...(o.matchCache !== undefined ? { matchCache: o.matchCache } : {}),
+    ...(o.queryMatchDetail !== undefined ? { queryMatchDetail: o.queryMatchDetail } : {}),
   };
 
   return { deps, dataDir, deliverCalls, handle: createDotaDigest(deps) };
@@ -395,6 +401,74 @@ describe('tickQuery · 提炼', () => {
     const res = await h.handle.tickQuery(QUERY_AT);
     expect(res.ran).toBe(false);
     expect(res.reason).toBe('no-highlight');
+  });
+
+  it('同场人数从本地战绩库算，不假设固定五人', async () => {
+    const rows: number[] = [];
+    const cache: NonNullable<DotaDigestDeps['matchCache']> = {
+      upsertMany(items) {
+        rows.push(...items.map((i) => i.matchId));
+      },
+      participantsOf(matchId: number) {
+        return matchId === 501
+          ? [
+            { accountId: 1, alias: '铭鑫' },
+            { accountId: 2, alias: '小周' },
+            { accountId: 3, alias: '芋头' },
+          ]
+          : [];
+      },
+    };
+    const h = harness({
+      bindings: () => [{ openid: 'u_a', alias: '小周', steamId: STEAM_A }],
+      forms: {
+        1: mkForm(1, [
+          mkMatch({ matchId: 501, at: QUERY_AT - 2 * 3600e3, win: true, hero: '斧王', k: 7, d: 6, a: 24 }),
+        ]),
+      },
+      matchCache: cache,
+    });
+
+    await h.handle.tickQuery(QUERY_AT);
+    const item = h.handle.snapshot().digest?.items[0];
+    expect(item?.facts.match?.party).toBe(3);
+    expect(item?.facts.match?.withWho).toEqual(['小周', '芋头']);
+    expect(rows).toEqual([501]);
+  });
+
+  it('预取单场详情成功 → detail 进 facts', async () => {
+    const h = harness({
+      bindings: () => [{ openid: 'u_a', alias: '小周', steamId: STEAM_A }],
+      forms: {
+        1: mkForm(1, [
+          mkMatch({ matchId: 502, at: QUERY_AT - 2 * 3600e3, win: true, hero: '斧王', k: 7, d: 6, a: 24 }),
+        ]),
+      },
+      queryMatchDetail: async () => ({ gpm: 612, teamfight: '参团 8/12', parsed: true }),
+    });
+
+    await h.handle.tickQuery(QUERY_AT);
+    const item = h.handle.snapshot().digest?.items[0];
+    expect(item?.facts.match?.detail?.gpm).toBe(612);
+    expect(item?.facts.match?.detail?.teamfight).toBe('参团 8/12');
+  });
+
+  it('预取详情失败 → 播报照常，detail 缺席', async () => {
+    const h = harness({
+      bindings: () => [{ openid: 'u_a', alias: '小周', steamId: STEAM_A }],
+      forms: {
+        1: mkForm(1, [
+          mkMatch({ matchId: 503, at: QUERY_AT - 2 * 3600e3, win: true, hero: '斧王', k: 7, d: 6, a: 24 }),
+        ]),
+      },
+      queryMatchDetail: async () => {
+        throw new Error('OpenDota 限流（HTTP 429）');
+      },
+    });
+
+    const res = await h.handle.tickQuery(QUERY_AT);
+    expect(res.ran).toBe(true);
+    expect(h.handle.snapshot().digest?.items[0]?.facts.match?.detail).toBeUndefined();
   });
 });
 
@@ -796,7 +870,7 @@ describe('buildDeliverText · 时间与人数提示', () => {
 
   it('说明开黑人数不固定，不再断言「昨晚」', () => {
     const text = buildDeliverText([ITEM])
-    expect(text).toContain('人数也不固定')
+    expect(text).toContain('开黑人数不固定')
     expect(text).not.toContain('昨晚的战绩')
   })
 })
