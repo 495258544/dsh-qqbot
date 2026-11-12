@@ -244,6 +244,8 @@ export function registerSteamTools(
     description:
       '查群友的 Steam 状态：谁在线、正在玩什么游戏、最近在玩什么。'
       + '适合在群里聊到游戏、有人问"最近玩什么"、或你想顺着游戏话题接一句话时用。'
+      + '**问 Dota 战绩或 OMG 技能前先调这里**：用返回的 SteamID64 去调 qq_dota_recent / qq_dota_match，'
+      + '别凭名字猜账号；who 填 all 可以回答"能查谁的战绩"。'
       + 'who 留空 = 查所有已绑定的人，适合回答"群友最近都在玩啥"。'
       + '只看当前状态时不要传 include_recent（更快）；要聊"最近在玩什么"才传 true。',
     parameters: {

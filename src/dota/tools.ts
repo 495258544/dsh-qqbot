@@ -40,6 +40,9 @@ export function registerDotaTools(ctx: Context, service: DotaService, logger: Lo
     name: TOOL_NAME,
     description:
       '查某个人的 Dota2 最近战绩（输赢、KDA、用的英雄、时长），用于群里聊游戏时接话或调侃。'
+      + '**查之前先调 qq_steam_lookup 拿到这个人的 SteamID64，再填进 steam_id**：'
+      + '别凭名字猜 account_id，也别把一个人的号套到别人身上；'
+      + '被问"能查谁的战绩"就用 qq_steam_lookup 的 all 把已绑定的人列出来。'
       + '数据来自 OpenDota 的公开数据：对方在 Dota2 设置里关掉了「公开比赛数据」时会查不到，'
       + '这种情况要如实说"查不到"，不要说成对方没打过。'
       + 'account_id 和 steam_id 至少给一个，都给了以 account_id 为准。',

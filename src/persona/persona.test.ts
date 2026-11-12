@@ -118,6 +118,17 @@ describe('Role · 角色卡', () => {
     expect(role.renderAnchor()).toContain('不是 AI 助手');
   });
 
+  it('anchor 用本分支角色名「小深」，并要求查战绩先查 Steam 绑定', () => {
+    const card = path.join(dir, 'role.md');
+    fs.writeFileSync(card, '# 角色卡\n说话语气随意');
+    const anchor = new Role({ cardPath: card }).renderAnchor();
+    // 「小羽」是 xiaoyu 分支的人设，别抄进 work 分支（2026-11-12）
+    expect(anchor).toContain('你是小深');
+    expect(anchor).not.toContain('你是小羽');
+    expect(anchor).toContain('qq_steam_lookup');
+    expect(anchor).toContain('别凭名字猜账号');
+  });
+
   it('resolveCardPath：绝对路径原样 / ~ 展开 / 相对仓库根', () => {
     // 绝对路径（POSIX + Windows 盘符）不改动
     expect(resolveCardPath('/a/b.md')).toBe('/a/b.md');
