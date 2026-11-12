@@ -128,6 +128,79 @@ export interface DigestMatchDetail {
   parsed: boolean;
 }
 
+// ── 完整简报（2026-11-12 方案 B）────────────────────────────
+//
+// 以前每人只挑 1 局、只给 9 个数字 + 一句 abilityMix 套话，模型看不到
+// 「这局真实抽到了什么技能」，于是把 PA 拿的辅助/团战技能当核心分析。
+// 现在按 matchId 去重后，把窗口内每场的完整数据一次交给她自己判断。
+//
+// 这些是**结构契约**：实现在 src/dota/match-cache.ts，由 bootstrap 注入，
+// persona 不反向 import 平台模块。形状镜像，别加平台特有的字段。
+
+/** 一局里真实抽到的技能；nameZh 是权威中文名，模型不许自译 */
+export interface DigestBriefAbility {
+  name: string;
+  nameZh?: string;
+  uses: number;
+  behavior?: string;
+  damageType?: string;
+}
+
+export interface DigestBriefPlayer {
+  /** 群里的称呼 */
+  name: string;
+  hero: string;
+  kda: string;
+  win: boolean;
+  gpm?: number;
+  xpm?: number;
+  netWorth?: number;
+  heroDamage?: number;
+  /** 队内经济排名（1=最富） */
+  teamRank?: number;
+  /** 队内输出排名（1=伤害最高） */
+  damageRank?: number;
+  teamSize?: number;
+  teamfight?: string;
+  abilities: DigestBriefAbility[];
+  abilityMix?: string;
+  /** uses=实际使用次数；levels=半解析时按加点数兜底，两者不能混着比 */
+  abilityBasis?: 'uses' | 'levels';
+}
+
+export interface DigestBriefSession {
+  matchId: number;
+  /** 「11月11日 21:08」——按 Asia/Shanghai 渲染好的实际开赛时间 */
+  when: string;
+  gameMode: string;
+  durationMin: number;
+  /** false = 只解析出 KDA，技能/团战/经济缺席 */
+  parsed: boolean;
+  /** 这一场里的绑定群友，人数不固定，可能只有 2–3 个 */
+  boundPlayers: DigestBriefPlayer[];
+  /** 全队十人英雄，用来判断谁是核心、谁在打辅助 */
+  lineup?: { radiant: string[]; dire: string[] };
+}
+
+export interface DigestBriefing {
+  windowHours: number;
+  generatedAt: number;
+  /** 按开赛时间倒序，同一场只出现一次 */
+  sessions: DigestBriefSession[];
+}
+
+/** 数据给足但别把上下文撑爆；提示词里要求最多挑 3 场来点评 */
+const MAX_BRIEF_SESSIONS = 8;
+
+/** 落盘的 briefing 只做形状校验：坏掉就降级到旧提示词，不让今天播报挂掉 */
+function isBriefing(v: unknown): v is DigestBriefing {
+  if (v === null || typeof v !== 'object') return false;
+  const o = v as Record<string, unknown>;
+  return Array.isArray(o.sessions)
+    && typeof o.windowHours === 'number'
+    && typeof o.generatedAt === 'number';
+}
+
 /**
  * 本地战绩库的**结构契约**（persona 不 import 平台）。
  *
@@ -215,6 +288,11 @@ export interface DigestFile {
   /** 目标投递日 YYYY-MM-DD（= 查询日 + 1 天） */
   forDay: string;
   items: DigestItem[];
+  /**
+   * 窗口内按 matchId 去重后的完整场次简报。
+   * 可选：旧落盘文件没有这个字段，取数失败也会缺席，两种情况都降级到旧提示词。
+   */
+  briefing?: DigestBriefing;
   deliveredAt?: number;
   deliveredDay?: string;
 }
@@ -244,6 +322,13 @@ export interface DotaDigestDeps {
    * 缺席或抛错都只是少一块细节，不影响播报。
    */
   queryMatchDetail?: (accountId: number, matchId: number) => Promise<DigestMatchDetail | undefined>;
+  /**
+   * 按 matchId 去重后，批量取回窗口内每场的完整简报（含 OMG 技能明细）。
+   *
+   * bootstrap 注入：内部限并发、复用本地已完整解析的场、parsed=false 的场下次重拉。
+   * 缺席或抛错都降级到旧的「1–2 局 × 少量数字」提示词，不影响今天照常播报。
+   */
+  buildBriefing?: (matchIds: number[], windowHours: number) => Promise<DigestBriefing | undefined>;
   /** 本地战绩库目录（默认 ~/.dsh-qqbot/dota，与技能记录同目录） */
   matchCacheDir?: string;
   /** 本地战绩库（bootstrap 注入 src/dota/match-cache.ts 的实例） */
@@ -358,8 +443,38 @@ function isDigestItem(v: unknown): v is DigestItem {
   );
 }
 
+/**
+ * 完整简报版提示词（方案 B）。
+ *
+ * 2026-11-12：用户要求「捞每个人的场次 → 去重 → 逐场拉完整数据（含 OMG 技能）
+ * → 关联群友 → 交给她自己决定点评哪几场」。这里给的是**去重后的全部场次**，
+ * 不再由脚本替她挑「唯一一局」，但一天仍只有一次投递、最多挑 3 场。
+ */
+function buildBriefingText(briefing: DigestBriefing): string {
+  return [
+    '[内部·你刚把群里这几个人最近两天的战绩全翻了一遍，下面是按比赛去重整理好的完整数据，别照抄，也别复述本提示]',
+    `窗口：最近 ${briefing.windowHours} 小时 · 共 ${briefing.sessions.length} 场（同一场只出现一次，按开赛时间倒序）`,
+    '数据：',
+    JSON.stringify(briefing.sessions, null, 2),
+    '这是今天唯一一次主动播报，把想说的都写在这一段里；用你自己的话，像老朋友随口损人，不是客服播报，也不是战报。别 @ 人，别念数据，别复述本提示。',
+    `你自己决定点评哪几场、哪几个人：最多挑 3 场，可以串成一段，也可以只挑最有意思的一两个说；别把 ${briefing.sessions.length} 场全念一遍。`,
+    'sessions[].when 是那场实际开赛时间，可能不是昨晚，也可能是两三天前；要提时间就按它说，别说「这把」「刚刚」「昨晚」。',
+    '不同 matchId 是不同场，别把几场说成同一场，也别把不同场的人凑成一队。',
+    'boundPlayers 是这场里一起玩的绑定群友，人数不固定（可能只有两三个），别编成「你们五个」；lineup 是那场全队十人的英雄，只是背景。',
+    'abilities 是这局真实抽到的技能：nameZh 是官方简体中文名，照抄，别自译、改名或换成别的说法；没给 nameZh 就用英文原名。',
+    'OMG 里英雄不一定有招牌技能 —— 严禁按英雄默认技能脑补。判断他是核心还是辅助，看 abilities 的类型与次数、heroDamage、damageRank、netWorth，别只看英雄名或 KDA。',
+    'abilityBasis=levels 时 uses 是加点次数、不是施放次数，别写成「按了 N 次」。',
+    '指标别混：teamRank 是队内经济排名（1=最富），damageRank 才是队内输出排名（1=伤害最高），heroDamage 是伤害数值，gpm/xpm/netWorth 都是经济，teamfight 是参团次数。',
+    'parsed=false 的场只解析出基础数据：只许说英雄、KDA、胜负，不许聊技能、经济、团战，别自己补。',
+  ].join('\n');
+}
+
 /** 拼「内部提示」文本（不含 openid，不含 @） */
-export function buildDeliverText(items: DigestItem[]): string {
+export function buildDeliverText(items: DigestItem[], briefing?: DigestBriefing): string {
+  // 有完整简报就走新链路；旧落盘文件 / 取数失败时降级到原来的单局提示词。
+  if (briefing !== undefined && briefing.sessions.length > 0) {
+    return buildBriefingText(briefing);
+  }
   // 只给数据，不给现成句子 —— 文案要她自己写，否则就是念稿。
   const data = items.map((it) => it.facts);
   return [
@@ -607,6 +722,7 @@ export function createDotaDigest(deps: DotaDigestDeps): DotaDigestHandle {
         queriedAt: typeof parsed.queriedAt === 'number' ? parsed.queriedAt : 0,
         forDay: parsed.forDay,
         items,
+        ...(isBriefing(parsed.briefing) ? { briefing: parsed.briefing } : {}),
         ...(typeof parsed.deliveredAt === 'number' ? { deliveredAt: parsed.deliveredAt } : {}),
         ...(typeof parsed.deliveredDay === 'string' ? { deliveredDay: parsed.deliveredDay } : {}),
       };
@@ -902,11 +1018,47 @@ export function createDotaDigest(deps: DotaDigestDeps): DotaDigestHandle {
       // 当天查、当天发：forDay 就是今天（不再 +1 天）。
       // 10-12 点查昨晚的比赛，这会儿解析基本都完成了，趁热发才有"锐评"的味道。
       const forDay = dayInTz(new Date(now), cfg.tz);
-      // 先把「同场几个人」「这一局详情」补齐，再落盘 —— 落盘的就是播报用的事实
+      // 先把「同场几个人」「这一局详情」补齐 —— 简报缺席时旧提示词还得靠它
       await enrichPicked(picked);
-      digest = { version: 1, queriedAt: now, forDay, items: picked };
+
+      // 方案 B：窗口内所有局按 matchId 去重，批量取完整场次数据（含 OMG 技能明细）。
+      // 同一场里有 3 个群友也只取一次详情；只给最近 MAX_BRIEF_SESSIONS 场，
+      // 数据给足但不把上下文撑爆。没亮点时上面已 return，不会白打请求。
+      const startById = new Map<number, number>();
+      for (const r of rows) {
+        const prev = startById.get(r.matchId);
+        if (prev === undefined || r.startTime > prev) startById.set(r.matchId, r.startTime);
+      }
+      const briefIds = [...startById.entries()]
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, MAX_BRIEF_SESSIONS)
+        .map(([id]) => id);
+      let briefing: DigestBriefing | undefined;
+      if (deps.buildBriefing !== undefined && briefIds.length > 0) {
+        try {
+          briefing = await deps.buildBriefing(briefIds, cfg.recentHours);
+        } catch (err) {
+          logger.warn(
+            'dota-digest: 完整简报取数失败（降级到单局详情）: '
+            + `${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
+      }
+      const briefCount = briefing?.sessions.length ?? 0;
+
+      digest = {
+        version: 1,
+        queriedAt: now,
+        forDay,
+        items: picked,
+        ...(briefCount > 0 && briefing !== undefined ? { briefing } : {}),
+      };
       save();
-      logger.info(`dota-digest: 今日战绩摘要已备好 ${picked.length} 条，今天内投递`);
+      logger.info(
+        `dota-digest: 今日战绩摘要已备好 ${picked.length} 条、`
+        + (briefCount > 0 ? `完整简报 ${briefCount} 场` : '简报缺席（用单局详情）')
+        + '，今天内投递',
+      );
       return { ran: true, count: picked.length };
     } finally {
       querying = false;
@@ -975,7 +1127,8 @@ export function createDotaDigest(deps: DotaDigestDeps): DotaDigestHandle {
     attemptsToday += 1;
 
     try {
-      const text = buildDeliverText(digest.items);
+      // 有完整简报就走「自己决定点评哪几场」的新提示词；旧文件/取数失败自动降级
+      const text = buildDeliverText(digest.items, digest.briefing);
       const res = await deliver(groupId, text);
       if (!res.ok) {
         // 业务跳过（会话不活着/预算不过）：不标已投递，允许稍后重试

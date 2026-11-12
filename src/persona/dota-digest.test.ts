@@ -14,6 +14,7 @@ import {
   createDotaDigest,
   type DotaDigestConfig,
   type DotaDigestDeps,
+  type DigestBriefing,
   type DigestForm,
   type DigestMatchSummary,
 } from './dota-digest.ts';
@@ -166,6 +167,8 @@ function harness(o: {
   matchCache?: DotaDigestDeps['matchCache'];
   /** 单场详情预取替身 */
   queryMatchDetail?: DotaDigestDeps['queryMatchDetail'];
+  /** 完整简报替身（方案 B） */
+  buildBriefing?: DotaDigestDeps['buildBriefing'];
 } = {}): Harness {
   const dataDir = o.dataDir ?? tmpDir();
   const deliverCalls: Array<{ groupId: string; text: string }> = [];
@@ -194,6 +197,7 @@ function harness(o: {
     now: () => QUERY_AT,
     ...(o.matchCache !== undefined ? { matchCache: o.matchCache } : {}),
     ...(o.queryMatchDetail !== undefined ? { queryMatchDetail: o.queryMatchDetail } : {}),
+    ...(o.buildBriefing !== undefined ? { buildBriefing: o.buildBriefing } : {}),
   };
 
   return { deps, dataDir, deliverCalls, handle: createDotaDigest(deps) };
@@ -900,6 +904,144 @@ describe('buildDeliverText · 时间与人数提示', () => {
     const text = buildDeliverText([withDetail])
     expect(text).toContain('"damageRank": 1')
     expect(text).toContain('"heroDamage": 18422')
+  })
+})
+
+// ── 完整简报（方案 B）：数据全给，由她自己决定点评几场 ─────────
+
+describe('buildDeliverText · 完整简报', () => {
+  const SIMPLE_ITEM = {
+    openid: 'u_a',
+    alias: '小周',
+    steamId: STEAM_A,
+    kind: 'carry' as const,
+    text: '',
+    facts: { name: '小周', situation: '斧王 7/6/24' },
+    lastPlayedAt: QUERY_AT,
+  }
+
+  const BRIEFING: DigestBriefing = {
+    windowHours: 48,
+    generatedAt: QUERY_AT,
+    sessions: [
+      {
+        matchId: 9085591620,
+        when: '11月11日 21:08',
+        gameMode: '技能征召',
+        durationMin: 38,
+        parsed: true,
+        boundPlayers: [
+          {
+            name: '小周', hero: '幻影刺客', kda: '7/6/24', win: true,
+            heroDamage: 23828, teamRank: 2, damageRank: 1,
+            abilities: [{ name: 'Shadowraze', nameZh: '毁灭阴影（影压）', uses: 126 }],
+            abilityBasis: 'uses',
+          },
+          {
+            name: '芋头', hero: '撼地者', kda: '10/9/26', win: true,
+            abilities: [{ name: 'Fissure', nameZh: '沟壑', uses: 40 }],
+          },
+        ],
+        lineup: { radiant: ['幻影刺客', '撼地者'], dire: ['影魔'] },
+      },
+      {
+        matchId: 9085680133,
+        when: '11月12日 20:02',
+        gameMode: '技能征召',
+        durationMin: 35,
+        parsed: false,
+        boundPlayers: [
+          { name: '铭鑫', hero: '巫医', kda: '7/10/22', win: false, abilities: [] },
+        ],
+      },
+    ],
+  }
+
+  it('有简报时给完整场次数据，让她自己决定点评哪几场', () => {
+    const text = buildDeliverText([SIMPLE_ITEM], BRIEFING)
+    expect(text).toContain('"matchId": 9085591620')
+    expect(text).toContain('"nameZh": "毁灭阴影（影压）"')
+    expect(text).toContain('"boundPlayers"')
+    expect(text).toContain('你自己决定点评哪几场')
+    expect(text).toContain('最多挑 3 场')
+    expect(text).toContain('这是今天唯一一次主动播报')
+    // 旧的「只说一个人」约束不应再出现
+    expect(text).not.toContain('只说一个人')
+  })
+
+  it('技能、时间、半解析、指标护栏都在（回归辅助当核心）', () => {
+    const text = buildDeliverText([SIMPLE_ITEM], BRIEFING)
+    expect(text).toContain('严禁按英雄默认技能脑补')
+    expect(text).toContain('判断他是核心还是辅助')
+    expect(text).toContain('不同 matchId 是不同场')
+    expect(text).toContain('parsed=false')
+    expect(text).toContain('damageRank 才是队内输出排名')
+    expect(text).toContain('abilityBasis=levels')
+    expect(text).toContain('人数不固定')
+  })
+
+  it('简报为空 → 降级到原来的单局提示词', () => {
+    const text = buildDeliverText([SIMPLE_ITEM], { windowHours: 48, generatedAt: QUERY_AT, sessions: [] })
+    expect(text).toContain('只说一个人')
+    expect(text).not.toContain('最多挑 3 场')
+  })
+})
+
+describe('tickQuery · 完整简报落盘与投递', () => {
+  const forms = () => ({
+    1: mkForm(1, [mkMatch({ matchId: 401, at: QUERY_AT - 2 * 3600e3, win: true, hero: '巫医', k: 7, d: 1, a: 20 })]),
+    2: mkForm(2, [mkMatch({ matchId: 401, at: QUERY_AT - 2 * 3600e3, win: true, hero: '斧王', k: 9, d: 2, a: 11 })]),
+  })
+  const bindings = () => [
+    { openid: 'u_a', alias: '小周', steamId: STEAM_A },
+    { openid: 'u_b', alias: '芋头', steamId: STEAM_B },
+  ]
+  const briefing: DigestBriefing = {
+    windowHours: 48,
+    generatedAt: QUERY_AT,
+    sessions: [{
+      matchId: 401, when: '3月10日 01:30', gameMode: '技能征召', durationMin: 40, parsed: true,
+      boundPlayers: [
+        { name: '小周', hero: '巫医', kda: '7/1/20', win: true, abilities: [{ name: 'Shadowraze', nameZh: '毁灭阴影（影压）', uses: 88 }] },
+        { name: '芋头', hero: '斧王', kda: '9/2/11', win: true, abilities: [] },
+      ],
+    }],
+  }
+
+  it('两人同一场 → buildBriefing 只收到 1 个 matchId，简报落盘并用于投递', async () => {
+    const calls: number[][] = []
+    const h = harness({
+      bindings,
+      forms: forms(),
+      buildBriefing: async (ids) => { calls.push([...ids]); return briefing },
+    })
+    const res = await h.handle.tickQuery(QUERY_AT)
+    expect(res.ran).toBe(true)
+    expect(calls).toEqual([[401]])
+
+    const file = JSON.parse(fs.readFileSync(path.join(h.dataDir, 'dota-digest.json'), 'utf8'))
+    expect(file.briefing.sessions).toHaveLength(1)
+
+    const sent = await h.handle.tickDeliver(cst(2026, 3, 10, 11, 0))
+    expect(sent.sent).toBe(true)
+    expect(h.deliverCalls).toHaveLength(1)
+    expect(h.deliverCalls[0]?.text).toContain('最多挑 3 场')
+    expect(h.deliverCalls[0]?.text).toContain('毁灭阴影（影压）')
+  })
+
+  it('buildBriefing 抛错 → 降级到单局提示词，今天照常播报', async () => {
+    const h = harness({
+      bindings,
+      forms: forms(),
+      buildBriefing: async () => { throw new Error('OpenDota 挂了') },
+    })
+    await h.handle.tickQuery(QUERY_AT)
+    const file = JSON.parse(fs.readFileSync(path.join(h.dataDir, 'dota-digest.json'), 'utf8'))
+    expect(file.briefing).toBeUndefined()
+
+    const sent = await h.handle.tickDeliver(cst(2026, 3, 10, 11, 0))
+    expect(sent.sent).toBe(true)
+    expect(h.deliverCalls[0]?.text).toContain('只说一个人')
   })
 })
 

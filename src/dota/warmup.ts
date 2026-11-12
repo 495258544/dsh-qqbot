@@ -259,10 +259,13 @@ export function createDotaWarmup(deps: WarmupDeps) {
         return { ran: false, people: 0, matches: 0, reason: 'already-ran' };
       }
 
+      // 同一场比赛被多个绑定群友打过时只触发一次解析：
+      // 去重集合跨所有账号共享，日志里的场数也不再把同一场重复计 N 遍。
+      const seenMatches = new Set<number>();
       for (const a of todo) {
         try {
           const accountId = Number(BigInt(a.steamId) - STEAM_ID64_BASE);
-          const n = await deps.service.warmRecent(accountId, cfg.withinHours, policy);
+          const n = await deps.service.warmRecent(accountId, cfg.withinHours, policy, seenMatches);
           fresh.people[a.steamId] = n;
           delete fresh.failed[a.steamId];
         } catch (err) {
@@ -293,7 +296,7 @@ export function createDotaWarmup(deps: WarmupDeps) {
         );
       } else {
         deps.logger.info(
-          `dota-warmup: 预热完成 ${okPeople} 人 ${matches} 场（已触发 OpenDota 解析，白天查询可拿到完整技能/团战数据）`,
+          `dota-warmup: 预热完成 ${okPeople} 人 ${matches} 场（按 match_id 去重后触发 OpenDota 解析，白天查询可拿到完整技能/团战数据）`,
         );
       }
       return { ran: true, people: accounts.length, matches };

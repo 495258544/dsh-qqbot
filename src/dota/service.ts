@@ -374,7 +374,17 @@ export class DotaService {
    * 请求本身就会让 OpenDota 入队解析 —— 这正是"凌晨预热、白天查才有完整数据"的原理。
    * 单场失败不中断（下一晚还会再试）；限流由本地闸门统一控制。
    */
-  async warmRecent(accountId: number, withinHours: number, policy?: RequestPolicy): Promise<number> {
+  /**
+   * `seen` 是**本轮预热共享**的去重集合（warmup 为所有账号传同一个 Set）。
+   * 几个人开黑时，各自的 recentMatches 都会列出同一场，但 OpenDota 的解析
+   * 队列是按 match_id 的 —— 重复请求只是白耗额度，还容易撞 429。
+   */
+  async warmRecent(
+    accountId: number,
+    withinHours: number,
+    policy?: RequestPolicy,
+    seen?: Set<number>,
+  ): Promise<number> {
     if (!this.config.enabled) {
       throw new OpenDotaError('bad-request', 'Dota2 战绩功能未启用（config.dota.enabled=false）');
     }
@@ -389,11 +399,15 @@ export class DotaService {
     // （白天查询就有完整技能数据）"。命中数会让人误以为预热成功，必须按成功数计。
     let triggered = 0;
     for (const m of targets) {
+      if (seen !== undefined && seen.has(m.match_id)) continue;
+      if (seen !== undefined) seen.add(m.match_id);
       try {
         await this.matchRaw(m.match_id, policy);
         triggered += 1;
       } catch {
+        // 失败就从去重集合里撤掉，让同轮下一个账号还有机会重试这场；
         // 单场失败不中断：预热是锦上添花，明天还会再试
+        seen?.delete(m.match_id);
       }
     }
     return triggered;

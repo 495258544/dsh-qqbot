@@ -118,3 +118,77 @@ describe('MatchCacheStore · 落盘与淘汰', () => {
     expect(store.get(907)).toBeDefined();
   });
 });
+
+// ── 完整简报（方案 B）：按 matchId 只存一份，含 OMG 技能明细 ──
+
+describe('MatchCacheStore · 完整简报', () => {
+  const session = (over: Partial<{ matchId: number; parsed: boolean }> = {}) => ({
+    matchId: over.matchId ?? 910,
+    when: '11月11日 21:08',
+    gameMode: '技能征召',
+    durationMin: 38,
+    parsed: over.parsed ?? true,
+    boundPlayers: [{
+      name: '小周',
+      hero: '幻影刺客',
+      kda: '7/6/24',
+      win: true,
+      heroDamage: 23828,
+      teamRank: 2,
+      damageRank: 1,
+      teamSize: 5,
+      teamfight: '参团 16/16',
+      abilityMix: '控场味道很重',
+      abilityBasis: 'uses' as const,
+      abilities: [
+        { name: 'Shadowraze', nameZh: '毁灭阴影（影压）', uses: 126, behavior: 'Point Target' },
+        { name: 'Fissure', nameZh: '沟壑', uses: 40 },
+      ],
+    }],
+    lineup: { radiant: ['幻影刺客', '撼地者'], dire: ['影魔'] },
+    fetchedAt: 1,
+  });
+
+  it('写入后读得回，重开进程也在（技能中文名/输出排名不丢）', () => {
+    const dir = tmpDir();
+    const a = new MatchCacheStore(dir);
+    a.upsertMany([{ matchId: 910, startTime: 1794406267, player: p(1, { alias: '小周' }) }]);
+    a.putBriefing(session());
+
+    const got = a.getBriefing(910);
+    expect(got?.parsed).toBe(true);
+    expect(got?.boundPlayers[0]?.abilities[0]?.nameZh).toBe('毁灭阴影（影压）');
+    expect(got?.lineup?.dire).toEqual(['影魔']);
+
+    const b = new MatchCacheStore(dir);
+    expect(b.getBriefing(910)?.boundPlayers[0]?.damageRank).toBe(1);
+    expect(b.getBriefing(910)?.boundPlayers[0]?.teamfight).toBe('参团 16/16');
+  });
+
+  it('原始战绩再次 upsert 不会把简报冲掉', () => {
+    const store = new MatchCacheStore(tmpDir());
+    store.upsertMany([{ matchId: 910, startTime: 100, player: p(1) }]);
+    store.putBriefing(session());
+    store.upsertMany([{ matchId: 910, startTime: 100, player: p(2, { alias: '芋头' }) }]);
+
+    expect(store.participantsOf(910)).toHaveLength(2);
+    expect(store.getBriefing(910)?.parsed).toBe(true);
+  });
+
+  it('同一场写两次简报只留最新一份', () => {
+    const store = new MatchCacheStore(tmpDir());
+    store.upsertMany([{ matchId: 910, startTime: 100, player: p(1) }]);
+    store.putBriefing(session({ parsed: false }));
+    store.putBriefing(session({ parsed: true }));
+    expect(store.getBriefing(910)?.parsed).toBe(true);
+    expect(store.getBriefing(910)?.boundPlayers).toHaveLength(1);
+  });
+
+  it('没有原始战绩记录时拒绝写入并告警（避免重读被丢掉）', () => {
+    const warns: string[] = [];
+    const store = new MatchCacheStore(tmpDir(), { warn: (m) => warns.push(m) });
+    store.putBriefing(session());
+    expect(store.getBriefing(910)).toBeUndefined();
+    expect(warns.join('')).toContain('还没有原始战绩记录');
+  });
+});
