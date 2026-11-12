@@ -686,6 +686,13 @@ ${lines.map((x) => '- ' + x).join('\n')}
     // 最近一条如果写了 feel，就原样带一句 —— 那是她自己起的名字，比任何统计都准
     const latest = [...this.moodLog].reverse().find((e) => !e.revoked && e.feel);
     if (!latest) return head;
-    return `${head}；最近一条你想说的是「${latest.feel}」`;
+    let line = `${head}；最近一条你想说的是「${latest.feel}」`;
+    // mixed 收口 B1（用户 2026-11-12 从决策页确认）：mixed 是四档里唯一
+    // "说了等于没说"的方向，她自己留的那句 feel 才是回看时的钥匙 ——
+    // 有 mixed+feel 记录、又不是上面刚展示那条时，单独点一句。
+    // 按 id 判重：同一条已经在「最近一条」里出现过了，不重复展示。
+    const mixed = [...this.moodLog].reverse().find((e) => !e.revoked && e.sense === 'mixed' && e.feel);
+    if (mixed && mixed.id !== latest.id) line += `；有条说不清的，你留了话：「${mixed.feel}」`;
+    return line;
   }
 }

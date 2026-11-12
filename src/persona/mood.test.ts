@@ -707,3 +707,104 @@ describe('qq_read_mood · 她读得到自己的记录，也拿得到撤销用的
     }
   });
 });
+
+// ─────────────────────────────────────────────────────────────
+// mixed 收口 A+B（task-9，用户 2026-11-12 从决策页 mixed-and-length 确认）
+//
+// mixed 是四档里唯一"说了等于没说"的方向：feel 才是她留给回看的钥匙。
+//   A：note 没留 feel 时软引导一句（可跳过，不命令不评判）
+//   B：回看时让"筐"可见（renderSection 点一句 + read_mood 标（没留话））
+// C 扩枚举已否决 —— 坐标系固化，不加。回复长度问题"先不动"。
+// ─────────────────────────────────────────────────────────────
+describe('mixed 收口 A · qq_note_mood render 软引导', () => {
+  it('mixed 且没留 feel → 引导句出现（可跳过的语气）', async () => {
+    const emotion = svc();
+    const tool = pick(registeredTools(emotion), 'qq_note_mood');
+    const r = await tool.execute({ sense: 'mixed', because: '想通了但有点涩' });
+    const blocks = tool.output?.render?.({}, r) as { type: string; text: string }[];
+    expect(blocks[0]?.text).toContain('说不清的话');
+    expect(blocks[0]?.text).toContain('那一下像什么');
+    expect(blocks[0]?.text).toContain('哪怕半句');
+    // 引导只出现在成功文本的末尾，"记下了"这个事实照旧在最前
+    expect(blocks[0]?.text).toContain('记下了（mixed）');
+  });
+
+  it('mixed 且留了 feel → 不引导（话已经留了，别多嘴）', async () => {
+    const emotion = svc();
+    const tool = pick(registeredTools(emotion), 'qq_note_mood');
+    const r = await tool.execute({ sense: 'mixed', because: '又感动又难受', feel: '像被人从背后拍了一下' });
+    const blocks = tool.output?.render?.({}, r) as { type: string; text: string }[];
+    expect(blocks[0]?.text).toContain('像被人从背后拍了一下');
+    expect(blocks[0]?.text).not.toContain('试着留一句');
+  });
+
+  it('up → 永远不引导（只有 mixed 是那个筐）', async () => {
+    const emotion = svc();
+    const tool = pick(registeredTools(emotion), 'qq_note_mood');
+    const r = await tool.execute({ sense: 'up', because: '说不上来，就是有点轻快' });
+    const blocks = tool.output?.render?.({}, r) as { type: string; text: string }[];
+    expect(blocks[0]?.text).toBe('记下了（up）');
+    expect(blocks[0]?.text).not.toContain('试着留一句');
+  });
+});
+
+describe('mixed 收口 B1 · renderSection 里 mixed 的留话可见（同条不重复）', () => {
+  it('mixed+feel 不是最新 feel 条 → 单独点一句，最新那条照常', () => {
+    const s = svc();
+    s.onContentMood('mixed', '翻到一个很难受的帖子', '像被人从背后拍了一下');
+    s.onContentMood('up', '读到向山敲胸口那章', '像有人在背后推了一把');
+    const t = s.renderSection();
+    expect(t).toContain('有条说不清的，你留了话：「像被人从背后拍了一下」');
+    expect(t).toContain('最近一条你想说的是「像有人在背后推了一把」');
+  });
+
+  it('mixed+feel 恰好是最新 feel 条 → 只展示一次，不出现两句', () => {
+    const s = svc();
+    s.onContentMood('mixed', '想通了但有点涩', '像被人从背后拍了一下');
+    const t = s.renderSection();
+    // 原话只在「最近一条你想说的是」里出现一次
+    expect(t.split('像被人从背后拍了一下')).toHaveLength(2);
+    expect(t).not.toContain('有条说不清的');
+  });
+
+  it('mixed 没留 feel → 行结构与从前一致，不追加任何子句', () => {
+    const s = svc();
+    s.onContentMood('mixed', '说不清，就是堵得慌');
+    const t = s.renderSection();
+    expect(t).toContain('说不清 1');
+    expect(t).not.toContain('你留了话');
+  });
+});
+
+describe('mixed 收口 B2 · qq_read_mood render 的（没留话）标记', () => {
+  it('mixed 没留 feel → 该行带（没留话）', async () => {
+    const emotion = svc();
+    const tools = registeredTools(emotion);
+    await pick(tools, 'qq_note_mood').execute({ sense: 'mixed', because: '说不清，就是堵得慌' });
+    const read = pick(tools, 'qq_read_mood');
+    const r = await read.execute({});
+    const blocks = read.output?.render?.({}, r) as { type: string; text: string }[];
+    const line = blocks[0]?.text.split('\n').find((l) => l.includes('堵得慌'));
+    expect(line, 'mixed 那行应该在渲染结果里').toBeDefined();
+    expect(line!).toContain('（没留话）');
+  });
+
+  it('mixed 留了 feel / 非 mixed 条目 → 都不带标记', async () => {
+    const emotion = svc();
+    const tools = registeredTools(emotion);
+    const note = pick(tools, 'qq_note_mood');
+    await note.execute({ sense: 'mixed', because: '又感动又难受', feel: '像被人从背后拍了一下' });
+    await note.execute({ sense: 'up', because: '说不上来，就是有点轻快' });
+    const read = pick(tools, 'qq_read_mood');
+    const r = await read.execute({});
+    const blocks = read.output?.render?.({}, r) as { type: string; text: string }[];
+    const lines = blocks[0]!.text.split('\n');
+    const mixedLine = lines.find((l) => l.includes('又感动又难受'));
+    expect(mixedLine, 'mixed+feel 那行应该在').toBeDefined();
+    expect(mixedLine!).toContain('像被人从背后拍了一下');
+    expect(mixedLine!).not.toContain('（没留话）');
+    const upLine = lines.find((l) => l.includes('有点轻快'));
+    expect(upLine, 'up 那行应该在').toBeDefined();
+    expect(upLine!).not.toContain('（没留话）');
+  });
+});

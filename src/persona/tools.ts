@@ -962,7 +962,14 @@ export function registerPersonaTools(
         if (!r.ok) return [{ type: 'text', text: `没记成（${r.error ?? '未知'}）` }];
         const tail = r.feel ? ` —— 「${r.feel}」` : '';
         const damp = r.damped ? '（今天记得有点多了，这条算得轻）' : '';
-        return [{ type: 'text', text: `记下了（${r.sense}）${tail}${damp}` }];
+        // mixed 收口 A（用户 2026-11-12 从决策页确认）：mixed 是四档里唯一
+        // "说了等于没说"的方向，没留 feel 时软引导一句。只改展示层（render
+        // 不触发宿主 INVALID_TOOL_OUTPUT 校验），execute 与 output schema 一律不动；
+        // 语气是"可跳过"的 —— 不命令不评判，写不出来就不写。
+        const guide = r.ok && r.sense === 'mixed' && !r.feel
+          ? '——说不清的话，试着留一句「那一下像什么」（feel），哪怕半句。'
+          : '';
+        return [{ type: 'text', text: `记下了（${r.sense}）${tail}${damp}${guide}` }];
       },
     },
     async execute(args: unknown): Promise<Record<string, unknown>> {
@@ -1066,7 +1073,9 @@ export function registerPersonaTools(
         if (r.count === 0) return [{ type: 'text', text: '还没记过心情。' }];
         const senseLabel: Record<string, string> = { up: '往上', down: '往下', mixed: '说不清', still: '平了' };
         const lines = r.entries.map((e) => {
-          const feel = e.feel ? `「${e.feel}」` : '';
+          // mixed 收口 B2（用户 2026-11-12 从决策页确认）：mixed 且没留话时点一句，
+          // 让"筐"在回看时也看得见；mixed 有 feel / 非 mixed 条目不受影响。
+          const feel = e.feel ? `「${e.feel}」` : e.sense === 'mixed' ? '（没留话）' : '';
           const rev = e.revoked ? '（已撤销）' : '';
           return `· ${e.day} ${e.time} ${senseLabel[e.sense] ?? e.sense} ${e.because}${feel}${rev}　id=${e.id}`;
         });
