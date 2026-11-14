@@ -818,7 +818,9 @@ describe('DotaDigest · 无亮点也要记住「今天查过了」', () => {
   // 在 2 小时查询窗口内每分钟重查一次 Steam + OpenDota（约 120 次/天）。
   const noHighlight = () => harness({
     bindings: () => [{ openid: 'u_a', alias: '小周', steamId: STEAM_A }],
-    forms: {},   // 谁都没打过 → 没有亮点
+    // 查得到人但窗口内没有局 → 没有亮点。别用 forms:{}（queryForm 会抛错，
+    // 那是「全账号查询失败」，2026-11-14 起会走重试护栏而不是落空摘要）。
+    forms: { 1: mkForm(1, []) },
   })
 
   it('第一次查：no-highlight，但落一个空摘要当标记', async () => {
@@ -1078,5 +1080,154 @@ describe('多实例 · 落盘状态共享', () => {
     const second = await b.handle.tickDeliver(cst(2026, 3, 10, 10, 30))
     expect(second).toEqual({ sent: false, reason: 'already-delivered' })
     expect(b.deliverCalls).toHaveLength(0)
+  })
+})
+
+// ── 方案 A：门槛从「有没有亮点」降成「有没有场次」（2026-11-14）──────────
+
+describe('方案 A · 没亮点但有场次也交给小深判断', () => {
+  const MATCH = 501
+  /** 4/7/22 胜、KDA 3.71：五个亮点门槛一个都不命中，但技能数据很有说头 */
+  const plainForm = () => ({
+    1: mkForm(1, [mkMatch({ matchId: MATCH, at: QUERY_AT - 2 * 3600e3, win: true, hero: '风暴之灵', k: 4, d: 7, a: 22 })]),
+  })
+  const bindings = () => [{ openid: 'u_a', alias: '小周', steamId: STEAM_A }]
+  const briefing: DigestBriefing = {
+    windowHours: 48,
+    generatedAt: QUERY_AT,
+    sessions: [{
+      matchId: MATCH, when: '3月10日 01:30', gameMode: '技能征召', durationMin: 40, parsed: true,
+      boundPlayers: [{
+        name: '小周', hero: '风暴之灵', kda: '4/7/22', win: true,
+        heroDamage: 17481, damageRank: 2,
+        abilities: [{ name: 'Fissure', nameZh: '沟壑', uses: 40 }],
+      }],
+    }],
+  }
+
+  it('4/7/22 这种够不上亮点的辅助局，仍生成简报并投递（items 为空）', async () => {
+    const calls: number[][] = []
+    const h = harness({
+      bindings,
+      forms: plainForm(),
+      buildBriefing: async (ids) => { calls.push([...ids]); return briefing },
+    })
+    const res = await h.handle.tickQuery(QUERY_AT)
+    expect(res).toEqual({ ran: true, count: 0 })
+    expect(calls).toEqual([[MATCH]])
+
+    const file = JSON.parse(fs.readFileSync(path.join(h.dataDir, 'dota-digest.json'), 'utf8'))
+    expect(file.items).toEqual([])
+    expect(file.briefing.sessions).toHaveLength(1)
+
+    const sent = await h.handle.tickDeliver(cst(2026, 3, 10, 11, 0))
+    expect(sent.sent).toBe(true)
+    expect(h.deliverCalls).toHaveLength(1)
+    expect(h.deliverCalls[0]?.text).toContain('最多挑 3 场')
+    expect(h.deliverCalls[0]?.text).toContain('沟壑')
+    expect(h.deliverCalls[0]?.text).toContain('没什么可吐槽的')
+  })
+
+  it('没有 buildBriefing 能力时，无亮点仍落空摘要且不发消息（旧行为不变）', async () => {
+    const h = harness({ bindings, forms: plainForm() })
+    expect(await h.handle.tickQuery(QUERY_AT)).toEqual({ ran: false, count: 0, reason: 'no-highlight' })
+    expect(h.handle.snapshot().digest?.items).toEqual([])
+    expect(await h.handle.tickDeliver(cst(2026, 3, 10, 11, 0))).toEqual({ sent: false, reason: 'no-items' })
+    expect(h.deliverCalls).toHaveLength(0)
+  })
+
+  it('投递后同一场不再进简报，隔天不复读（48h 窗口跨天）', async () => {
+    const dir = tmpDir()
+    const calls: number[][] = []
+    const mk = () => harness({
+      dataDir: dir,
+      bindings,
+      forms: plainForm(),
+      buildBriefing: async (ids) => { calls.push([...ids]); return briefing },
+    })
+    const a = mk()
+    await a.handle.tickQuery(QUERY_AT)
+    expect((await a.handle.tickDeliver(cst(2026, 3, 10, 11, 0))).sent).toBe(true)
+
+    // 模拟次日：摘要过期作废，history（含 match:501）保留
+    fs.rmSync(path.join(dir, 'dota-digest.json'), { force: true })
+    const b = mk()
+    expect(await b.handle.tickQuery(QUERY_AT + 24 * 3600e3)).toEqual({ ran: false, count: 0, reason: 'no-highlight' })
+    expect(calls).toEqual([[MATCH]])   // 第二天一次详情都没再取
+    expect(b.deliverCalls).toHaveLength(0)
+  })
+
+  it('全部场次 parsed=false 时提示词仍限制只说 KDA', () => {
+    const half: DigestBriefing = {
+      ...briefing,
+      sessions: [{
+        ...briefing.sessions[0]!,
+        parsed: false,
+        boundPlayers: [{ ...briefing.sessions[0]!.boundPlayers[0]!, abilities: [] }],
+      }],
+    }
+    const text = buildDeliverText([], half)
+    expect(text).toContain('这一批场次都还没解析完')
+    expect(text).toContain('不许聊技能、经济、团战')
+  })
+
+  it('旧 history 只有「人:类型」键时，新场次键能追加且不冲突', async () => {
+    const dir = tmpDir()
+    fs.writeFileSync(
+      path.join(dir, 'dota-digest-history.json'),
+      JSON.stringify({ version: 1, sent: [{ key: `${STEAM_A}:carry`, at: QUERY_AT - 24 * 3600e3 }] }),
+      'utf8',
+    )
+    const h = harness({
+      dataDir: dir,
+      bindings,
+      forms: plainForm(),
+      buildBriefing: async () => briefing,
+    })
+    await h.handle.tickQuery(QUERY_AT)
+    expect((await h.handle.tickDeliver(cst(2026, 3, 10, 11, 0))).sent).toBe(true)
+    const keys = JSON.parse(fs.readFileSync(path.join(dir, 'dota-digest-history.json'), 'utf8'))
+      .sent.map((e: { key: string }) => e.key)
+    expect(keys).toContain(`${STEAM_A}:carry`)
+    expect(keys).toContain(`match:${MATCH}`)
+  })
+})
+
+describe('全账号查询失败 · 不锁死当天（回归 2026-11-14 整天静默）', () => {
+  const bindings = () => [
+    { openid: 'u_a', alias: '小周', steamId: STEAM_A },
+    { openid: 'u_b', alias: '芋头', steamId: STEAM_B },
+  ]
+
+  it('全失败 → 不落盘；冷却期内跳过；OpenDota 恢复后窗口内自动重查成功', async () => {
+    const forms: Record<number, DigestForm | Error> = {
+      1: new Error('OpenDota 服务端错误（HTTP 500）'),
+      2: new Error('请求 OpenDota 超时（8000ms）'),
+    }
+    const h = harness({ bindings, forms })
+    expect(await h.handle.tickQuery(QUERY_AT)).toEqual({ ran: false, count: 0, reason: 'all-queries-failed' })
+    expect(exists(h.dataDir)).toBe(false)
+
+    expect(await h.handle.tickQuery(QUERY_AT + 60_000)).toEqual({ ran: false, count: 0, reason: 'query-cooldown' })
+    expect(exists(h.dataDir)).toBe(false)
+
+    forms[1] = mkForm(1, [mkMatch({ matchId: 601, at: QUERY_AT - 2 * 3600e3, win: true, k: 10, d: 1, a: 12 })])
+    forms[2] = mkForm(2, [])
+    const resumed = await h.handle.tickQuery(QUERY_AT + 11 * 60_000)
+    expect(resumed.ran).toBe(true)
+    expect(exists(h.dataDir)).toBe(true)
+  })
+
+  it('部分账号失败仍按原逻辑落空摘要，不进冷却', async () => {
+    const h = harness({
+      bindings,
+      forms: {
+        1: mkForm(1, [mkMatch({ matchId: 602, at: QUERY_AT - 2 * 3600e3, win: true, k: 4, d: 7, a: 22 })]),
+        2: new Error('OpenDota 挂了'),
+      },
+    })
+    expect(await h.handle.tickQuery(QUERY_AT)).toEqual({ ran: false, count: 0, reason: 'no-highlight' })
+    expect(exists(h.dataDir)).toBe(true)
+    expect(await h.handle.tickQuery(QUERY_AT + 60_000)).toEqual({ ran: false, count: 0, reason: 'already-prepared' })
   })
 })

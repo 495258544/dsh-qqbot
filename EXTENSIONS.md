@@ -69,7 +69,7 @@ src/
 | Steam 状态 | `src/steam/{settings,bindings,steam-id,steam-api,service,tools,index}.ts` | 查群友在线/在玩什么、好友列表、自助绑定、凭据运行时存储 | 低（上游基本不碰 `src/steam`） |
 | Dota 战绩 | `src/dota/{heroes,heroes-data,opendota,service,tools,index}.ts` | 最近战绩、单场详细解析（经济/对位/目标/曲线/团战） | 低 |
 | 完整场次简报 | `src/dota/briefing.ts` + `src/dota/match-cache.ts` 的 `briefing` 字段 | 按 matchId 去重批量取详情（限并发 3、复用已解析场），关联同场群友，附 OMG 技能明细/全队阵容/队内排名；落进 `matches.json` | 低（dota 平台层，persona 只认结构契约） |
-| 战绩播报 | `src/persona/dota-digest.ts` | 查最近 48h → 10-14 点发群锐评（3 天内同类不重复；有完整简报时交给模型自己决定点评哪几场，最多 3 场、一天 1 次；缺席降级到单局提示词） | **中**（在 `src/persona` 下，上游常改） |
+| 战绩播报 | `src/persona/dota-digest.ts` | 查最近 48h → 10-14 点发群锐评。2026-11-14 方案 A：门槛降成「窗口内有场次就生成完整简报」，由模型自己决定点评哪几场（最多 3 场、一天 1 次）；亮点只作为旧链路兜底，不再前置否决场次。按 `match:<matchId>` 3 天去重防跨天复读；全账号查询失败不落空摘要、冷却 10 分钟后窗口内重试 | **中**（在 `src/persona` 下，上游常改） |
 | B 站平台 | `src/bili/{cli,subtitles,tools,bili-health,index}.ts` | 本地 `bili` CLI：视频信息 / AI 总结 / 字幕时间轴 / 弹幕 / 抽帧 / 合集目录 + 输出字段自检 | 低（独立目录，上游不碰） |
 | 凌晨解析预热 | `src/dota/warmup.ts` | 每天 3:00 请求最近 30h 的比赛触发 OpenDota 解析；跨账号共享 `Set<match_id>` 去重（同一场开黑只触发一次）；文件锁 + 落盘状态跨热重载幂等 | 低 |
 | 群活跃度评分 | `src/features/group-activity.ts` | 按「Dota 相关度」给群打分，决定播报发哪个群 | **中**（`src/features` 上游也动） |
