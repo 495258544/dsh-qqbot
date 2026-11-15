@@ -984,7 +984,18 @@ function renderSummary(form: Omit<DotaForm, 'summaryText'>): string {
   return lines.join('\n');
 }
 
-/** 单局短评：只在明显好/明显糟时给，中间的留白 */
+/**
+ * 单局短评：只在明显好/明显糟时给，中间的留白。
+ *
+ * 2026-11-16 改：这里原来有一条 `kdaRatio < 1.5 → 「这局有点划水」`，
+ * 和 buildMatchNotes 里被用户骂掉的那条是同一句话、同一个毛病 ——
+ * 最近战绩列表（/players/{id}/recentMatches）里**没有任何队内数据**，
+ * 拿纯 KDA 判「划水」就是抓一条数字给人定性。线上 9091501690 的巫医
+ * （7/15/9 → KDA 1.07，实际满参团、伤害队内第二）正好落在这一档。
+ * 既然这一层拿不到证据，就按「有证据才说」闭嘴：只留「送」这档
+ * （KDA < 0.8 时死亡数确实压过击杀+助攻，说的是比分不是人）。
+ * 想给这局定性就让上层走单场解析 —— 那里有 factSheet 撑腰。
+ */
 function teaseLine(m: DotaMatchSummary): string {
   if (m.win) {
     if (m.kdaRatio >= 5) return '这局带飞';
@@ -993,18 +1004,19 @@ function teaseLine(m: DotaMatchSummary): string {
     return '';
   }
   if (m.kdaRatio < 0.8) return '这局有点送';
-  if (m.kdaRatio < 1.5) return '这局有点划水';
   return '';
 }
 
 /**
  * 给"最差那局"配一句话。
  * 只对**输局**开口：赢了还说人家掉链子，读起来像找茬。
+ *
+ * 2026-11-16 同上：去掉「那局有点划水」那一档（纯 KDA 定性，没有队内数据支撑），
+ * 「死得有点多」是死亡数直接说的，留着。
  */
 function jibeOf(m: DotaMatchSummary): string {
   if (m.win) return '';
   if (m.kdaRatio < 0.8) return '那局基本被按着打';
-  if (m.kdaRatio < 1.5) return '那局有点划水';
   if (m.deaths >= 10) return '死得有点多';
   return '';
 }
@@ -1734,7 +1746,7 @@ export function buildMatchDetailForm(
     .map((id) => itemName(id));
 
   // 注意这里先不含 factSheet：它要读 base 里的 KDA/伤害/排名/目标这些算好的字段，
-  // 而且 teamRank 又要先算出来 —— 顺序是 base → factSheet → base+factSheet。
+  // 而且 teamRank 又要先算出来 —— 顺序是 base → factSheet → notes → 渲染。
   // baseline（队内别人的数值快照）必须在这之前算：出了这个函数就没有全队原始数据了。
   const baseline = buildTeamBaseline(player, teamPlayers, worthOf);
   const base: Omit<MatchDetailForm, 'summaryText' | 'factSheet'> = {
@@ -1809,13 +1821,16 @@ export function buildMatchDetailForm(
     notes: [],
   };
 
-  const notes = buildMatchNotes(base);
-  // factSheet 在这里补：它要用 teamRank/objectives/teamfights 这些已经算好的字段，
-  // 而 baseline 又只有此刻还拿得到全队 RawMatchPlayer（2026-11-16）。
+  // 顺序（2026-11-16 改）：factSheet 必须先算出来，notes 才有「证据」可比对。
+  // 老顺序是 notes → factSheet，于是点评只能靠 KDA 拍脑袋，和「数据对照」自相矛盾
+  // （match 9091501690：满参团 + 伤害队内第二，点评却写「这局有点划水」）。
+  // factSheet 本身不读 notes，这里不会形成循环依赖。
+  const factSheet = buildFactSheet({ ...base, notes: [], baseline: baseline });
+  const notes = buildMatchNotes(base, factSheet);
   const withFacts: Omit<MatchDetailForm, 'summaryText'> = {
     ...base,
     notes,
-    factSheet: buildFactSheet({ ...base, notes, baseline: baseline }),
+    factSheet,
   };
   return { ...withFacts, summaryText: renderMatchSummary(withFacts) };
 }
@@ -1931,23 +1946,64 @@ export function annotateBoundPlayers(
   return { ...form, teamPlayers, summaryText: lines.join('\n') };
 }
 
-/** 2 条以内的点评：只在数据明显偏某一边时开口，避免每局都硬凹 */
-function buildMatchNotes(form: Omit<MatchDetailForm, 'summaryText' | 'factSheet'>): string[] {
+/**
+ * 赢局里按队内排名给的正面判语。
+ * 排名是硬数据（「经济第一」就是第一），所以无论有没有 factSheet 都留着。
+ *
+ * 唯一的例外是「肥得很」：排名第一但 factSheet 判了经济 minus 的极端局
+ * （辅助跟同定位队友比、队列里有人更富）下，说「肥」就是自相矛盾 —— 闭嘴。
+ */
+function rankNotes(
+  form: Omit<MatchDetailForm, 'summaryText' | 'factSheet'>,
+  gates?: { gpmAllowed?: boolean },
+): string[] {
+  const p = form.player;
+  if (!p.win) return [];
+  const fatOk = gates?.gpmAllowed !== false;
+  if (form.teamRank.netWorth === 1 && form.teamRank.heroDamage === 1) {
+    return [fatOk ? '队内经济和输出双第一，这局你带的' : '队内经济和输出双第一'];
+  }
+  if (form.teamRank.netWorth === 1) return [fatOk ? '队内经济第一，肥得很' : '队内经济第一'];
+  if (form.teamRank.heroDamage === 1) return ['队内输出第一'];
+  return [];
+}
+
+/**
+ * 只看 KDA 就下的判语（送 / 划水）。
+ *
+ * 2026-11-16：**只留给没有 factSheet 的老路径**。这条 `!win && kdaRatio < 1.5 → 划水`
+ * 就是线上那条错评的源头（满参团、伤害队内第二的巫医被判「这局有点划水」），
+ * 有事实清单时一律改走 buildMatchNotes 的证据判定。
+ */
+function kdaOnlyNotes(form: Omit<MatchDetailForm, 'summaryText' | 'factSheet'>): string[] {
+  const p = form.player;
+  if (p.win) return [];
+  if (p.kdaRatio < 0.8) return ['这局有点送'];
+  if (p.kdaRatio < 1.5) return ['这局有点划水'];
+  return [];
+}
+
+/** 兜底文案的取舍开关：不传 = 老路径，照旧按老条件开口（向后兼容） */
+interface DataNoteGate {
+  /** 允许说「死了 N 次，有点多」；false = factSheet 没判死亡 minus，这句就跟「数据对照」打架 */
+  deathsAllowed?: boolean;
+  /** 允许说「经济很肥」；false = factSheet 判了经济 minus，再说肥就是自相矛盾 */
+  gpmAllowed?: boolean;
+}
+
+/**
+ * 有具体数字支撑的兜底文案：队内排名、GPM、死亡数、参团数都写在句子里，
+ * 说出口能复核，所以两条路径（有/没有 factSheet）都能用。
+ * 参数 gates 只用来在 factSheet 已经否掉某项时闭嘴。
+ */
+function dataBackedNotes(
+  form: Omit<MatchDetailForm, 'summaryText' | 'factSheet'>,
+  gates?: DataNoteGate,
+): string[] {
   const p = form.player;
   const notes: string[] = [];
-
-  if (p.win) {
-    if (form.teamRank.netWorth === 1 && form.teamRank.heroDamage === 1) notes.push('队内经济和输出双第一，这局你带的');
-    else if (form.teamRank.netWorth === 1) notes.push('队内经济第一，肥得很');
-    else if (form.teamRank.heroDamage === 1) notes.push('队内输出第一');
-  } else if (p.kdaRatio < 0.8) {
-    notes.push('这局有点送');
-  } else if (p.kdaRatio < 1.5) {
-    notes.push('这局有点划水');
-  }
-
-  if (p.deaths >= 8) notes.push(`死了 ${p.deaths} 次，有点多`);
-  if (p.gpm >= 600) notes.push(`GPM ${p.gpm}，经济很肥`);
+  if (gates?.deathsAllowed !== false && p.deaths >= 8) notes.push(`死了 ${p.deaths} 次，有点多`);
+  if (gates?.gpmAllowed !== false && p.gpm >= 600) notes.push(`GPM ${p.gpm}，经济很肥`);
   // 辅助伤害低不是毛病 —— 先给出定位，别让人拿核心的尺子量辅助
   if (p.role === 'support' && form.teamRank.heroDamage === form.teamRank.teamSize) {
     notes.push(`辅助位，伤害垫底正常（${p.roleReason ?? '插眼补视野'}）`);
@@ -1956,17 +2012,114 @@ function buildMatchNotes(form: Omit<MatchDetailForm, 'summaryText' | 'factSheet'
     const rate = form.teamfights.participated / form.teamfights.count;
     if (rate < 0.5) notes.push(`团战只赶上 ${form.teamfights.participated}/${form.teamfights.count}，参团偏少`);
   }
+  return notes;
+}
 
+/** 2026-11-16 之前的老点评：行为原样保留，供不传 factSheet 的调用方（含老缓存）用 */
+function legacyMatchNotes(form: Omit<MatchDetailForm, 'summaryText' | 'factSheet'>): string[] {
+  // 顺序就是老顺序：赢局排名 → 输局看 KDA → 死亡/GPM/辅助/参团
+  const notes = [...rankNotes(form), ...kdaOnlyNotes(form), ...dataBackedNotes(form)];
   // 同一件事不重复说（比如"送"和"死得多"）
   return [...new Set(notes)].slice(0, 2);
+}
+
+/** 取事实清单里某一维的 verdict；没有清单、没有这一维都返回 undefined（= 没有证据） */
+function verdictOf(sheet: MatchFactSheet | undefined, dim: string): MatchFactLine['verdict'] | undefined {
+  if (sheet === undefined) return undefined;
+  return sheet.lines.find((l) => l.dim === dim)?.verdict;
+}
+
+/**
+ * 2 条以内的点评：只在数据明显偏某一边时开口，避免每局都硬凹。
+ *
+ * 2026-11-16 改（线上实锤 match 9091501690 小周巫医 7/15/9）：
+ * 老逻辑 `!win && kdaRatio < 1.5 → 「这局有点划水」`，而那局满参团 11/11、
+ * 伤害队内第二（占队内最高 84%），摘要里「点评：这局有点划水」紧挨着
+ * 「[团战] 100% → 优势」，两段自己打自己。
+ *   · 用户骂的「不综合分析、抓一两条就评」，这次写死在代码里的就是那一两条。
+ *
+ * 所以这里改成**先看事实清单再开口**：
+ *   1. 「划水」必须有证据 —— 只有 [输出] minus 或 [团战] minus 才允许说；
+ *      满参团 + 输出不差（flat/plus）时禁止说，KDA 再难看也不说。
+ *   2. 死亡 minus 时保留「死了 N 次」；死亡 minus 而输出/团战都是 plus 时，
+ *      宁可只说死亡那一句 —— 用命开团也是打法，不能叠加「划水」定性。
+ *   3. 「视野」plus 时加一条「插眼 N 个，视野做得不错」，并且排序上给它位置：
+ *      **真实 minus > 真实 plus > 老兜底**，否则永远挤不进这 2 条上限。
+ *
+ * 辅助位另有一道闸：factSheet 对辅助的伤害项照样记 minus（数字确实低），
+ * 但 findings 里写着「辅助不靠伤害说话」。所以视野 plus 的辅助不能只凭
+ * 输出 minus 被判划水，否则又是一条新的自相矛盾（对照 9089522269 赏金）。
+ */
+export function buildMatchNotes(
+  form: Omit<MatchDetailForm, 'summaryText' | 'factSheet'>,
+  factSheet?: MatchFactSheet,
+): string[] {
+  // 不传清单 → 老行为原样返回，别把老缓存/老调用方改味
+  if (factSheet === undefined) return legacyMatchNotes(form);
+
+  const p = form.player;
+  const dmgV = verdictOf(factSheet, '输出');
+  const tfV = verdictOf(factSheet, '团战');
+  const deathV = verdictOf(factSheet, '死亡');
+  const wardV = verdictOf(factSheet, '视野');
+  const ecoV = verdictOf(factSheet, '经济');
+  const wards = (p.obsPlaced ?? 0) + (p.senPlaced ?? 0);
+  const isSupport = p.role === 'support';
+  // 视野做得好的辅助：伤害低是位置决定的，不能拿它当「划水」的证据
+  const wardSaved = isSupport && wardV === 'plus';
+  const slackEvidence = tfV === 'minus' || (dmgV === 'minus' && !wardSaved);
+
+  /** tier 0 = 有证据的 minus，1 = 有证据的 plus，2 = 老兜底（只在没证据时露头） */
+  const cands: Array<{ text: string; tier: 0 | 1 | 2; weight: number }> = [];
+  const push = (text: string, tier: 0 | 1 | 2, weight: number): void => {
+    cands.push({ text, tier, weight });
+  };
+
+  // ── tier 0：factSheet 判了 minus 的，才允许说「不好」 ──
+  if (deathV === 'minus') push(`死了 ${p.deaths} 次，有点多`, 0, 100);
+  // 「送」和「划水」是同一件事的两档说法（老代码就是 if/else if），只出其中一条：
+  // 两条都推会把仅有的 2 个位置占满，视野 plus 这类真亮点永远挤不进来。
+  if (slackEvidence && p.kdaRatio < 0.8) {
+    push('这局有点送', 0, 96);
+  } else if (slackEvidence && p.kdaRatio < 1.5) {
+    push('这局有点划水', 0, 92);
+  }
+
+  // ── tier 1：factSheet 判了 plus 的，实话实说的加分项 ──
+  // 只放视野这一条：输出/团战 plus 已有 tier 2 的「队内输出第一」等着，
+  // 再塞一条「全程在场」只会把更有信息量的项挤出这 2 条上限。
+  if (wardV === 'plus' && wards > 0) push(`插眼 ${wards} 个，视野做得不错`, 1, 90);
+
+  // ── tier 2：老兜底文案，但被 factSheet 否掉的项要闭嘴 ──
+  const fatOk = ecoV !== 'minus';
+  const fallback = [
+    ...rankNotes(form, { gpmAllowed: fatOk }),
+    ...dataBackedNotes(form, { deathsAllowed: deathV === 'minus', gpmAllowed: fatOk }),
+  ];
+  fallback.forEach((text, i) => push(text, 2, 80 - i));
+
+  const sorted = cands
+    .map((c, i) => ({ ...c, i }))
+    .sort((a, b) => (a.tier - b.tier) || (b.weight - a.weight) || (a.i - b.i));
+
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const c of sorted) {
+    if (seen.has(c.text)) continue;
+    seen.add(c.text);
+    out.push(c.text);
+    if (out.length >= 2) break;
+  }
+  return out;
 }
 
 /**
  * 渲染摘要。
  *
- * 参数里 factSheet 是**可选**的：这个函数在 factSheet 被算出来之前就要能用
- * （顺序是 base → notes → factSheet → render），老缓存/别处构造的对象也可能没有它。
+ * 参数里 factSheet 是**可选**的：老缓存/别处构造的对象可能没有它，
  * 没有就跳过「数据对照」段，不能因为缺一份清单就整段摘要渲染不出来。
+ * （2026-11-16 起 buildMatchDetailForm 的顺序是 base → factSheet → notes → render，
+ * factSheet 一定已经算好；这里可选是为了兼容老调用方。）
  */
 function renderMatchSummary(
   form: Omit<MatchDetailForm, 'summaryText' | 'factSheet'> & { factSheet?: MatchFactSheet },

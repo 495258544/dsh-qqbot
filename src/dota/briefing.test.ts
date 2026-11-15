@@ -12,7 +12,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { createBriefingBuilder } from './briefing.ts';
-import { MatchCacheStore } from './match-cache.ts';
+import { MatchCacheStore, BRIEF_SCHEMA } from './match-cache.ts';
 import type { DotaService, MatchDetailForm } from './service.ts';
 
 let dirs: string[] = [];
@@ -236,6 +236,22 @@ describe('createBriefingBuilder · 缓存与容错', () => {
     const before = h.calls.length;
     await h.build([401], 48);
     expect(h.calls.length).toBeGreaterThan(before);
+  });
+
+  it('旧 schema 的简报不复用（notes 判定口径改了，老简报要重取）', async () => {
+    const h = harness({ participants: { 401: [{ accountId: 1, alias: '小周' }] } });
+    await h.build([401], 48);
+    // 手工把落盘的那份改成上一版 schema，模拟线上残留的老简报
+    const stale = h.matchCache.getBriefing(401);
+    expect(stale?.schema).toBe(BRIEF_SCHEMA);
+    h.matchCache.putBriefing({ ...(stale as NonNullable<typeof stale>), schema: BRIEF_SCHEMA - 1 });
+
+    const before = h.calls.length;
+    const sessions = await h.build([401], 48);
+    // 必须重取一次，且写回来的 schema 是新版本
+    expect(h.calls.length).toBeGreaterThan(before);
+    expect(sessions[0]?.schema).toBe(BRIEF_SCHEMA);
+    expect(h.matchCache.getBriefing(401)?.schema).toBe(BRIEF_SCHEMA);
   });
 
   it('本地战绩库后来多认出一个同场群友 → 简报重取而不是复用', async () => {

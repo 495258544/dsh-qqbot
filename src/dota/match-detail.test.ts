@@ -8,7 +8,8 @@
  */
 import { describe, expect, it } from 'vitest';
 import type { RawMatchDetail, RawMatchPlayer } from './opendota.ts';
-import { annotateBoundPlayers, buildMatchDetailForm } from './service.ts';
+import { annotateBoundPlayers, buildMatchDetailForm, buildMatchNotes } from './service.ts';
+import type { MatchDetailForm } from './service.ts';
 
 const HERO = {
   SF: 11,
@@ -41,6 +42,10 @@ function player(o: {
   level?: number;
   lane?: number;
   items?: number[];
+  /** 观察者眼数；不给就是 null（= 这局插眼字段没解析到） */
+  obs?: number;
+  /** 岗哨眼数 */
+  sen?: number;
 }): RawMatchPlayer {
   const items = o.items ?? [0, 0, 0, 0, 0, 0];
   return {
@@ -69,6 +74,8 @@ function player(o: {
     backpack_1: null,
     backpack_2: null,
     lane_role: o.lane ?? null,
+    obs_placed: o.obs ?? null,
+    sen_placed: o.sen ?? null,
   };
 }
 
@@ -392,3 +399,131 @@ describe('itemsZh（装备中文名）与 items 对齐', () => {
     expect(line).not.toContain('Unknown Thing（');
   });
 });
+
+// ── 点评必须服从事实清单（2026-11-16）─────────────────────────
+//
+// 线上实锤 match 9091501690（小周 巫医 7/15/9）：满参团 11/11、伤害队内第 2，
+// 摘要里却是
+//   点评：这局有点划水；死了 15 次，有点多
+//   数据对照：· [团战] 参团 11/11（100%） → 优势
+// 两段自己打自己。根子就是 `!win && kdaRatio < 1.5 → 划水` 这条写死的启发式。
+// 这批用例锁住新规则：「划水/送」必须有 factSheet 里真 minus 的证据。
+
+/** 只改本人（account 123）的字段，队友原样 —— 输局 + 满参团的最小复现 */
+function patchMe(raw: RawMatchDetail, patch: Partial<RawMatchPlayer>): RawMatchDetail {
+  return {
+    ...raw,
+    players: raw.players.map((p) => (p.account_id === 123 ? { ...p, ...patch } : p)),
+  };
+}
+
+/** 两次团战本人全程有输出（参团率 100% → 团战 plus） */
+const FULL_TEAMFIGHTS: RawMatchDetail['teamfights'] = [
+  { players: [{ player_slot: 0, damage: 3000 }] },
+  { players: [{ player_slot: 0, damage: 2500 }] },
+];
+
+/** 三次团战只赶上第一次（参团率 33% → 团战 minus） */
+const RARE_TEAMFIGHTS: RawMatchDetail['teamfights'] = [
+  { players: [{ player_slot: 0, damage: 3000 }] },
+  { players: [{ player_slot: 0, damage: 0 }] },
+  { players: [{ player_slot: 0, damage: 0 }] },
+];
+
+describe('buildMatchNotes · 服从 factSheet', () => {
+  it('满参团 + 输出不差 + KDA 差 → 点评里不许出现「划水」', () => {
+    // 7/15/9 = KDA 1.07（老逻辑必然推「划水」），但这局参团 2/2、伤害队内第一
+    const raw = patchMe(
+      fixture({ radiantWin: false, teamfights: FULL_TEAMFIGHTS }),
+      { kills: 7, deaths: 15, assists: 9 },
+    );
+    const f = buildMatchDetailForm(raw, 123, itemName);
+    // 先确认前提：factSheet 确实判了团战/输出不差
+    expect(f.factSheet.lines.find((l) => l.dim === '团战')?.verdict).toBe('plus');
+    expect(f.factSheet.lines.find((l) => l.dim === '输出')?.verdict).toBe('plus');
+    const notes = f.notes.join('；');
+    expect(notes).not.toContain('划水');
+    expect(notes).not.toContain('有点送');
+    // 死亡 minus 有数据支撑，这条照旧要说
+    expect(notes).toContain('死了 15 次');
+  });
+
+  it('输出 minus（伤害只占队内最高 30%）→ 允许说「划水」', () => {
+    const raw = patchMe(
+      fixture({ radiantWin: false, teamfights: FULL_TEAMFIGHTS }),
+      { kills: 10, deaths: 10, assists: 4, hero_damage: 3000 },
+    );
+    const f = buildMatchDetailForm(raw, 123, itemName);
+    expect(f.factSheet.lines.find((l) => l.dim === '输出')?.verdict).toBe('minus');
+    expect(f.notes.join('；')).toContain('划水');
+  });
+
+  it('团战 minus（参团率不到一半）→ 允许说「划水」', () => {
+    const raw = patchMe(
+      fixture({ radiantWin: false, teamfights: RARE_TEAMFIGHTS }),
+      { kills: 10, deaths: 10, assists: 4 },
+    );
+    const f = buildMatchDetailForm(raw, 123, itemName);
+    expect(f.factSheet.lines.find((l) => l.dim === '团战')?.verdict).toBe('minus');
+    expect(f.notes.join('；')).toContain('划水');
+  });
+
+  it('死亡 minus + 团战 plus + 输出 plus → 只有死亡那条，不叠加「划水」', () => {
+    // 死得多但输出/团战都占优：用命开团也是打法，不能定性成划水
+    const raw = patchMe(
+      fixture({ radiantWin: false, teamfights: FULL_TEAMFIGHTS }),
+      { kills: 7, deaths: 15, assists: 9, gold_per_min: 550 },
+    );
+    const f = buildMatchDetailForm(raw, 123, itemName);
+    const death = f.factSheet.lines.find((l) => l.dim === '死亡');
+    expect(death?.verdict).toBe('minus');
+    expect(f.factSheet.lines.find((l) => l.dim === '团战')?.verdict).toBe('plus');
+    expect(f.factSheet.lines.find((l) => l.dim === '输出')?.verdict).toBe('plus');
+    expect(f.notes).toEqual(['死了 15 次，有点多']);
+  });
+
+  it('不传 factSheet（老签名）→ 老行为原样保留（向后兼容）', () => {
+    const raw = patchMe(
+      fixture({ radiantWin: false, teamfights: FULL_TEAMFIGHTS }),
+      { kills: 7, deaths: 15, assists: 9 },
+    );
+    const f = buildMatchDetailForm(raw, 123, itemName);
+    // 故意把 factSheet 摘掉、只喂老参数，模拟老缓存 / 老调用方
+    const plain = { ...f } as Omit<MatchDetailForm, 'summaryText' | 'factSheet'>;
+    const notes = buildMatchNotes(plain);
+    // 老逻辑：输局 KDA < 1.5 推「划水」，死 >= 8 推死亡 —— 两条都在，行为不变
+    expect(notes).toContain('这局有点划水');
+    expect(notes).toContain('死了 15 次，有点多');
+  });
+
+  it('视野 plus 的辅助不会被 KDA 判成「送」或「划水」，反而有「视野做得不错」', () => {
+    // 203 号位：1/7/3（KDA 0.57，老逻辑必推「送」）+ 伤害队内最低（输出 minus），
+    // 但插了 28 个眼（视野队内第一）。辅助不靠伤害说话，这里不许由输出 minus 推「送」。
+    const base = fixture({
+      radiantWin: false,
+      // 203 是 slot 3：两次团战赶上一次 → 参团率 50%，团战 flat（不是 minus）
+      teamfights: [
+        { players: [{ player_slot: 0, damage: 3000 }, { player_slot: 3, damage: 1000 }] },
+        { players: [{ player_slot: 0, damage: 2500 }, { player_slot: 3, damage: 0 }] },
+      ],
+    });
+    const raw: RawMatchDetail = {
+      ...base,
+      players: base.players.map((p) => (
+        p.account_id === 203
+          ? { ...p, kills: 1, deaths: 7, assists: 3, obs_placed: 20, sen_placed: 8, last_hits: 40 }
+          : p
+      )),
+    };
+    const f = buildMatchDetailForm(raw, 203, itemName);
+    expect(f.player.role).toBe('support');
+    expect(f.factSheet.lines.find((l) => l.dim === '视野')?.verdict).toBe('plus');
+    expect(f.factSheet.lines.find((l) => l.dim === '输出')?.verdict).toBe('minus');
+    expect(f.factSheet.lines.find((l) => l.dim === '团战')?.verdict).toBe('flat');
+    const notes = f.notes.join('；');
+    expect(notes).toContain('视野做得不错');
+    expect(notes).not.toContain('划水');
+    expect(notes).not.toContain('有点送');
+  });
+});
+
