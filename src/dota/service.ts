@@ -124,6 +124,12 @@ export type DotaFormOutcome =
   | { ok: true; form: DotaForm }
   | { ok: false; accountId: number; errorKind: string; message: string };
 
+/**
+ * 一局里的实际定位。靠客观行为判，不靠英雄名 —— 赏金猎人、暗影恶魔这种
+ * 英雄既能打核心也能打辅助，只看英雄名必错。
+ */
+export type MatchRole = 'core' | 'support' | 'unknown';
+
 /** 单场详细解析（比 recentForm 细：经济/输出/对位/目标/曲线/团战/阵容） */
 export interface MatchDetailForm {
   matchId: number;
@@ -165,6 +171,22 @@ export interface MatchDetailForm {
     abilities?: ParsedAbility[];
     /** 一句话概括这套技能的路子（空 = 没拿到技能数据） */
     abilityMix?: string;
+    /** 分路：1=优势路 2=中路 3=劣势路 4=打野（OpenDota 口径），未知为 null */
+    laneRole?: number | null;
+    /** 插眼数（观察者 + 岗哨） */
+    obsPlaced?: number;
+    senPlaced?: number;
+    /** 屯野次数 */
+    campsStacked?: number;
+    /**
+     * 这一局的实际定位：core / support / unknown。
+     * 2026-11-15 修：以前没有任何定位字段，模型只能靠英雄名猜，
+     * 于是「赏金猎人 2/6/19」被当成主输出骂了一场。判据用客观行为
+     * （正补占比、插眼、屯野、经济排名），不看英雄名。
+     */
+    role?: MatchRole;
+    /** 判定理由（一句话，给模型看，不要照抄进群里） */
+    roleReason?: string;
   };
   /** 队内排名（1 = 最好，按净资产 / 英雄伤害） */
   teamRank: { netWorth: number; heroDamage: number; teamSize: number };
@@ -881,6 +903,62 @@ function towerTeam(key: string | null): number | null {
   return null;
 }
 
+/**
+ * 判断这局他打的是核心还是辅助。
+ *
+ * 2026-11-15 修（用户原话：「你看清楚这局谁是辅助谁是输出」）：
+ * 之前 MatchDetailForm 里根本没有定位信息，简报只给 KDA/经济/伤害排名，
+ * 模型只能靠英雄名猜，把「赏金猎人 2/6/19」当成主输出骂了一整轮。
+ *
+ * 判据只用客观行为，**不看英雄名**（OMG 里英雄更是个壳子）：
+ *   1. 插眼 + 屯野 —— 只要明显在铺视野，就是辅助；
+ *   2. 正补占全队比例 —— 队内两位主力刷钱的一眼能看出来；
+ *   3. 经济排名兜底（队内第 4/5 且正补不多 = 辅助位）。
+ * 判不出来就返回 unknown，宁可不说话也别让模型瞎猜。
+ */
+function inferRole(
+  player: RawMatchPlayer,
+  teamPlayers: RawMatchPlayer[],
+  worthOf: (p: RawMatchPlayer) => number,
+): { role: MatchRole; reason: string } {
+  const wards = (player.obs_placed ?? 0) + (player.sen_placed ?? 0);
+  const camps = player.camps_stacked ?? 0;
+
+  // 队内两位刷钱主力（按净资产）
+  const sortedWorth = [...teamPlayers].sort((a, b) => worthOf(b) - worthOf(a));
+  const worthRank = sortedWorth.indexOf(player) + 1;
+  const topTwo = new Set(sortedWorth.slice(0, 2));
+
+  // 正补占全队比例：核心一般占 20% 以上，辅助常年在 10% 以下
+  const teamLastHits = teamPlayers.reduce((s, p) => s + p.last_hits, 0);
+  const lhShare = teamLastHits > 0 ? player.last_hits / teamLastHits : 0;
+
+  // 队列视野 / 屯野：确实在干辅助的活
+  if (wards >= 6 && lhShare < 0.18) {
+    return { role: 'support', reason: `插了 ${wards} 个眼，明显在铺视野` };
+  }
+  if (wards >= 4 && worthRank >= 4 && lhShare < 0.15) {
+    return { role: 'support', reason: `插了 ${wards} 个眼、队内经济第 ${worthRank}` };
+  }
+  if (camps >= 3 && worthRank >= 4) {
+    return { role: 'support', reason: `屯野 ${camps} 次、队内经济第 ${worthRank}` };
+  }
+  // 刷钱主力：正补占比高 + 经济在前二
+  if (topTwo.has(player) && lhShare >= 0.15) {
+    return { role: 'core', reason: `正补占全队 ${Math.round(lhShare * 100)}%，队内经济第 ${worthRank}` };
+  }
+  if (worthRank >= 4 && lhShare < 0.12) {
+    return {
+      role: 'support',
+      reason: `正补只占全队 ${Math.round(lhShare * 100)}%、队内经济第 ${worthRank}`,
+    };
+  }
+  if (worthRank <= 3 && lhShare >= 0.12) {
+    return { role: 'core', reason: `正补占全队 ${Math.round(lhShare * 100)}%、队内经济第 ${worthRank}` };
+  }
+  return { role: 'unknown', reason: '经济与补刀都夹在中间，看不出明显定位' };
+}
+
 export function buildMatchDetailForm(
   raw: RawMatchDetail,
   accountId: number,
@@ -908,6 +986,8 @@ export function buildMatchDetailForm(
     const sorted = [...list].sort((a, b) => get(b) - get(a));
     return sorted.indexOf(player) + 1;
   };
+
+  const role = inferRole(player, teamPlayers, worthOf);
 
   // 对位：同 lane_role 的敌方玩家（多人则取经济最高的那个）
   let laneOpponent: MatchDetailForm['laneOpponent'] = null;
@@ -1027,6 +1107,12 @@ export function buildMatchDetailForm(
       level: player.level ?? 0,
       items,
       backpack,
+      laneRole: player.lane_role,
+      obsPlaced: player.obs_placed ?? 0,
+      senPlaced: player.sen_placed ?? 0,
+      campsStacked: player.camps_stacked ?? 0,
+      role: role.role,
+      roleReason: role.reason,
     },
     teamRank: {
       netWorth: rankBy(teamPlayers, worthOf),
@@ -1070,6 +1156,10 @@ function buildMatchNotes(form: Omit<MatchDetailForm, 'summaryText'>): string[] {
 
   if (p.deaths >= 8) notes.push(`死了 ${p.deaths} 次，有点多`);
   if (p.gpm >= 600) notes.push(`GPM ${p.gpm}，经济很肥`);
+  // 辅助伤害低不是毛病 —— 先给出定位，别让人拿核心的尺子量辅助
+  if (p.role === 'support' && form.teamRank.heroDamage === form.teamRank.teamSize) {
+    notes.push(`辅助位，伤害垫底正常（${p.roleReason ?? '插眼补视野'}）`);
+  }
   if (form.teamfights !== null && form.teamfights.count > 0) {
     const rate = form.teamfights.participated / form.teamfights.count;
     if (rate < 0.5) notes.push(`团战只赶上 ${form.teamfights.participated}/${form.teamfights.count}，参团偏少`);
@@ -1092,6 +1182,10 @@ function renderMatchSummary(form: Omit<MatchDetailForm, 'summaryText'>): string 
     `KDA ${p.kills}/${p.deaths}/${p.assists}（${p.kdaRatio.toFixed(2)}）· GPM ${p.gpm} · XPM ${p.xpm}`
     + ` · 正补 ${p.lastHits}/${p.denies} · ${p.level} 级`,
   );
+  if (p.role !== undefined && p.role !== 'unknown') {
+    const roleText = p.role === 'core' ? '核心位' : '辅助位';
+    lines.push(`定位：${roleText}（${p.roleReason ?? ''}）`);
+  }
   lines.push(
     `伤害 ${p.heroDamage}${form.teamRank.heroDamage > 0 ? `（队内第 ${form.teamRank.heroDamage}）` : ''}`
     + ` · 建筑 ${p.towerDamage} · 治疗 ${p.heroHealing}`

@@ -55,6 +55,14 @@ export interface CachedBriefPlayer {
   /** 队内输出排名（1=伤害最高） */
   damageRank?: number;
   teamSize?: number;
+  /**
+   * 这一局的实际定位 —— 核心 / 辅助 / 看不出。
+   * 2026-11-15 修：没有这个字段时模型只能看英雄名猜，
+   * 把「赏金猎人 2/6/19」当成主输出骂了一场。
+   */
+  role?: 'core' | 'support' | 'unknown';
+  /** 判定理由（客观行为，如「插了 5 个眼」），只给模型参考，别照抄进群里 */
+  roleReason?: string;
   /** 如「参团 16/16」 */
   teamfight?: string;
   abilities: CachedBriefAbility[];
@@ -79,6 +87,11 @@ export interface CachedBriefSession {
   gameMode: string;
   durationMin: number;
   parsed: boolean;
+  /**
+   * 简报表结构版本。加了新字段就 +1，缓存命中时会按它失效重取 ——
+   * 否则新字段永远是 undefined（2026-11-15 加 role 时踩到）。
+   */
+  schema?: number;
   boundPlayers: CachedBriefPlayer[];
   lineup?: { radiant: string[]; dire: string[] };
   /** 这份简报最后一次取数时间（ms） */
@@ -117,6 +130,12 @@ export interface CachedMatchInput {
 /** 最多留多少场（一天十几场，800 场≈两三个月，再老也没人翻） */
 const DEFAULT_MAX_MATCHES = 800;
 const FILE_VERSION = 1;
+
+/**
+ * 简报结构版本：给 CachedBriefSession 加字段时 +1。
+ * briefing 构建器只复用 schema 相同的缓存，老简报自动重取一次。
+ */
+export const BRIEF_SCHEMA = 2;
 
 function isFinitePositive(v: unknown): v is number {
   return typeof v === 'number' && Number.isFinite(v) && v > 0;
@@ -169,6 +188,10 @@ function sanitizeBriefing(v: unknown, matchId: number): CachedBriefSession | und
       ...(n(q, 'teamSize') !== undefined ? { teamSize: n(q, 'teamSize') as number } : {}),
       ...(s(q, 'teamfight') !== undefined ? { teamfight: q.teamfight as string } : {}),
       ...(s(q, 'abilityMix') !== undefined ? { abilityMix: q.abilityMix as string } : {}),
+      ...(q.role === 'core' || q.role === 'support' || q.role === 'unknown'
+        ? { role: q.role as 'core' | 'support' | 'unknown' }
+        : {}),
+      ...(s(q, 'roleReason') !== undefined ? { roleReason: q.roleReason as string } : {}),
       ...(q.abilityBasis === 'uses' || q.abilityBasis === 'levels'
         ? { abilityBasis: q.abilityBasis as 'uses' | 'levels' }
         : {}),
@@ -190,6 +213,7 @@ function sanitizeBriefing(v: unknown, matchId: number): CachedBriefSession | und
     gameMode: typeof o.gameMode === 'string' ? o.gameMode : '',
     durationMin: n(o, 'durationMin') ?? 0,
     parsed: o.parsed === true,
+    ...(n(o, 'schema') !== undefined ? { schema: n(o, 'schema') as number } : {}),
     boundPlayers,
     ...(lineup !== undefined ? { lineup } : {}),
     fetchedAt: n(o, 'fetchedAt') ?? 0,

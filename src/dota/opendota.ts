@@ -169,6 +169,14 @@ export interface RawMatchPlayer {
   /** 1=优势路 2=中路 3=劣势路 4=打野（OpenDota 口径） */
   lane_role: number | null;
   /**
+   * 插眼数（观察者 + 岗哨）。判断「这局谁是辅助」最硬的客观指标之一 ——
+   * 光看英雄名和 KDA 会把拿了 19 个助攻的赏金当成核心去骂。
+   */
+  obs_placed: number | null;
+  sen_placed: number | null;
+  /** 屯野次数，辅助的另一个特征 */
+  camps_stacked: number | null;
+  /**
    * 技能使用次数：`{技能内部名: 次数}`。
    * 技能征召（OMG）模式里这是判断"这套技能怎么打"的核心数据 ——
    * 用了 126 次的技能和顺手点一下是两回事。
@@ -668,6 +676,9 @@ function normalizeMatchDetail(v: Record<string, unknown>, id: number): RawMatchD
         backpack_1: numOrNull(p.backpack_1),
         backpack_2: numOrNull(p.backpack_2),
         lane_role: numOrNull(p.lane_role),
+        obs_placed: numOrNull(p.obs_placed),
+        sen_placed: numOrNull(p.sen_placed),
+        camps_stacked: numOrNull(p.camps_stacked),
         // 技能：这两项原来是白名单外的（归一化只保留"详细解析要用的字段"），
         // 但技能征召（OMG）模式里它才是核心信息，必须带出来。
         ability_uses:

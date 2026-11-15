@@ -974,7 +974,9 @@ describe('buildDeliverText · 完整简报', () => {
   it('技能、时间、半解析、指标护栏都在（回归辅助当核心）', () => {
     const text = buildDeliverText([SIMPLE_ITEM], BRIEFING)
     expect(text).toContain('严禁按英雄默认技能脑补')
-    expect(text).toContain('判断他是核心还是辅助')
+    // 2026-11-15 定位交给脚本判：断言 role 护栏文案，不再找旧的「判断他是核心还是辅助」
+    expect(text).toContain('boundPlayers[].role')
+    expect(text).toContain('别再拿英雄名或 KDA 猜')
     expect(text).toContain('不同 matchId 是不同场')
     expect(text).toContain('parsed=false')
     expect(text).toContain('damageRank 才是队内输出排名')

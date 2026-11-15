@@ -169,6 +169,10 @@ export interface DigestBriefPlayer {
   /** 队内输出排名（1=伤害最高） */
   damageRank?: number;
   teamSize?: number;
+  /** 这局实际定位（core=核心位 / support=辅助位），脚本按客观行为判的 */
+  role?: 'core' | 'support' | 'unknown';
+  /** 判据（插眼数、正补占比、经济排名），给模型参考，别照抄进群 */
+  roleReason?: string;
   teamfight?: string;
   abilities: DigestBriefAbility[];
   abilityMix?: string;
@@ -474,7 +478,16 @@ function buildBriefingText(briefing: DigestBriefing): string {
     '不同 matchId 是不同场，别把几场说成同一场，也别把不同场的人凑成一队。',
     'boundPlayers 是这场里一起玩的绑定群友，人数不固定（可能只有两三个），别编成「你们五个」；lineup 是那场全队十人的英雄，只是背景。',
     'abilities 是这局真实抽到的技能：nameZh 是官方简体中文名，照抄，别自译、改名或换成别的说法；没给 nameZh 就用英文原名。',
-    'OMG 里英雄不一定有招牌技能 —— 严禁按英雄默认技能脑补。判断他是核心还是辅助，看 abilities 的类型与次数、heroDamage、damageRank、netWorth，别只看英雄名或 KDA。',
+    'OMG 里英雄不一定有招牌技能 —— 严禁按英雄默认技能脑补。',
+    // 2026-11-15 修（用户原话「你看清楚这局谁是辅助谁是输出」）：
+    // 以前让模型自己从英雄名/KDA 推定位，结果把 2/6/19 的赏金猎人当主输出骂。
+    // 现在脚本按插眼/补刀占比/经济排名判好 role 一起给过来，模型照用就行。
+    'boundPlayers[].role 是脚本按客观行为判好的定位（core=核心位 / support=辅助位），'
+    + 'roleReason 是判据（插眼数、正补占全队比例、经济排名）。'
+    + '有这个字段就**直接照它说**，别再拿英雄名或 KDA 猜谁能打输出。'
+    + '没给 role 的场就别说定位，更不许自己编。',
+    '辅助位伤害低、补刀少是正常的，别拿核心的尺子量辅助；'
+    + '反过来核心位伤害垫底、补刀也上不去，那才值得吐。',
     'abilityBasis=levels 时 uses 是加点次数、不是施放次数，别写成「按了 N 次」。',
     '指标别混：teamRank 是队内经济排名（1=最富），damageRank 才是队内输出排名（1=伤害最高），heroDamage 是伤害数值，gpm/xpm/netWorth 都是经济，teamfight 是参团次数。',
     'parsed=false 的场只解析出基础数据：只许说英雄、KDA、胜负，不许聊技能、经济、团战，别自己补。',

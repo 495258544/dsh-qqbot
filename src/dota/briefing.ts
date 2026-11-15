@@ -27,6 +27,7 @@ import type {
   CachedBriefSession,
   MatchCacheStore,
 } from './match-cache.ts';
+import { BRIEF_SCHEMA } from './match-cache.ts';
 
 const DEFAULT_TZ = 'Asia/Shanghai';
 /** 同时最多几场在取详情：OpenDota 免费额度 + 11-12 的 429 教训 */
@@ -103,6 +104,11 @@ function playerOf(
     ...(form.teamRank.netWorth > 0 ? { teamRank: form.teamRank.netWorth } : {}),
     ...(form.teamRank.heroDamage > 0 ? { damageRank: form.teamRank.heroDamage } : {}),
     ...(form.teamRank.teamSize > 0 ? { teamSize: form.teamRank.teamSize } : {}),
+    // 定位：脚本已经按插眼/补刀/经济判好了，模型别再靠英雄名猜
+    ...(form.player.role !== undefined && form.player.role !== 'unknown'
+      ? { role: form.player.role }
+      : {}),
+    ...(form.player.roleReason !== undefined ? { roleReason: form.player.roleReason } : {}),
     ...(form.teamfights !== null
       ? { teamfight: `参团 ${form.teamfights.participated}/${form.teamfights.count}` }
       : {}),
@@ -133,8 +139,15 @@ export function createBriefingBuilder(
       // 已完整解析且参与者没变 → 直接复用本地简报，一次网络请求都不打。
       // 本地战绩库是逐轮攒人的：同场后来又认出一个群友时，简报必须重取，
       // 否则缓存里永远是「这场只有 1 个人」。
+      // 2026-11-15：加了 role 字段，旧缓存没有它 —— 老简报必须重取一次，
+      // 否则「谁是辅助」这个问题永远还是老答案（就是这次报错的根因）。
       const cached = deps.matchCache.getBriefing(matchId);
-      if (cached !== undefined && cached.parsed && cached.boundPlayers.length === participants.length) {
+      if (
+        cached !== undefined
+        && cached.parsed
+        && cached.schema === BRIEF_SCHEMA
+        && cached.boundPlayers.length === participants.length
+      ) {
         reused += 1;
         return cached;
       }
@@ -189,6 +202,7 @@ export function createBriefingBuilder(
         gameMode: first.gameModeText,
         durationMin: Math.round(first.durationSec / 60),
         parsed,
+        schema: BRIEF_SCHEMA,
         boundPlayers,
         lineup: first.lineup,
         fetchedAt: Date.now(),
