@@ -19,6 +19,7 @@ import type { Logger } from '../types.ts';
 import { heroName } from './heroes.ts';
 import { parseAbilities, parseAbilityUpgrades, describeAbilityMix, abilityLabel, type ParsedAbility } from './abilities.ts';
 import { AbilityRecordStore, type AbilityRecordPlayer } from './ability-records.ts';
+import { itemNameZh } from './item-zh.ts';
 import type { DotaWarmupConfig } from './warmup.ts';
 import {
   OpenDotaApi,
@@ -130,6 +131,25 @@ export type DotaFormOutcome =
  */
 export type MatchRole = 'core' | 'support' | 'unknown';
 
+/**
+ * 本人这一队的一个人（用于区分「群友」和「路人」）。
+ *
+ * 2026-11-16 修（用户原话：「你把队友当路人了」）：
+ *   以前阵容只有 `lineup.radiant/dire` 两个英雄名数组，谁都看不出哪几个是群里的人。
+ *   模型于是把一起开黑的群友（铭鑫、芋头）说成「路人」，还把群友的功劳安到路人头上。
+ *   这里给出**本人这一队**五个人的账号/英雄/阵营/是否绑定群友，由上层注入 alias。
+ */
+export interface MatchTeamPlayer {
+  /** 匿名玩家（OpenDota 里 account_id 为 null）就是 null */
+  accountId: number | null;
+  heroName: string;
+  isRadiant: boolean;
+  /** true = 群里绑过 Steam 的人（由 annotateBoundPlayers 标记） */
+  isBound: boolean;
+  /** 群里的称呼（isBound 时才有，取绑定表的 alias） */
+  alias?: string;
+}
+
 /** 单场详细解析（比 recentForm 细：经济/输出/对位/目标/曲线/团战/阵容） */
 export interface MatchDetailForm {
   matchId: number;
@@ -162,7 +182,14 @@ export interface MatchDetailForm {
     heroHealing: number;
     netWorth: number;
     level: number;
+    /** 英文原名（OpenDota dname），保持原样不动：老调用方/老测试都依赖它 */
     items: string[];
+    /**
+     * 装备的官方简体中文名，长度与 `items` 一一对应；没收录的位置放英文原名。
+     * 2026-11-16 新增：模型自己"翻译"装备名翻过车（Maelstrom 被说成「狂战斧」，
+     * 正确是「漩涡」，狂战斧是 Battle Fury），所以直接把中文名给出去。
+     */
+    itemsZh?: string[];
     backpack: string[];
     /**
      * 技能组合（按使用次数降序）。技能征召（OMG）模式里英雄只是个壳子，
@@ -202,9 +229,88 @@ export interface MatchDetailForm {
   /** 团战次数与参与次数；未解析为 null */
   teamfights: { count: number; participated: number } | null;
   lineup: { radiant: string[]; dire: string[] };
+  /**
+   * 本人这一队的五个人（按 player_slot 顺序），标明谁是绑定的群友、谁是路人。
+   * 2026-11-16 新增：阵容只有英雄名时，模型分不清队友里哪几个是群友，会把
+   * 一起开黑的人说成「路人」，还把功劳安到路人头上。
+   */
+  teamPlayers: MatchTeamPlayer[];
+  /**
+   * 事实清单：把这一局能收集到的数据逐项压成「纯数据 + 优势/劣势/无异常」。
+   *
+   * 2026-11-16 新增，必填。群里的原话是「我看他从来没有综合分析过能收集的数据吧，
+   * 不都是抓一两条就开始评么」——根因不是数据拿不到（经济曲线、伤害、补刀、插眼、
+   * 屯野、团战、出装、分路其实都在手上），而是模型拿到的是一堆散字段，它就挑最好
+   * 念的那一两个说（KDA、伤害），于是「0/7/25 是混子」「赏金伤害垫底是主输出菜」
+   * 这类错评反复出现。这份清单逼它逐项对照一遍再开口。
+   */
+  factSheet: MatchFactSheet;
   notes: string[];
   /** 直接可发群的整段中文 */
   summaryText: string;
+}
+
+/**
+ * factSheet 的一行：一个维度、一句纯数据、一个三态结论。
+ *
+ * 为什么 fact 必须是纯数据、不带褒贬：同一个数字谁看都是同一个结论，
+ * 形容词一进来就没法复核了，而且模型会把形容词直接抄进群里当点评。
+ */
+export interface MatchFactLine {
+  /** 维度名，如「经济」「输出」「补刀」「视野」「团战」「出装」「分路」「目标」 */
+  dim: string;
+  /** 这一项的事实陈述（纯数据，不带褒贬） */
+  fact: string;
+  /** 这个人本局在这一项上是明显优势 / 明显劣势 / 无异常 */
+  verdict: 'plus' | 'minus' | 'flat';
+}
+
+export interface MatchFactSheet {
+  lines: MatchFactLine[];
+  /** 由数据推出的 2~3 条结论候选（每条必须能指回具体 lines 的下标） */
+  findings: Array<{ text: string; evidence: number[] }>;
+}
+
+/**
+ * 队内对比基线：算 factSheet 时需要的「别人的数值」快照。
+ *
+ * 为什么不复用 teamRank：teamRank 只留本人「第几名」，而 factSheet 要的是
+ * 「比队内第一差多少 GPM」「同定位队友补了多少刀」「全队平均死几次」——
+ * 这些只有在还拿得到 RawMatchPlayer 全队原始数据的时候才算得出来。
+ * 造完之后 MatchDetailForm 里已经没有别人的数值了，所以留一份快照在这里。
+ */
+export interface MatchTeamBaseline {
+  teamSize: number;
+  /** 队内最高 GPM */
+  gpmTop: number;
+  /** 队内 GPM 中位数（定位判不出时给模型一个参照，免得它只能拿「比第一低多少」瞎猜） */
+  gpmMedian: number;
+  /** 本人 GPM 队内排名（1=最高） */
+  gpmRank: number;
+  /** 同定位（core / support / unknown）队友的 GPM，不含本人 */
+  sameRoleGpm: number[];
+  /** 队内最高英雄伤害 */
+  damageTop: number;
+  /** 队内最多插眼数（观察 + 岗哨） */
+  wardsTop: number;
+  /**
+   * 这一局的插眼字段是否真的有值。
+   * OpenDota 未解析完时 obs/sen/camps 整列是 null —— 那时「插眼 0 个」是假的，
+   * 只能记 flat 并写明未解析，绝不能说「他没插眼」。
+   */
+  wardsKnown: boolean;
+  /** 本人插眼数队内排名（1=最多） */
+  wardRank: number;
+  /** 队内最高正补 */
+  lastHitsTop: number;
+  /** 全队正补总和（算「正补占全队百分之几」用，定位判不出时靠它识别辅助） */
+  lastHitsTotal: number;
+  /** 同定位（core / support / unknown）队友的正补，不含本人 */
+  sameRoleLastHits: number[];
+  /** 全队平均死亡数 */
+  deathsAvg: number;
+  /** 队内最高建筑伤害 */
+  towerTop: number;
 }
 
 /** 多人查询之间的间隔：OpenDota 没有批量端点，连续打容易踩到 429 */
@@ -453,6 +559,26 @@ export class DotaService {
     const raw = await this.matchRaw(matchId);
     const itemName = await this.itemNameResolver();
     const form = buildMatchDetailForm(raw, accountId, itemName);
+
+    // 装备名护栏（2026-11-16）：中文名是脚本按官方译名给的，模型自己译会翻车
+    // （Maelstrom 被说成「狂战斧」，而狂战斧是 Battle Fury）。
+    // 和技能名那条同一个思路：不是"没数据"，而是明确要求照抄。
+    // 放在这里而不是 buildMatchDetailForm 里，是因为角色判据那套 notes 有
+    // 「2 条以内」的上限 —— 通用护栏不该跟战况点评抢位置（2026-11-16）。
+    if (form.player.items.length > 0) {
+      form.notes.push(
+        '装备名按上面给的写法照抄：括号前是官方简体中文名，括号里是英文原名；'
+        + '只有英文原名的那件就是没收录中文名，直接用英文。不要自行翻译或换成别的说法。',
+      );
+    }
+    // 队友护栏（2026-11-16）：队里谁是群友由 teamPlayers 标，别一律当路人；
+    // 反过来也别把路人当熟人瞎认亲。文案会随 summaryText 一起给到模型。
+    if (form.teamPlayers.length > 0) {
+      form.notes.push(
+        '队友里 isBound=true 的是群里绑过 Steam 的人（alias 是群里怎么叫的），isBound=false 的是路人；'
+        + '点评时别把群友说成路人，也别把群友的功劳安到路人头上。',
+      );
+    }
 
     // 技能组合（技能征召/OMG 的核心信息）。
     // 常量拉取失败就留空并记一条 note —— 不能因为拿不到技能名就让整条战绩查询失败。
@@ -959,6 +1085,535 @@ function inferRole(
   return { role: 'unknown', reason: '经济与补刀都夹在中间，看不出明显定位' };
 }
 
+/**
+ * factSheet 的客观阈值表（2026-11-16 新增）。
+ *
+ * 为什么要把它写成常量对象、而且每条都注明依据：
+ *   1. 这些数字决定「优势 / 劣势 / 无异常」，模型会照着它评价人，必须能查、能调；
+ *   2. 散在 if 里的魔法数字没人敢动，调一次要全文搜；
+ *   3. 群里那几条错评（「0/7/25 是混子」「赏金伤害垫底是主输出菜」）的根子就是
+ *      没人定义过「什么叫低」—— 现在有定义，就能反驳模型，也能以后按群的实际水平调。
+ *
+ * 取值的来历：都是「明显偏离队友」的经验分界，不是精确统计。宁可少判 plus，
+ * 也别把平庸当亮点 —— 判错的成本是一整轮群聊的嘲讽，不是测试用例。
+ */
+export const FACT_THRESHOLDS = {
+  // ── 输出 ──
+  /** 伤害占队内最高 >= 85% 才叫「主要输出」：五个人里排第一的那个是 100%，85% ≈ 与第一几乎并驾 */
+  damageSharePlus: 0.85,
+  /** 伤害不到队内最高的 40% ≈ 不到第一的一半，五人均分是 20% 上下，40% 已经明显掉队 */
+  damageShareMinus: 0.40,
+  /**
+   * 「队内垫底」这条单独判 minus：伤害排最后一名（5 人队）就是这一项他是队里最少的，
+   * 数字上无争议；但只在这个比例以下才算 —— 60% 是「第二梯队」的上沿，
+   * 比这还低的垫底才是真的没什么输出（对照 9089522269：赏金 18821 / 队内最高 36054 = 52%，
+   * 排 5/5，这一项就该记 minus，再由 findings 说明「辅助位不靠伤害说话」）。
+   */
+  damageShareLastMinus: 0.60,
+
+  // ── 经济 ──
+  /** GPM 与队内第一差距 <= 10% 且排名前二 → 经济没掉队（同一档） */
+  gpmGapPlus: 0.10,
+  /** 比队内第一低 25% 以上 → 经济确实掉队（核心位这条最刺眼，辅助位改看同定位队友） */
+  gpmGapMinus: 0.25,
+  /** 与同定位（同为辅助 / 同为核心）队友的人均值比：>= 1.2 倍算 plus，<= 0.8 倍算 minus */
+  sameRoleRatioPlus: 1.20,
+  sameRoleRatioMinus: 0.80,
+
+  // ── 补刀 ──
+  /** 同定位队友人均正补的 1.2 倍以上算吃得多，0.8 倍以下算明显没补上 */
+  lastHitsRatioPlus: 1.20,
+  lastHitsRatioMinus: 0.80,
+
+  // ── 视野 ──
+  /** 插眼数占队内最多的 60% 以上 → 视野这局是他撑的（辅助的活就是这个） */
+  wardSharePlus: 0.60,
+  /**
+   * 辅助位的放宽口径：一局插到 5 个眼（观察+岗哨）且队内前二，也算视野是加分项。
+   * 为什么不硬按 60% 卡：队里两个辅助常常一个主铺、一个游走，游走辅助眼少不代表没干活；
+   * 5 个眼在 35 分钟以上的局里已经是真在铺视野了（对照 11-16 的 9089522269：赏金 5 个、
+   * 同队光法 12 个，按 60% 会把「他在插眼」直接判成无异常）。
+   */
+  wardSupportMin: 5,
+  wardSupportRankMax: 2,
+  /** 辅助位插眼不到队内最多的 15% → 基本没铺视野，这才是真该说的 */
+  wardShareMinus: 0.15,
+
+  // ── 团战 ──
+  /** 参团率 >= 85% 算全程在场；< 50% 算基本没跟团 */
+  teamfightRatePlus: 0.85,
+  teamfightRateMinus: 0.50,
+
+  // ── 死亡 ──
+  /** 死亡数 <= 全队平均的 60% → 这局很难死；>= 平均的 1.3 倍 → 死得明显多 */
+  deathsAvgPlus: 0.60,
+  deathsAvgMinus: 1.30,
+
+  // ── 目标 ──
+  /** 建筑伤害占队内最多的 60% 以上 → 推塔是他推的；治疗 >= 3000 也算一项实打实的贡献 */
+  towerSharePlus: 0.60,
+  healingPlus: 3000,
+
+  // ── 长度上限（上下文不能爆，2026-11-16 用户要求）──
+  /** 每条 fact 最多多少字（汉字/字符），超了截断加「…」 */
+  maxFactChars: 40,
+  /** 整份 factSheet 序列化后最多多少字；超了先丢 flat 行（plus/minus 优先留） */
+  maxSerializedChars: 1200,
+  /** findings 条数：2~3 条，多了模型反而只念最后一条 */
+  minFindings: 2,
+  maxFindings: 3,
+} as const;
+
+/** verdict → 给人看的三个词。刻意不用 emoji/符号：模型会跟着抄，群里看着就脏 */
+const VERDICT_TEXT: Record<MatchFactLine['verdict'], string> = {
+  plus: '优势',
+  minus: '劣势',
+  flat: '无异常',
+};
+
+/** lane_role（OpenDota 口径）→ 分路中文；未知就是未知，不许猜 */
+const LANE_ROLE_TEXT: Record<number, string> = {
+  1: '优势路',
+  2: '中路',
+  3: '劣势路',
+  4: '打野',
+};
+
+/** 按「字符」算长度（汉字、数字、标点都算 1 个），用于事实清单的长度上限 */
+function charLen(s: string): number {
+  return [...s].length;
+}
+
+/** 超长就截断并加「…」，保证单条 fact 不超 maxFactChars */
+function clampText(s: string, max: number): string {
+  if (charLen(s) <= max) return s;
+  return `${[...s].slice(0, max - 1).join('')}…`;
+}
+
+/** 角色 → 中文，只在 fact/finding 里说话用 */
+function roleText(role: MatchRole | undefined): string {
+  if (role === 'core') return '核心位';
+  if (role === 'support') return '辅助位';
+  return '定位看不出';
+}
+
+/** buildFactSheet 的入参：单场数据的全部已知字段 + 队内对比基线 */
+export type FactSheetInput = Omit<MatchDetailForm, 'summaryText' | 'factSheet'> & {
+  /** 队内「别人的数值」快照；缺了就只能退化成只看本人排名（不崩） */
+  baseline?: MatchTeamBaseline;
+};
+
+/**
+ * 生成事实清单（2026-11-16 新增）。
+ *
+ * 设计要点，改之前先看这段：
+ *   1. **只用客观阈值，不写褒贬形容词** —— 「GPM 364（队内第 4/5，比队内第一低 153）」
+ *      这种话说出口谁都能复核；「经济拉胯」没法复核，还会被模型直接抄进群里。
+ *   2. **没有数据 ≠ 数据不好** —— 未解析局（goldSwing/teamfights 为 null、插眼字段是
+ *      null）一律记 flat 并写明「未解析」，绝不因为读不到就判 minus。
+ *   3. **辅助不看核心的尺子** —— 经济/补刀对辅助改成跟同定位队友比；伤害一项对辅助
+ *      仍然会记 minus（数字确实低），但 findings 里必须点明「辅助位不靠伤害说话」，
+ *      不许推出「他菜」。
+ *   4. findings 每条都挂 evidence（lines 下标），保证模型说的每句结论都能指回一行数据。
+ */
+export function buildFactSheet(form: FactSheetInput): MatchFactSheet {
+  const p = form.player;
+  const tr = form.teamRank;
+  const b = form.baseline;
+  const size = Math.max(1, tr.teamSize);
+  const isSupport = p.role === 'support';
+  const lines: MatchFactLine[] = [];
+
+  // ── 经济 ──
+  const gpmRank = b?.gpmRank ?? tr.netWorth;
+  const gpmTop = b?.gpmTop ?? 0;
+  const gpmGap = gpmTop > 0 ? Math.max(0, gpmTop - p.gpm) : 0;
+  const gpmGapPct = gpmTop > 0 ? gpmGap / gpmTop : 0;
+  {
+    let verdict: MatchFactLine['verdict'] = 'flat';
+    let fact: string;
+    const mates = b?.sameRoleGpm ?? [];
+    const mateAvg = mates.length > 0 ? mates.reduce((s, v) => s + v, 0) / mates.length : 0;
+    if (isSupport && mateAvg > 0) {
+      // 辅助跟辅助比：拿核心的 GPM 当尺子，辅助在这项上永远是「垫底」，
+      // 那是位置决定的，不是问题（11-16 那局的赏金就是这么被骂的）。
+      const ratio = p.gpm / mateAvg;
+      if (ratio >= FACT_THRESHOLDS.sameRoleRatioPlus) verdict = 'plus';
+      else if (ratio <= FACT_THRESHOLDS.sameRoleRatioMinus) verdict = 'minus';
+      fact = `GPM ${p.gpm}（辅助位同定位队友人均 ${Math.round(mateAvg)}，队内第 ${gpmRank}/${size}）`;
+    } else if (p.role === 'core' && gpmTop > 0) {
+      if (gpmGapPct >= FACT_THRESHOLDS.gpmGapMinus) verdict = 'minus';
+      else if (gpmGapPct <= FACT_THRESHOLDS.gpmGapPlus && gpmRank <= 2) verdict = 'plus';
+      fact = `GPM ${p.gpm}（队内第 ${gpmRank}/${size}，比队内第一低 ${gpmGap}）`;
+    } else {
+      // 定位看不出（role=unknown）：不知道他是核心还是辅助，就没法说这个 GPM 算不算低。
+      // 记 flat，只陈述数字 —— 把「没判出定位」当成「经济差」正是要杜绝的那种错评。
+      // 但补一句队内中位数当参照：模型自己看一眼就知道 364 在 5 人队里属于哪一档。
+      const medText = b !== undefined && b.gpmMedian > 0 ? `，队内中位数 ${b.gpmMedian}` : '';
+      fact = gpmTop > 0
+        ? `GPM ${p.gpm}（队内第 ${gpmRank}/${size}${medText}；定位未判出）`
+        : `GPM ${p.gpm}（缺队内对比数据）`;
+    }
+    lines.push({ dim: '经济', fact: clampText(fact, FACT_THRESHOLDS.maxFactChars), verdict });
+  }
+
+  // ── 输出 ──
+  const dmgTop = b?.damageTop ?? 0;
+  const dmgShare = dmgTop > 0 ? p.heroDamage / dmgTop : 0;
+  {
+    let verdict: MatchFactLine['verdict'] = 'flat';
+    if (dmgTop > 0) {
+      if (dmgShare >= FACT_THRESHOLDS.damageSharePlus) {
+        verdict = 'plus';
+      } else if (dmgShare < FACT_THRESHOLDS.damageShareMinus) {
+        verdict = 'minus';
+      } else if (
+        // 队内垫底 + 比例也在第二梯队以下 —— 数字上确实是他最少，记 minus。
+        // 对辅助也照记（数据不能改），但 findings 必须点明「辅助不靠伤害说话」，
+        // 不许由此推出「他菜」。
+        tr.heroDamage >= size
+        && dmgShare < FACT_THRESHOLDS.damageShareLastMinus
+      ) {
+        verdict = 'minus';
+      }
+    }
+    lines.push({
+      dim: '输出',
+      fact: clampText(
+        dmgTop > 0
+          ? `伤害 ${p.heroDamage}（队内第 ${tr.heroDamage}/${size}，占队内最高 ${Math.round(dmgShare * 100)}%）`
+          : `伤害 ${p.heroDamage}（缺队内对比数据）`,
+        FACT_THRESHOLDS.maxFactChars,
+      ),
+      verdict,
+    });
+  }
+
+  // ── 补刀 ──
+  {
+    let verdict: MatchFactLine['verdict'] = 'flat';
+    const mates = b?.sameRoleLastHits ?? [];
+    const top = b?.lastHitsTop ?? p.lastHits;
+    let fact: string;
+    if (isSupport) {
+      // 辅助不参与补刀比较：正补本来就是让给核心的，拿这条量辅助就是错评
+      fact = `正补 ${p.lastHits}/反补 ${p.denies}（辅助位不计入比较）`;
+    } else if (p.role === 'core' && mates.length > 0) {
+      const avg = mates.reduce((s, v) => s + v, 0) / mates.length;
+      if (avg > 0) {
+        const ratio = p.lastHits / avg;
+        if (ratio >= FACT_THRESHOLDS.lastHitsRatioPlus) verdict = 'plus';
+        else if (ratio <= FACT_THRESHOLDS.lastHitsRatioMinus) verdict = 'minus';
+      }
+      fact = `正补 ${p.lastHits}/反补 ${p.denies}（同定位队友人均 ${Math.round(avg)}）`;
+    } else {
+      // 定位看不出：不判好坏，只给数字（队内最多 + 占全队比例）。
+      // 「占全队 7%」这种比例本身就是客观事实，模型拿它自己就能看出这是辅助位，
+      // 不需要我们替它下结论，也就不会出现「补刀少所以他菜」这种没有依据的因果。
+      const share = (b?.lastHitsTotal ?? 0) > 0 ? p.lastHits / (b?.lastHitsTotal ?? 1) : 0;
+      fact = `正补 ${p.lastHits}/反补 ${p.denies}（队内最多 ${top}，占全队 ${Math.round(share * 100)}%；定位未判出）`;
+    }
+    lines.push({ dim: '补刀', fact: clampText(fact, FACT_THRESHOLDS.maxFactChars), verdict });
+  }
+
+  // ── 视野 ──
+  const wards = (p.obsPlaced ?? 0) + (p.senPlaced ?? 0);
+  const wardsKnown = b?.wardsKnown ?? false;
+  const wardsTop = b?.wardsTop ?? 0;
+  const wardShare = wardsTop > 0 ? wards / wardsTop : 0;
+  const wardRank = b?.wardRank ?? (wards > 0 ? 1 : size);
+  {
+    let verdict: MatchFactLine['verdict'] = 'flat';
+    if (!wardsKnown) {
+      // 未解析局：插眼字段整列是 null，这里只能如实说没数据，不能说"他没插眼"
+      verdict = 'flat';
+    } else if (wardShare >= FACT_THRESHOLDS.wardSharePlus) {
+      verdict = 'plus';
+    } else if (
+      isSupport
+      && wards >= FACT_THRESHOLDS.wardSupportMin
+      && wardRank <= FACT_THRESHOLDS.wardSupportRankMax
+    ) {
+      verdict = 'plus';
+    } else if (isSupport && wardsTop >= FACT_THRESHOLDS.wardSupportMin && wardShare < FACT_THRESHOLDS.wardShareMinus) {
+      verdict = 'minus';
+    }
+    lines.push({
+      dim: '视野',
+      fact: clampText(
+        wardsKnown
+          ? `插眼 ${wards} 个（观察 ${p.obsPlaced ?? 0}/岗哨 ${p.senPlaced ?? 0}，队内最多 ${wardsTop}）`
+          : '插眼数据未解析（字段为空）',
+        FACT_THRESHOLDS.maxFactChars,
+      ),
+      verdict,
+    });
+  }
+
+  // ── 团战 ──
+  {
+    let verdict: MatchFactLine['verdict'] = 'flat';
+    let fact: string;
+    if (form.teamfights === null) {
+      fact = '团战数据未解析';
+    } else if (form.teamfights.count === 0) {
+      fact = '这场没记录到团战';
+    } else {
+      const rate = form.teamfights.participated / form.teamfights.count;
+      if (rate >= FACT_THRESHOLDS.teamfightRatePlus) verdict = 'plus';
+      else if (rate < FACT_THRESHOLDS.teamfightRateMinus) verdict = 'minus';
+      fact = `参团 ${form.teamfights.participated}/${form.teamfights.count}（${Math.round(rate * 100)}%）`;
+    }
+    lines.push({ dim: '团战', fact: clampText(fact, FACT_THRESHOLDS.maxFactChars), verdict });
+  }
+
+  // ── 目标 ──
+  const towerTop = b?.towerTop ?? 0;
+  {
+    const ob = form.objectives;
+    let verdict: MatchFactLine['verdict'] = 'flat';
+    if (towerTop > 0 && p.towerDamage / towerTop >= FACT_THRESHOLDS.towerSharePlus) verdict = 'plus';
+    else if (p.heroHealing >= FACT_THRESHOLDS.healingPlus) verdict = 'plus';
+    lines.push({
+      dim: '目标',
+      fact: clampText(
+        `建筑 ${p.towerDamage} · 治疗 ${p.heroHealing} · 肉山 天辉 ${ob.roshan.radiant}/夜魇 ${ob.roshan.dire}`,
+        FACT_THRESHOLDS.maxFactChars,
+      ),
+      verdict,
+    });
+  }
+
+  // ── 死亡 ──
+  const deathsAvg = b?.deathsAvg ?? p.deaths;
+  {
+    let verdict: MatchFactLine['verdict'] = 'flat';
+    if (deathsAvg > 0) {
+      if (p.deaths >= deathsAvg * FACT_THRESHOLDS.deathsAvgMinus) verdict = 'minus';
+      else if (p.deaths <= deathsAvg * FACT_THRESHOLDS.deathsAvgPlus) verdict = 'plus';
+    }
+    lines.push({
+      dim: '死亡',
+      fact: clampText(
+        `死亡 ${p.deaths}（全队平均 ${Math.round(deathsAvg * 10) / 10}）`,
+        FACT_THRESHOLDS.maxFactChars,
+      ),
+      verdict,
+    });
+  }
+
+  // ── 出装：只陈述买了什么 ──
+  // 「同一件装备在同类英雄里的出场率」这种要跨局统计，本局数据里根本没有，
+  // 硬编就是造数据 —— 所以这里只列表，不加任何推断。
+  // 只列前 3 件：fact 上限 40 字，4 件中文名就撑爆截断了（实测 9091501690 会把
+  // 「弗拉迪米尔的祭品」截成半个词，读起来像乱码）。
+  if (p.items.length > 0) {
+    const zh = p.itemsZh ?? p.items;
+    const head = zh.slice(0, 3).join('、');
+    lines.push({
+      dim: '出装',
+      fact: clampText(`出装 ${head}${zh.length > 3 ? ` 等 ${zh.length} 件` : ''}`, FACT_THRESHOLDS.maxFactChars),
+      verdict: 'flat',
+    });
+  }
+
+  // ── 分路：未知就说未知 ──
+  {
+    const lane = p.laneRole ?? null;
+    const laneText = lane !== null && LANE_ROLE_TEXT[lane] !== undefined
+      ? `${LANE_ROLE_TEXT[lane]}（lane_role=${lane}）`
+      : '未知（lane_role 没给）';
+    lines.push({ dim: '分路', fact: clampText(`分路 ${laneText}`, FACT_THRESHOLDS.maxFactChars), verdict: 'flat' });
+  }
+
+  // ── 未解析说明：单独一行，免得模型把「未解析」当「打得差」 ──
+  if (form.goldSwing === null) {
+    lines.push({ dim: '解析', fact: '这局 OpenDota 未解析完：经济曲线/团战/技能缺席', verdict: 'flat' });
+  }
+
+  return finalizeFactSheet(lines, form);
+}
+
+/** 取某个维度的行号；没有就 -1（findings 的 evidence 只用真实存在的下标） */
+function dimIndex(lines: MatchFactLine[], dim: string): number {
+  return lines.findIndex((l) => l.dim === dim);
+}
+
+/**
+ * 收敛长度。
+ *
+ * 长度上限是硬要求（2026-11-16 用户原话「别让上下文爆掉」）：这份东西会跟着
+ * 每条简报走，一场 5 个群友、窗口 8 场 —— 不管住就会把上下文吃光，
+ * 模型反而更不敢细看。
+ *
+ * 截断顺序刻意是「**按 verdict 排序**」而不是简单砍尾巴：
+ *   1. 先丢 flat（无异常/无数据的行信息量最低，砍了最不心疼）；
+ *   2. 还超就从后往前继续丢（分路/出装/解析 这些维度排在后面，本来就是背景信息）；
+ *   3. plus/minus 是这局的真问题与真亮点，最后才动。
+ * 每丢一行都必须把 findings 的 evidence 下标整体往前挪一格 —— 下标错位等于让模型
+ * 指着 A 行说 B 行的话，那比不截断还糟。
+ *
+ * 导出是为了单测能直接喂一份超长的清单验证截断（自然生成的 9~10 行凑不到 1200 字，
+ * 走不到这条分支，留着不验就等于没写）。
+ */
+export function enforceFactSheetLimits(
+  lines: MatchFactLine[],
+  findings: Array<{ text: string; evidence: number[] }>,
+): MatchFactSheet {
+  const size = (ls: MatchFactLine[], fs: Array<{ text: string; evidence: number[] }>): number =>
+    JSON.stringify({ lines: ls, findings: fs }).length;
+
+  const kept = [...lines];
+  const out = findings.map((f) => ({ text: f.text, evidence: [...f.evidence] }));
+  if (size(kept, out) <= FACT_THRESHOLDS.maxSerializedChars) return { lines: kept, findings: out };
+
+  /** 丢掉 kept[at]，同时把 findings 的 evidence 下标挪正 */
+  const dropAt = (at: number): void => {
+    kept.splice(at, 1);
+    const shifted: Array<{ text: string; evidence: number[] }> = [];
+    for (const f of out) {
+      const ev = f.evidence.filter((e) => e !== at).map((e) => (e > at ? e - 1 : e));
+      // evidence 被清空的 finding 就没法指回数据了，宁可不要（不许留无凭据的结论）
+      if (ev.length > 0) shifted.push({ text: f.text, evidence: ev });
+    }
+    out.length = 0;
+    out.push(...shifted.slice(0, FACT_THRESHOLDS.maxFindings));
+  };
+
+  // 第一轮：flat 从后往前丢
+  for (const at of kept.map((l, i) => ({ i, v: l.verdict })).filter((x) => x.v === 'flat').map((x) => x.i).reverse()) {
+    if (size(kept, out) <= FACT_THRESHOLDS.maxSerializedChars) break;
+    dropAt(at);
+  }
+  // 第二轮：还超就继续从后往前丢（plus/minus 留到最后）
+  while (kept.length > 1 && size(kept, out) > FACT_THRESHOLDS.maxSerializedChars) {
+    dropAt(kept.length - 1);
+  }
+  // 第三轮：行已经砍到只剩一行还超，就把 findings 文本也砍掉（宁可没结论候选，
+  // 也不能把整段提示词撑爆；事实清单本身仍然在，模型照样能逐项说）
+  if (size(kept, out) > FACT_THRESHOLDS.maxSerializedChars) {
+    out.length = 0;
+  }
+  return { lines: kept, findings: out };
+}
+
+/**
+ * 生成 findings 后统一过一遍限长。
+ * 顺序上必须先有 findings 再截断：findings 要用「还没被砍掉的行」当下标基准。
+ */
+function finalizeFactSheet(
+  lines: MatchFactLine[],
+  form: FactSheetInput,
+): MatchFactSheet {
+  return enforceFactSheetLimits(lines, buildFindings(lines, form));
+}
+
+/**
+ * 结论候选：2~3 条，每条挂 evidence（lines 下标）。
+ *
+ * weight 是「这条值得先说」的排序，不是重要性的绝对值：
+ *   输出/经济是群里最爱聊的，但辅助位的「伤害低」必须先说清不构成问题 ——
+ *   否则模型自己会把它推成「他菜」（11-16 那两局错评都是这么来的）。
+ */
+function buildFindings(
+  lines: MatchFactLine[],
+  form: FactSheetInput,
+): Array<{ text: string; evidence: number[] }> {
+  const p = form.player;
+  const size = Math.max(1, form.teamRank.teamSize);
+  const isSupport = p.role === 'support';
+  const dmgTop = form.baseline?.damageTop ?? 0;
+  const dmgShare = dmgTop > 0 ? Math.round((p.heroDamage / dmgTop) * 100) : 0;
+  const wards = (p.obsPlaced ?? 0) + (p.senPlaced ?? 0);
+  const iEco = dimIndex(lines, '经济');
+  const iDmg = dimIndex(lines, '输出');
+  const iLh = dimIndex(lines, '补刀');
+  const iWard = dimIndex(lines, '视野');
+  const iTf = dimIndex(lines, '团战');
+  const iObj = dimIndex(lines, '目标');
+  const iDeath = dimIndex(lines, '死亡');
+
+  const cands: Array<{ text: string; evidence: number[]; weight: number }> = [];
+  const push = (text: string, evidence: number[], weight: number): void => {
+    // evidence 只留真实存在的下标：造一个不存在的下标等于让模型指错行
+    const ev = [...new Set(evidence.filter((i) => i >= 0))];
+    if (ev.length === 0) return;
+    cands.push({ text, evidence: ev, weight });
+  };
+
+  const dmgVerdict = lines[iDmg]?.verdict;
+  const ecoVerdict = lines[iEco]?.verdict;
+  const wardVerdict = lines[iWard]?.verdict;
+  const tfVerdict = lines[iTf]?.verdict;
+  const lhVerdict = lines[iLh]?.verdict;
+  const deathVerdict = lines[iDeath]?.verdict;
+  const objVerdict = lines[iObj]?.verdict;
+
+  if (dmgVerdict === 'plus') {
+    push(`伤害 ${p.heroDamage} 占队内最高的 ${dmgShare}%（队内第 ${form.teamRank.heroDamage}/${size}），这局输出靠他`, [iDmg, iEco], 95);
+  }
+  if (dmgVerdict === 'minus' && isSupport) {
+    // 辅助伤害低是位置决定的：这里必须点明，否则模型会自己补一句「菜」
+    push(`伤害占队内最高只有 ${dmgShare}%，但他是辅助位（插眼 ${wards} 个），辅助不靠伤害说话`, [iDmg, iWard].filter((i) => i >= 0), 90);
+  }
+  if (dmgVerdict === 'minus' && !isSupport) {
+    push(`伤害只占队内最高的 ${dmgShare}%（队内第 ${form.teamRank.heroDamage}/${size}），${roleText(p.role)}这输出偏低`, [iDmg, iLh], 88);
+  }
+  if (wardVerdict === 'plus') {
+    push(`插眼 ${wards} 个，视野是这局的加分项`, [iWard, iDmg], 80);
+  }
+  if (ecoVerdict === 'plus') {
+    push(`GPM ${p.gpm} 队内第 ${form.teamRank.netWorth}/${size}，经济没掉队`, [iEco], 78);
+  }
+  if (ecoVerdict === 'minus') {
+    push(`GPM ${p.gpm} 比队内第一低 ${Math.max(0, (form.baseline?.gpmTop ?? p.gpm) - p.gpm)}，经济确实掉队`, [iEco], 76);
+  }
+  if (tfVerdict === 'minus' && form.teamfights !== null) {
+    const tf = form.teamfights;
+    push(`团战只赶上 ${tf.participated}/${tf.count}，参团偏少`, [iTf], 74);
+  }
+  if (tfVerdict === 'plus' && form.teamfights !== null) {
+    const tf = form.teamfights;
+    push(`团战 ${tf.participated}/${tf.count} 全程在场`, [iTf], 60);
+  }
+  if (lhVerdict === 'minus' && !isSupport) {
+    push(`正补 ${p.lastHits}，同定位队友人均 ${Math.round(avgOf(form.baseline?.sameRoleLastHits ?? []))}`, [iLh, iEco], 66);
+  }
+  if (lhVerdict === 'plus' && !isSupport) {
+    push(`正补 ${p.lastHits}，同定位里补得最多`, [iLh], 58);
+  }
+  if (deathVerdict === 'minus') {
+    push(`死了 ${p.deaths} 次，全队平均 ${Math.round((form.baseline?.deathsAvg ?? p.deaths) * 10) / 10}`, [iDeath], 70);
+  }
+  if (objVerdict === 'plus') {
+    push(`建筑伤害 ${p.towerDamage} / 治疗 ${p.heroHealing}，目标是他在推`, [iObj], 55);
+  }
+
+  cands.sort((a, b) => b.weight - a.weight);
+  const out = cands.slice(0, FACT_THRESHOLDS.maxFindings).map((c) => ({ text: c.text, evidence: c.evidence }));
+
+  // 太平淡的局也得给够 2 条：否则模型只剩 KDA 可说，又会回到「抓一条就评」。
+  // 兜底这两条只用一定存在的「经济/输出」两行，不编任何因果。
+  if (out.length < FACT_THRESHOLDS.minFindings && iEco >= 0 && iDmg >= 0) {
+    const base1 = `伤害 ${p.heroDamage}（队内第 ${form.teamRank.heroDamage}/${size}，占队内最高 ${dmgShare}%），GPM ${p.gpm}（队内第 ${form.teamRank.netWorth}/${size}）`;
+    if (!out.some((f) => f.text.includes('GPM'))) {
+      out.push({ text: base1, evidence: [iEco, iDmg] });
+    }
+  }
+  if (out.length < FACT_THRESHOLDS.minFindings && iEco >= 0) {
+    out.push({
+      text: `这局 KDA ${p.kills}/${p.deaths}/${p.assists}，${VERDICT_TEXT[lines[iEco]?.verdict ?? 'flat']}项很少，逐项看下来没有明显异常`,
+      evidence: [iEco],
+    });
+  }
+  return out.slice(0, FACT_THRESHOLDS.maxFindings);
+}
+
+function avgOf(list: number[]): number {
+  if (list.length === 0) return 0;
+  return list.reduce((s, v) => s + v, 0) / list.length;
+}
+
 export function buildMatchDetailForm(
   raw: RawMatchDetail,
   accountId: number,
@@ -1070,11 +1725,19 @@ export function buildMatchDetailForm(
   const items = [player.item_0, player.item_1, player.item_2, player.item_3, player.item_4, player.item_5]
     .filter((id) => id > 0)
     .map((id) => itemName(id));
+  // 中文名与英文原名**同时**保留：items 是老字段（向后兼容，其它地方按英文名比对），
+  // itemsZh 才是给人/模型看的那份。没收录中文名的位置放英文原名，长度严格对齐 ——
+  // 长度不一致的话，"第 N 件装备"这种话就会对错位（2026-11-16）。
+  const itemsZh = items.map((en) => itemNameZh(en) ?? en);
   const backpack = [player.backpack_0, player.backpack_1, player.backpack_2]
     .filter((id): id is number => id !== null && id > 0)
     .map((id) => itemName(id));
 
-  const base: Omit<MatchDetailForm, 'summaryText'> = {
+  // 注意这里先不含 factSheet：它要读 base 里的 KDA/伤害/排名/目标这些算好的字段，
+  // 而且 teamRank 又要先算出来 —— 顺序是 base → factSheet → base+factSheet。
+  // baseline（队内别人的数值快照）必须在这之前算：出了这个函数就没有全队原始数据了。
+  const baseline = buildTeamBaseline(player, teamPlayers, worthOf);
+  const base: Omit<MatchDetailForm, 'summaryText' | 'factSheet'> = {
     matchId: raw.matchId,
     startTimeSec: raw.startTime,
     startText: formatRelative(raw.startTime),
@@ -1106,6 +1769,7 @@ export function buildMatchDetailForm(
       netWorth: worthOf(player),
       level: player.level ?? 0,
       items,
+      itemsZh,
       backpack,
       laneRole: player.lane_role,
       obsPlaced: player.obs_placed ?? 0,
@@ -1131,16 +1795,144 @@ export function buildMatchDetailForm(
       radiant: raw.players.filter((p) => p.player_slot < 128).map((p) => heroName(p.hero_id)),
       dire: raw.players.filter((p) => p.player_slot >= 128).map((p) => heroName(p.hero_id)),
     },
+    // 本人这一队（按 player_slot 顺序）。这里先一律标成"路人"：
+    // buildMatchDetailForm 是纯函数、不碰绑定表（签名不能改，很多地方在调），
+    // 谁是群友由上层用 annotateBoundPlayers 注入（2026-11-16）。
+    teamPlayers: [...teamPlayers]
+      .sort((a, b) => a.player_slot - b.player_slot)
+      .map((p) => ({
+        accountId: p.account_id,
+        heroName: heroName(p.hero_id),
+        isRadiant: p.player_slot < 128,
+        isBound: false,
+      })),
     notes: [],
   };
 
   const notes = buildMatchNotes(base);
-  const withNotes: Omit<MatchDetailForm, 'summaryText'> = { ...base, notes };
-  return { ...withNotes, summaryText: renderMatchSummary(withNotes) };
+  // factSheet 在这里补：它要用 teamRank/objectives/teamfights 这些已经算好的字段，
+  // 而 baseline 又只有此刻还拿得到全队 RawMatchPlayer（2026-11-16）。
+  const withFacts: Omit<MatchDetailForm, 'summaryText'> = {
+    ...base,
+    notes,
+    factSheet: buildFactSheet({ ...base, notes, baseline: baseline }),
+  };
+  return { ...withFacts, summaryText: renderMatchSummary(withFacts) };
+}
+
+/**
+ * 造队内对比基线（2026-11-16 新增，供 buildFactSheet 用）。
+ *
+ * 为什么要在 buildMatchDetailForm 里现算、而不是让 buildFactSheet 自己从
+ * MatchDetailForm 推：form 里只有本人数值 + 本人排名，队友的 GPM/正补/插眼
+ * 一个都没留（早就丢了）。等出了这个函数，原始 RawMatchPlayer 已经不在了。
+ *
+ * 同定位队友的口径：给每个队友也跑一遍 inferRole —— 拿「跟同为辅助的人比经济」
+ * 取代「跟全队第一比」，这正是「赏金 2/6/19 被当主输出骂」那条错评的解药。
+ */
+function buildTeamBaseline(
+  player: RawMatchPlayer,
+  teamPlayers: RawMatchPlayer[],
+  worthOf: (p: RawMatchPlayer) => number,
+): MatchTeamBaseline {
+  const gpmOf = (p: RawMatchPlayer): number => p.gold_per_min;
+  const dmgOf = (p: RawMatchPlayer): number => p.hero_damage ?? 0;
+  const wardsOf = (p: RawMatchPlayer): number => (p.obs_placed ?? 0) + (p.sen_placed ?? 0);
+  const towerOf = (p: RawMatchPlayer): number => p.tower_damage ?? 0;
+  const top = (list: RawMatchPlayer[], get: (p: RawMatchPlayer) => number): number =>
+    list.reduce((m, p) => Math.max(m, get(p)), 0);
+  /**
+   * 队内排名。同分算并列：默认 indexOf 会把并列第一里的第二个判成第二名，
+   * 「队内第 1/5」这种话说错一次就要在群里被指出来。
+   */
+  const rankOf = (get: (p: RawMatchPlayer) => number): number => {
+    const mine = get(player);
+    const higher = teamPlayers.filter((p) => get(p) > mine).length;
+    return higher + 1;
+  };
+
+  const role = inferRole(player, teamPlayers, worthOf).role;
+  // 同定位的队友：口径跟本人一致（都是按客观行为判出来的角色，不看英雄名）。
+  // 只跟「判得出定位」的队友比 —— 把 unknown 拉进来当同类，等于拿猜的当基准。
+  const sameRole = teamPlayers.filter(
+    (p) => p !== player && inferRole(p, teamPlayers, worthOf).role === role,
+  );
+
+  return {
+    teamSize: teamPlayers.length,
+    gpmTop: top(teamPlayers, gpmOf),
+    gpmMedian: median(teamPlayers.map(gpmOf)),
+    gpmRank: rankOf(gpmOf),
+    sameRoleGpm: sameRole.map(gpmOf),
+    damageTop: top(teamPlayers, dmgOf),
+    wardsTop: top(teamPlayers, wardsOf),
+    // 插眼是否真的有值：整列都是 null 时说明这局没解析到，那时「插眼 0 个」是假的
+    wardsKnown: teamPlayers.some((p) => p.obs_placed !== null || p.sen_placed !== null),
+    wardRank: rankOf(wardsOf),
+    lastHitsTop: top(teamPlayers, (p) => p.last_hits),
+    lastHitsTotal: teamPlayers.reduce((s, p) => s + p.last_hits, 0),
+    sameRoleLastHits: sameRole.map((p) => p.last_hits),
+    deathsAvg: teamPlayers.reduce((s, p) => s + p.deaths, 0) / Math.max(1, teamPlayers.length),
+    towerTop: top(teamPlayers, towerOf),
+  };
+}
+
+/** 中位数（偶数个取中间两个的平均，四舍五入到整数 —— 展示用不需要小数） */
+function median(list: number[]): number {
+  if (list.length === 0) return 0;
+  const sorted = [...list].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  const v = sorted.length % 2 === 1
+    ? (sorted[mid] ?? 0)
+    : ((sorted[mid - 1] ?? 0) + (sorted[mid] ?? 0)) / 2;
+  return Math.round(v);
+}
+
+/**
+ * 把本人这一队里"绑过 Steam 的群友"标出来，并重算摘要里那一行队友。
+ *
+ * 2026-11-16 新增。为什么单独一个函数、而不是塞进 buildMatchDetailForm：
+ *   · buildMatchDetailForm 是纯函数（只认 RawMatchDetail + accountId + itemName），
+ *     很多地方在调它，签名叫「不要改」；绑定表是上层（gateway/bootstrap）的事，
+ *     往下塞就等于让 dota/ 反向依赖 steam/ 的存储形态。
+ *   · 这里只吃一个 `resolveAlias` 回调，谁提供都行，测试里塞个 Map 就能验。
+ *
+ * 返回新对象（不改入参）：form 可能在缓存/多路径共享，就地改会串场。
+ *
+ * 只**换掉摘要里那一行「队友：」**，不整段重渲 —— 因为 DotaService.matchDetail
+ * 会在 renderMatchSummary 之后往 summaryText 追加「技能｜…」「路子｜…」几行，
+ * 整段重渲会把技能那几行弄丢（技能恰恰是 OMG 局最该说的部分）。
+ */
+export function annotateBoundPlayers(
+  form: MatchDetailForm,
+  resolveAlias: (accountId: number) => string | undefined,
+): MatchDetailForm {
+  const teamPlayers: MatchTeamPlayer[] = form.teamPlayers.map((p) => {
+    if (p.accountId === null) return p;
+    const alias = resolveAlias(p.accountId);
+    // alias 为空/空白当成没绑定：宁可说"路人"，也不要在群里叫一个空名字
+    if (alias === undefined || alias.trim() === '') return p;
+    return { ...p, isBound: true, alias: alias.trim() };
+  });
+
+  const line = `队友：${teamPlayersText(teamPlayers)}`;
+  const lines = form.summaryText.split('\n');
+  const at = lines.findIndex((l) => l.startsWith('队友：'));
+  if (at >= 0) {
+    lines[at] = line;
+  } else if (teamPlayers.length > 0) {
+    // 老摘要里没有这一行（理论上不会：renderMatchSummary 已经会加），
+    // 兜底插在「点评：」之前，没有点评就放最后。
+    const noteAt = lines.findIndex((l) => l.startsWith('点评：'));
+    if (noteAt >= 0) lines.splice(noteAt, 0, line);
+    else lines.push(line);
+  }
+
+  return { ...form, teamPlayers, summaryText: lines.join('\n') };
 }
 
 /** 2 条以内的点评：只在数据明显偏某一边时开口，避免每局都硬凹 */
-function buildMatchNotes(form: Omit<MatchDetailForm, 'summaryText'>): string[] {
+function buildMatchNotes(form: Omit<MatchDetailForm, 'summaryText' | 'factSheet'>): string[] {
   const p = form.player;
   const notes: string[] = [];
 
@@ -1169,7 +1961,16 @@ function buildMatchNotes(form: Omit<MatchDetailForm, 'summaryText'>): string[] {
   return [...new Set(notes)].slice(0, 2);
 }
 
-function renderMatchSummary(form: Omit<MatchDetailForm, 'summaryText'>): string {
+/**
+ * 渲染摘要。
+ *
+ * 参数里 factSheet 是**可选**的：这个函数在 factSheet 被算出来之前就要能用
+ * （顺序是 base → notes → factSheet → render），老缓存/别处构造的对象也可能没有它。
+ * 没有就跳过「数据对照」段，不能因为缺一份清单就整段摘要渲染不出来。
+ */
+function renderMatchSummary(
+  form: Omit<MatchDetailForm, 'summaryText' | 'factSheet'> & { factSheet?: MatchFactSheet },
+): string {
   const p = form.player;
   const lines: string[] = [];
   const sign = (n: number): string => (n >= 0 ? `+${n}` : `${n}`);
@@ -1191,7 +1992,7 @@ function renderMatchSummary(form: Omit<MatchDetailForm, 'summaryText'>): string 
     + ` · 建筑 ${p.towerDamage} · 治疗 ${p.heroHealing}`
     + ` · 净资产 ${p.netWorth}${form.teamRank.netWorth > 0 ? `（队内第 ${form.teamRank.netWorth}）` : ''}`,
   );
-  if (p.items.length > 0) lines.push(`装备：${p.items.join('、')}`);
+  if (p.items.length > 0) lines.push(`装备：${itemsText(p.items, p.itemsZh)}`);
   if (form.laneOpponent !== null) {
     const o = form.laneOpponent;
     lines.push(`对位 ${o.heroName}：经济 ${sign(o.gpmDiff)} GPM · 输出 ${sign(o.damageDiff)}`);
@@ -1212,9 +2013,56 @@ function renderMatchSummary(form: Omit<MatchDetailForm, 'summaryText'>): string 
   if (form.lineup.radiant.length > 0) {
     lines.push(`阵容｜天辉 ${form.lineup.radiant.join('、')}｜夜魇 ${form.lineup.dire.join('、')}`);
   }
+  // 队友那行：只列本人这一队，绑过的群友写群里称呼，其余写「路人」。
+  // 2026-11-16 加：以前只有英雄名，模型分不清谁是群友，把一起开黑的人说成路人。
+  if (form.teamPlayers.length > 0) lines.push(`队友：${teamPlayersText(form.teamPlayers)}`);
   if (form.notes.length > 0) lines.push(`点评：${form.notes.join('；')}`);
+  // 数据对照（2026-11-16 加）：群里吐槽「不都是抓一两条就开始评么」，根子就在
+  // 摘要里只有 KDA/伤害两行醒目的数字，模型懒得往下看。这里把 factSheet 逐项摊开，
+  // 让它开口之前必须先横着比一遍。
+  //
+  // 关键约束：这段**必须在 renderMatchSummary 里直接拼**，不能在 annotateBoundPlayers
+  // 阶段重渲 —— DotaService.matchDetail 会在渲染后往 summaryText 追加「技能｜…」
+  // 「路子｜…」几行，整段重渲会把技能行弄丢（OMG 局最该说的就是技能）。
+  if (form.factSheet !== undefined && form.factSheet.lines.length > 0) {
+    lines.push('数据对照：');
+    for (const l of form.factSheet.lines) {
+      lines.push(`  · [${l.dim}] ${l.fact} → ${VERDICT_TEXT[l.verdict]}`);
+    }
+  }
 
   return lines.join('\n');
+}
+
+/**
+ * 装备行：`中文名（英文原名）`，中文名与英文相同时不加括号。
+ *
+ * 2026-11-16 新增。为什么要括号里再带英文：
+ *   · 中文名给模型照抄，杜绝「Maelstrom → 狂战斧」这类错译；
+ *   · 括号里的原名让群友能对上号，中文译名有争议时也不至于说不清是哪件。
+ * itemsZh 缺失（老缓存/别处构造的对象）就退回纯英文原名，别炸。
+ */
+function itemsText(items: string[], itemsZh?: string[]): string {
+  return items
+    .map((en, i) => {
+      const zh = itemsZh?.[i];
+      if (zh === undefined || zh === '' || zh === en) return en;
+      return `${zh}（${en}）`;
+    })
+    .join('、');
+}
+
+/**
+ * 队友行：`恐怖利刃（铭鑫）、巫医（小周）、沙王（路人）`。
+ * 没绑定的写「路人」—— 这是要重点传达的信息：模型别再把群友当路人点评。
+ */
+function teamPlayersText(teamPlayers: MatchTeamPlayer[]): string {
+  return teamPlayers
+    .map((p) => {
+      const who = p.isBound && p.alias !== undefined && p.alias !== '' ? p.alias : '路人';
+      return `${p.heroName}（${who}）`;
+    })
+    .join('、');
 }
 
 function delay(ms: number): Promise<void> {

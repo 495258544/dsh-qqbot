@@ -144,6 +144,14 @@ describe('MatchCacheStore · 完整简报', () => {
         { name: 'Shadowraze', nameZh: '毁灭阴影（影压）', uses: 126, behavior: 'Point Target' },
         { name: 'Fissure', nameZh: '沟壑', uses: 40 },
       ],
+      // 2026-11-16：事实清单也进简报缓存，模型才有得逐项对照
+      factSheet: {
+        lines: [
+          { dim: '经济', fact: 'GPM 559（队内第 2/5，比队内第一低 40）', verdict: 'plus' as const },
+          { dim: '输出', fact: '伤害 23828（队内第 1/5，占队内最高 100%）', verdict: 'plus' as const },
+        ],
+        findings: [{ text: '伤害 23828 占队内最高的 100%，这局输出靠他', evidence: [0, 1] }],
+      },
     }],
     lineup: { radiant: ['幻影刺客', '撼地者'], dire: ['影魔'] },
     fetchedAt: 1,
@@ -163,6 +171,64 @@ describe('MatchCacheStore · 完整简报', () => {
     const b = new MatchCacheStore(dir);
     expect(b.getBriefing(910)?.boundPlayers[0]?.damageRank).toBe(1);
     expect(b.getBriefing(910)?.boundPlayers[0]?.teamfight).toBe('参团 16/16');
+    // 2026-11-16：factSheet 也要过一遍读回来的 sanitize 还在（否则第二天复用时
+    // 模型又只剩散字段，「抓一两条就评」照旧）
+    expect(b.getBriefing(910)?.boundPlayers[0]?.factSheet?.lines).toHaveLength(2);
+    expect(b.getBriefing(910)?.boundPlayers[0]?.factSheet?.findings[0]?.evidence).toEqual([0, 1]);
+  });
+
+  it('factSheet 形状坏掉时逐条丢弃，不让整份简报失效', () => {
+    const dir = tmpDir();
+    const store = new MatchCacheStore(dir);
+    store.upsertMany([{ matchId: 911, startTime: 1794406267, player: p(1, { alias: '小周' }) }]);
+    const broken = session({ matchId: 911 });
+    // 手工把 round-trip 弄坏：verdict 拼错、evidence 越界 / 不是整数
+    (broken as unknown as Record<string, unknown>).boundPlayers = [{
+      ...broken.boundPlayers[0],
+      factSheet: {
+        lines: [
+          { dim: '经济', fact: 'GPM 559（队内第 2/5）', verdict: 'plus' },
+          { dim: '输出', fact: '伤害 23828', verdict: 'PLUS' }, // 大小写错 → 丢
+          { dim: '', fact: '没维度名', verdict: 'flat' }, // 没 dim → 丢
+          { dim: '团战', fact: '参团 16/16', verdict: 'plus' },
+        ],
+        findings: [
+          { text: '指到不存在的行', evidence: [99] }, // 越界 → 丢
+          { text: '指向第 0 行', evidence: [0, 1.5] }, // 非整数被过滤，剩 [0] → 留
+        ],
+      },
+    }];
+    store.putBriefing(broken);
+
+    const again = new MatchCacheStore(dir);
+    const got = again.getBriefing(911)?.boundPlayers[0]?.factSheet;
+    expect(got?.lines.map((l) => l.dim)).toEqual(['经济', '团战']);
+    // 越界的 evidence 丢了之后，下标必须落在 lines 范围内 —— 否则模型会指错行说错话
+    expect(got?.findings).toHaveLength(1);
+    expect(got?.findings[0]?.evidence).toEqual([0]);
+    for (const f of got?.findings ?? []) {
+      for (const e of f.evidence) expect(e).toBeLessThan(got?.lines.length ?? 0);
+    }
+  });
+
+  it('factSheet 整份坏掉时丢掉它，但简报本身仍然可用', () => {
+    const dir = tmpDir();
+    const store = new MatchCacheStore(dir);
+    store.upsertMany([{ matchId: 912, startTime: 1794406267, player: p(1, { alias: '小周' }) }]);
+    const broken = session({ matchId: 912 });
+    (broken as unknown as Record<string, unknown>).boundPlayers = [{
+      ...broken.boundPlayers[0],
+      factSheet: { lines: 'not-an-array', findings: 42 },
+    }];
+    store.putBriefing(broken);
+
+    const again = new MatchCacheStore(dir);
+    const s = again.getBriefing(912);
+    expect(s?.parsed).toBe(true);
+    expect(s?.boundPlayers).toHaveLength(1);
+    expect(s?.boundPlayers[0]?.factSheet).toBeUndefined();
+    // 其它字段一个都没伤到
+    expect(s?.boundPlayers[0]?.abilities[0]?.nameZh).toBe('毁灭阴影（影压）');
   });
 
   it('原始战绩再次 upsert 不会把简报冲掉', () => {

@@ -28,12 +28,22 @@ import {
 } from './opendota.ts';
 import {
   DotaService,
+  FACT_THRESHOLDS,
+  annotateBoundPlayers,
+  buildFactSheet,
   type DotaConfig,
   type DotaForm,
   type DotaFormOutcome,
   type DotaMatchSummary,
+  type FactSheetInput,
   type MatchDetailForm,
+  type MatchFactLine,
+  type MatchFactSheet,
+  type MatchRole,
+  type MatchTeamBaseline,
+  type MatchTeamPlayer,
 } from './service.ts';
+import { itemNameZh, ITEM_NAME_ZH } from './item-zh.ts';
 import { registerDotaTools } from './tools.ts';
 import { MatchCacheStore } from './match-cache.ts';
 import { createBriefingBuilder } from './briefing.ts';
@@ -82,6 +92,14 @@ export {
   MatchCacheStore,
   createBriefingBuilder,
   registerDotaTools,
+  // 2026-11-16：装备中文名对照 + 群友标注，接线层（gateway/bootstrap）要用
+  annotateBoundPlayers,
+  // 事实清单：阈值表与生成函数一起导出。测试要能直接造一份比对；
+  // 以后想按群的实际水平调阈值，也只动 FACT_THRESHOLDS 一处。
+  FACT_THRESHOLDS,
+  buildFactSheet,
+  itemNameZh,
+  ITEM_NAME_ZH,
   heroName,
   heroNameEn,
   isKnownHero,
@@ -110,7 +128,15 @@ export type {
   DotaFormOutcome,
   DotaMatchSummary,
   DotaQuota,
+  // 2026-11-16：事实清单的形状（MatchFactSheet / MatchFactLine）+ 造它用的入参，
+  // 上层（gateway/bootstrap、persona 投影）要能引用同一套类型，别各写一份镜像。
+  FactSheetInput,
   MatchDetailForm,
+  MatchFactLine,
+  MatchFactSheet,
+  MatchRole,
+  MatchTeamBaseline,
+  MatchTeamPlayer,
   OpenDotaErrorKind,
   PlayerProfile,
   RawMatch,

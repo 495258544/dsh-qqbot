@@ -63,6 +63,19 @@ export interface CachedBriefPlayer {
   role?: 'core' | 'support' | 'unknown';
   /** 判定理由（客观行为，如「插了 5 个眼」），只给模型参考，别照抄进群里 */
   roleReason?: string;
+  /**
+   * 这一局的事实清单（维度 → 纯数据 → 优势/劣势/无异常）+ 结论候选。
+   *
+   * 2026-11-16 加：群里的原话是「我看他从来没有综合分析过能收集的数据吧，
+   * 不都是抓一两条就开始评么」。数据其实一直在手边，只是散成字段，模型就只挑
+   * KDA／伤害这两个最好念的说。把逐项对照表直接摆进去，它才没得偷懒。
+   * 形状与 service.ts 的 MatchFactSheet 相同（这里重新声明一份：
+   * match-cache 是落盘层，不 import service，避免 dota 内部互相抓着类型跑）。
+   */
+  factSheet?: {
+    lines: Array<{ dim: string; fact: string; verdict: 'plus' | 'minus' | 'flat' }>;
+    findings: Array<{ text: string; evidence: number[] }>;
+  };
   /** 如「参团 16/16」 */
   teamfight?: string;
   abilities: CachedBriefAbility[];
@@ -135,10 +148,57 @@ const FILE_VERSION = 1;
  * 简报结构版本：给 CachedBriefSession 加字段时 +1。
  * briefing 构建器只复用 schema 相同的缓存，老简报自动重取一次。
  */
-export const BRIEF_SCHEMA = 2;
+export const BRIEF_SCHEMA = 3;
 
 function isFinitePositive(v: unknown): v is number {
   return typeof v === 'number' && Number.isFinite(v) && v > 0;
+}
+
+/** 可接受的 verdict 三态；别的值一律当坏数据丢掉 */
+function isVerdict(v: unknown): v is 'plus' | 'minus' | 'flat' {
+  return v === 'plus' || v === 'minus' || v === 'flat';
+}
+
+/**
+ * factSheet 的形状兜底（2026-11-16 加）。
+ *
+ * 为什么要单独兜一遍而不是直接信 JSON：这份数据在**缓存命中**时会原样喂给模型，
+ * 一条形式坏掉的行（verdict 拼错、evidence 指向不存在的下标）就会让模型指错行说错话。
+ * 兜底口径跟 role 字段一样：坏一条丢一条，整份不因此作废。
+ */
+function sanitizeFactSheet(v: unknown): CachedBriefPlayer['factSheet'] {
+  if (v === null || typeof v !== 'object') return undefined;
+  const o = v as Record<string, unknown>;
+  const lines: Array<{ dim: string; fact: string; verdict: 'plus' | 'minus' | 'flat' }> = [];
+  if (Array.isArray(o.lines)) {
+    for (const item of o.lines) {
+      if (item === null || typeof item !== 'object') continue;
+      const l = item as Record<string, unknown>;
+      if (typeof l.dim !== 'string' || l.dim === '') continue;
+      if (typeof l.fact !== 'string' || l.fact === '') continue;
+      if (!isVerdict(l.verdict)) continue;
+      lines.push({ dim: l.dim, fact: l.fact, verdict: l.verdict });
+    }
+  }
+  if (lines.length === 0) return undefined;
+
+  const findings: Array<{ text: string; evidence: number[] }> = [];
+  if (Array.isArray(o.findings)) {
+    for (const item of o.findings) {
+      if (item === null || typeof item !== 'object') continue;
+      const f = item as Record<string, unknown>;
+      if (typeof f.text !== 'string' || f.text === '') continue;
+      const evidence = Array.isArray(f.evidence)
+        // 下标必须落在 lines 范围内：越界的 evidence 就是「指回不存在的数据」
+        ? f.evidence.filter((e): e is number => (
+          typeof e === 'number' && Number.isInteger(e) && e >= 0 && e < lines.length
+        ))
+        : [];
+      if (evidence.length === 0) continue;
+      findings.push({ text: f.text, evidence });
+    }
+  }
+  return { lines, findings };
 }
 
 /** 简报只做形状兜底：坏字段丢掉，不让整份 matches.json 作废 */
@@ -158,6 +218,10 @@ function sanitizeBriefing(v: unknown, matchId: number): CachedBriefSession | und
     if (p === null || typeof p !== 'object') continue;
     const q = p as Record<string, unknown>;
     if (s(q, 'name') === undefined) continue;
+    // factSheet 兜一遍形状：缓存命中时这份数据是直接喂模型的，
+    // 一条 verdict 拼错/evidence 越界的行就会让它指错行说错话（2026-11-16）。
+    // 只调一次，结果放进局部变量 —— 调两次是白算（而且每次都会新建对象）。
+    const factSheet = sanitizeFactSheet(q.factSheet);
     const abilities: CachedBriefAbility[] = [];
     if (Array.isArray(q.abilities)) {
       for (const a of q.abilities) {
@@ -195,9 +259,9 @@ function sanitizeBriefing(v: unknown, matchId: number): CachedBriefSession | und
       ...(q.abilityBasis === 'uses' || q.abilityBasis === 'levels'
         ? { abilityBasis: q.abilityBasis as 'uses' | 'levels' }
         : {}),
+      ...(factSheet !== undefined ? { factSheet } : {}),
     });
   }
-
   let lineup: CachedBriefSession['lineup'];
   if (o.lineup !== null && typeof o.lineup === 'object') {
     const l = o.lineup as Record<string, unknown>;

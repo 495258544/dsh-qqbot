@@ -3,10 +3,12 @@
  * ─────────────────────────────────────────────────────────────
  * 纯函数测试，不联网、不碰文件：直接拼一份 RawMatchDetail 喂进去，
  * 验证排名/对位/目标/曲线/团战/点评这些"算出来的东西"。
+ *
+ * 2026-11-16 追加：teamPlayers（队友里谁是群友/路人）与 itemsZh（装备中文名）。
  */
 import { describe, expect, it } from 'vitest';
 import type { RawMatchDetail, RawMatchPlayer } from './opendota.ts';
-import { buildMatchDetailForm } from './service.ts';
+import { annotateBoundPlayers, buildMatchDetailForm } from './service.ts';
 
 const HERO = {
   SF: 11,
@@ -190,5 +192,203 @@ describe('buildMatchDetailForm · 派生指标', () => {
     expect(f.summaryText).toContain('11/2/18');
     expect(f.summaryText).toContain('装备');
     expect(f.summaryText).toContain('点评');
+  });
+});
+
+// ── factSheet（事实清单）：2026-11-16 新增 ────────────────────
+//
+// 群里的原话是「我看他从来没有综合分析过能收集的数据吧，不都是抓一两条就开始评么」。
+// 这里只验「它确实挂进了 MatchDetailForm 和摘要」，判定逻辑的细节在
+// fact-sheet.test.ts 里；但「数据对照」段必须是 renderMatchSummary 直接拼出来的，
+// 不能在 annotateBoundPlayers 阶段重渲（否则技能行会丢，见下面那条用例）。
+
+describe('buildMatchDetailForm · factSheet', () => {
+  it('form 一定带 factSheet，lines 非空、findings 至少 2 条', () => {
+    const f = buildMatchDetailForm(fixture(), 123, itemName);
+    expect(f.factSheet).toBeDefined();
+    expect(f.factSheet.lines.length).toBeGreaterThan(0);
+    expect(f.factSheet.findings.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it('每个维度都有 dim / fact / verdict，verdict 只在三态里', () => {
+    const f = buildMatchDetailForm(fixture(), 123, itemName);
+    for (const l of f.factSheet.lines) {
+      expect(l.dim).not.toBe('');
+      expect(l.fact).not.toBe('');
+      expect(['plus', 'minus', 'flat']).toContain(l.verdict);
+    }
+  });
+
+  it('维度覆盖到经济/输出/补刀/视野/团战/出装/分路', () => {
+    const f = buildMatchDetailForm(fixture(), 123, itemName);
+    const dims = f.factSheet.lines.map((l) => l.dim);
+    for (const want of ['经济', '输出', '补刀', '视野', '团战', '出装', '分路']) {
+      expect(dims).toContain(want);
+    }
+  });
+
+  it('summaryText 里有「数据对照：」段，逐行渲染成 [维度] 事实 → 优势/劣势/无异常', () => {
+    const f = buildMatchDetailForm(fixture(), 123, itemName);
+    expect(f.summaryText).toContain('数据对照：');
+    // 每一行都以「  · [」开头，且带箭头和中文 verdict
+    const rows = f.summaryText.split('\n').filter((l) => l.startsWith('  · ['));
+    expect(rows.length).toBe(f.factSheet.lines.length);
+    for (const row of rows) {
+      expect(row).toContain('→');
+      expect(row).toMatch(/→ (优势|劣势|无异常)$/);
+    }
+    // 不用 emoji / 对勾叉：模型会跟着抄，群里看着脏
+    expect(f.summaryText).not.toMatch(/✅|❌|🟢|🔴/);
+  });
+
+  it('「数据对照」段在「点评：」之后（点评先说结论，对照表跟在后面支撑）', () => {
+    const f = buildMatchDetailForm(fixture(), 123, itemName);
+    const notesAt = f.summaryText.indexOf('点评：');
+    const factsAt = f.summaryText.indexOf('数据对照：');
+    expect(notesAt).toBeGreaterThanOrEqual(0);
+    expect(factsAt).toBeGreaterThan(notesAt);
+  });
+
+  it('annotate 之后「数据对照」段和技能行都还在（数据对照是渲染时拼的，重渲会丢技能）', () => {
+    const base = buildMatchDetailForm(fixture(), 123, itemName);
+    // 模拟 DotaService.matchDetail 在渲染后追加的技能行
+    const withSkills = {
+      ...base,
+      summaryText: `${base.summaryText}\n技能｜神之力量（God's Strength）×12`,
+    };
+    const out = annotateBoundPlayers(withSkills, (id) => (id === 201 ? '铭鑫' : undefined));
+    expect(out.summaryText).toContain('数据对照：');
+    expect(out.summaryText).toContain('技能｜神之力量（God\'s Strength）×12');
+    // 数据对照只应出现一次，不能被重复插
+    expect(out.summaryText.split('数据对照：').length - 1).toBe(1);
+  });
+
+  it('未解析局（曲线/团战为 null）也能出 factSheet，不崩', () => {
+    const f = buildMatchDetailForm(fixture({ radiantGoldAdv: null, teamfights: null }), 123, itemName);
+    expect(f.factSheet.lines.length).toBeGreaterThan(0);
+    expect(f.summaryText).toContain('数据对照：');
+    // 团战那行要如实说未解析，不能说「0 次团战」
+    const tf = f.factSheet.lines.find((l) => l.dim === '团战');
+    expect(tf?.fact).toContain('未解析');
+  });
+});
+
+describe('buildMatchDetailForm · teamPlayers（队友里谁是群友）', () => {
+  it('只列本人这一队的五人，按 player_slot 升序', () => {
+    const f = buildMatchDetailForm(fixture(), 123, itemName);
+    expect(f.teamPlayers).toHaveLength(5);
+    // 天辉 slot 0-4；待查账号 123 在 slot 0
+    expect(f.teamPlayers.map((p) => p.accountId)).toEqual([123, 201, 202, 203, 204]);
+    expect(f.teamPlayers[0]?.isRadiant).toBe(true);
+    expect(f.teamPlayers[0]?.heroName).toBe(f.player.heroName);
+  });
+
+  it('默认全员 isBound=false、没有 alias（绑定表由上层注入）', () => {
+    const f = buildMatchDetailForm(fixture(), 123, itemName);
+    expect(f.teamPlayers.every((p) => !p.isBound)).toBe(true);
+    expect(f.teamPlayers.every((p) => p.alias === undefined)).toBe(true);
+  });
+
+  it('匿名队友（account_id=null）照样列出来，accountId 为 null', () => {
+    const raw = fixture();
+    raw.players[1]!.account_id = null;
+    const f = buildMatchDetailForm(raw, 123, itemName);
+    const anon = f.teamPlayers.find((p) => p.heroName === f.teamPlayers[1]?.heroName);
+    expect(anon?.accountId).toBeNull();
+  });
+
+  it('查夜魇的人 → 列夜魇那边五人', () => {
+    const f = buildMatchDetailForm(fixture(), 301, itemName);
+    expect(f.teamPlayers).toHaveLength(5);
+    expect(f.teamPlayers.every((p) => !p.isRadiant)).toBe(true);
+    expect(f.teamPlayers.map((p) => p.accountId)).toEqual([301, 302, 303, 304, 305]);
+  });
+
+  it('summaryText 有一行「队友：」，没绑定时全是「路人」', () => {
+    const f = buildMatchDetailForm(fixture(), 123, itemName);
+    expect(f.summaryText).toContain('队友：');
+    expect(f.summaryText).toContain('（路人）');
+  });
+});
+
+describe('annotateBoundPlayers · 标出群友', () => {
+  const ALIASES = new Map<number, string>([
+    [201, '铭鑫'],
+    [204, '芋头'],
+  ]);
+  const resolve = (accountId: number): string | undefined => ALIASES.get(accountId);
+
+  it('能解析到 alias 的标成 isBound=true 并带上 alias', () => {
+    const f = annotateBoundPlayers(buildMatchDetailForm(fixture(), 123, itemName), resolve);
+    const byId = new Map(f.teamPlayers.map((p) => [p.accountId, p]));
+    expect(byId.get(201)).toMatchObject({ isBound: true, alias: '铭鑫' });
+    expect(byId.get(204)).toMatchObject({ isBound: true, alias: '芋头' });
+  });
+
+  it('解析不到的保持 isBound=false（路人）', () => {
+    const f = annotateBoundPlayers(buildMatchDetailForm(fixture(), 123, itemName), resolve);
+    const byId = new Map(f.teamPlayers.map((p) => [p.accountId, p]));
+    expect(byId.get(123)?.isBound).toBe(false);
+    expect(byId.get(123)?.alias).toBeUndefined();
+    expect(byId.get(202)?.isBound).toBe(false);
+  });
+
+  it('summaryText 的队友行混排群友与路人', () => {
+    const f = annotateBoundPlayers(buildMatchDetailForm(fixture(), 123, itemName), resolve);
+    const line = f.summaryText.split('\n').find((l) => l.startsWith('队友：'));
+    expect(line).toBeDefined();
+    expect(line).toContain('（铭鑫）');
+    expect(line).toContain('（芋头）');
+    expect(line).toContain('（路人）');
+  });
+
+  it('返回新对象，不改入参（form 可能被缓存/多路径共享）', () => {
+    const base = buildMatchDetailForm(fixture(), 123, itemName);
+    const before = JSON.stringify(base.teamPlayers);
+    const out = annotateBoundPlayers(base, resolve);
+    expect(out).not.toBe(base);
+    expect(JSON.stringify(base.teamPlayers)).toBe(before);
+    expect(base.summaryText).not.toContain('（铭鑫）');
+  });
+
+  it('alias 是空白串时当没绑定，不出一个空名字', () => {
+    const f = annotateBoundPlayers(buildMatchDetailForm(fixture(), 123, itemName), (id) => (id === 201 ? '   ' : undefined));
+    expect(f.teamPlayers.find((p) => p.accountId === 201)?.isBound).toBe(false);
+  });
+
+  it('不丢技能那几行：只换「队友：」这一行，其余摘要原样保留', () => {
+    const base = buildMatchDetailForm(fixture(), 123, itemName);
+    // 模拟 DotaService.matchDetail 在渲染后追加技能行
+    const withSkills = { ...base, summaryText: `${base.summaryText}\n技能｜神之力量（God's Strength）×12` };
+    const out = annotateBoundPlayers(withSkills, resolve);
+    expect(out.summaryText).toContain('技能｜神之力量（God\'s Strength）×12');
+    expect(out.summaryText).toContain('（铭鑫）');
+    // 队友行只应出现一次，不能重复插
+    expect(out.summaryText.split('队友：').length - 1).toBe(1);
+  });
+});
+
+describe('itemsZh（装备中文名）与 items 对齐', () => {
+  it('itemName 给英文时 itemsZh 能给中文（未收录的落英文原名）', () => {
+    // itemName 桩按 id 出名字，这里模拟"1=Blink Dagger 有中文，116=未收录"
+    const names: Record<number, string> = { 1: 'Blink Dagger', 116: 'Unknown Thing', 48: 'Battle Fury' };
+    const f = buildMatchDetailForm(fixture(), 123, (id) => names[id] ?? `#${id}`);
+    expect(f.player.items).toEqual(['Blink Dagger', 'Unknown Thing', 'Battle Fury']);
+    expect(f.player.itemsZh).toEqual(['闪烁匕首', 'Unknown Thing', '狂战斧']);
+  });
+
+  it('itemsZh 与 items 等长（错位的话"第 N 件装备"就会说错）', () => {
+    const f = buildMatchDetailForm(fixture(), 123, itemName);
+    expect(f.player.itemsZh).toHaveLength(f.player.items.length);
+  });
+
+  it('装备行只在中文名与英文不同时才加括号', () => {
+    const names: Record<number, string> = { 1: 'Blink Dagger', 116: 'Unknown Thing', 48: 'Battle Fury' };
+    const f = buildMatchDetailForm(fixture(), 123, (id) => names[id] ?? `#${id}`);
+    const line = f.summaryText.split('\n').find((l) => l.startsWith('装备：'));
+    expect(line).toContain('闪烁匕首（Blink Dagger）');
+    // 未收录的没有中文名，不加括号
+    expect(line).toContain('Unknown Thing');
+    expect(line).not.toContain('Unknown Thing（');
   });
 });

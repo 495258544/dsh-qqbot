@@ -132,6 +132,17 @@ export interface DigestMatchDetail {
   teamfight?: string;
   /** OMG 技能组合的一句话概括（空 = 没拿到技能数据） */
   abilityMix?: string;
+  /**
+   * 这一局的事实清单（逐项对照 + 挂下标的结论候选）。
+   *
+   * 2026-11-16 加：这是「简报构建失败」时的兜底路径，但它同样是交给模型点评的
+   * 一份单场数据 —— 只给散字段的话，模型照样只会抓 KDA 一条说。既然 matchDetail
+   * 已经算好了，就一起给过来，两条链路的评判口径保持一致。
+   */
+  factSheet?: {
+    lines: Array<{ dim: string; fact: string; verdict: 'plus' | 'minus' | 'flat' }>;
+    findings: Array<{ text: string; evidence: number[] }>;
+  };
   /** false = OpenDota 还没解析完，只能看 KDA，不能聊经济/团战/技能 */
   parsed: boolean;
 }
@@ -173,6 +184,20 @@ export interface DigestBriefPlayer {
   role?: 'core' | 'support' | 'unknown';
   /** 判据（插眼数、正补占比、经济排名），给模型参考，别照抄进群 */
   roleReason?: string;
+  /**
+   * 这一局的事实清单：每个维度一句纯数据 + 优势/劣势/无异常，外加 2~3 条
+   * 挂着下标的结论候选（evidence 是 lines 的下标）。
+   *
+   * 2026-11-16 加。群里的原话是「我看他从来没有综合分析过能收集的数据吧，
+   * 不都是抓一两条就开始评么」——数据一直在手上（经济曲线/伤害/补刀/插眼/
+   * 屯野/团战/出装/分路），但散成字段模型就只挑 KDA 和伤害念，于是反复出现
+   * 「0/7/25 是混子」「赏金伤害垫底是主输出菜」这种错评。
+   * 有了这张表，提示词就可以硬性要求「每条点评至少引用两个不同维度」。
+   */
+  factSheet?: {
+    lines: Array<{ dim: string; fact: string; verdict: 'plus' | 'minus' | 'flat' }>;
+    findings: Array<{ text: string; evidence: number[] }>;
+  };
   teamfight?: string;
   abilities: DigestBriefAbility[];
   abilityMix?: string;
@@ -477,6 +502,10 @@ function buildBriefingText(briefing: DigestBriefing): string {
     'sessions[].when 是那场实际开赛时间，可能不是昨晚，也可能是两三天前；要提时间就按它说，别说「这把」「刚刚」「昨晚」。',
     '不同 matchId 是不同场，别把几场说成同一场，也别把不同场的人凑成一队。',
     'boundPlayers 是这场里一起玩的绑定群友，人数不固定（可能只有两三个），别编成「你们五个」；lineup 是那场全队十人的英雄，只是背景。',
+    // 2026-11-16 修（用户原话「你把队友当路人了」）：单场解析输出里有了 teamPlayers，
+    // 谁是群友、谁是路人终于能分开，这里必须点明怎么读 —— 不点明的话模型照旧
+    // 把一起开黑的群友当路人点评，还把群友的功劳安到路人头上。
+    'matchDetail 的 teamPlayers 里 isBound=true 的是群友（alias 是群里称呼），isBound=false 的是路人；点评时别把群友说成路人。',
     'abilities 是这局真实抽到的技能：nameZh 是官方简体中文名，照抄，别自译、改名或换成别的说法；没给 nameZh 就用英文原名。',
     'OMG 里英雄不一定有招牌技能 —— 严禁按英雄默认技能脑补。',
     // 2026-11-15 修（用户原话「你看清楚这局谁是辅助谁是输出」）：
@@ -488,6 +517,23 @@ function buildBriefingText(briefing: DigestBriefing): string {
     + '没给 role 的场就别说定位，更不许自己编。',
     '辅助位伤害低、补刀少是正常的，别拿核心的尺子量辅助；'
     + '反过来核心位伤害垫底、补刀也上不去，那才值得吐。',
+    // 2026-11-16 硬约束（群里的原话：「我看他从来没有综合分析过能收集的数据吧，
+    // 不都是抓一两条就开始评么」）。上面那些护栏解决的是「别拿错尺子」，
+    // 但没解决「他懒得逐项看」—— 一对一错两条已经吃过的教训都是这么来的
+    // （0/7/25 被叫混子、赏金伤害垫底被当主输出骂）。这里直接改成可验收的格式要求。
+    'boundPlayers[].factSheet 是脚本逐项算好的对照表：lines 每一行 = 一个维度（经济/输出/'
+    + '补刀/视野/团战/目标/死亡/出装/分路）+ 一句纯数据 + verdict（plus=这一项明显占优，'
+    + 'minus=这一项明显不行，flat=无异常或无数据）；findings 是挂了下标的结论候选，'
+    + 'evidence 就是 lines 的下标。',
+    '**每条点评至少引用 2 个不同维度的 fact**（例如「经济和视野」），并且要把数字说出来；'
+    + '只提 KDA、或整段只有一个数字的回答视为不合格，重写。',
+    'verdict=minus 的维度是这局真实的问题，可以指着说；verdict=plus 的是可夸的点；'
+    + 'verdict=flat 的维度不要硬编故事 —— 无异常就是无异常，没什么可说的就别说。',
+    '**不许把「没有数据」说成「数据不好」**：fact 里写「未解析」「缺对比数据」「未知」的，'
+    + '就是没读到，照实说没数据，不许当成打得差；laneRole / 分路 显示未知就直说未知，别猜。',
+    '陈述结论必须能指回 factSheet 的具体某一行，别自己发明因果：'
+    + '「他补刀少所以输了」「经济低是因为没支援」这种数据里没有的因果链，一句都不许写。'
+    + '想下结论就先用 findings 里的某条（它已经挂好 evidence 了），或者直接念 fact 里的数字。',
     'abilityBasis=levels 时 uses 是加点次数、不是施放次数，别写成「按了 N 次」。',
     '指标别混：teamRank 是队内经济排名（1=最富），damageRank 才是队内输出排名（1=伤害最高），heroDamage 是伤害数值，gpm/xpm/netWorth 都是经济，teamfight 是参团次数。',
     'parsed=false 的场只解析出基础数据：只许说英雄、KDA、胜负，不许聊技能、经济、团战，别自己补。',

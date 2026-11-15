@@ -37,7 +37,7 @@ import { registerBiliTools } from '../bili/index.ts';
 import { createXhhClient, registerXhhTools } from '../xhh/index.ts';
 import { bindPersonaRuntimeProviders } from '../setup/index.ts';
 import { SteamService, registerSteamTools, primaryName } from '../steam/index.ts';
-import { createDotaService, MatchCacheStore, createBriefingBuilder, registerDotaTools, steamIdToAccountId, type DotaService } from '../dota/index.ts';
+import { createDotaService, MatchCacheStore, createBriefingBuilder, registerDotaTools, steamIdToAccountId, annotateBoundPlayers, type DotaService } from '../dota/index.ts';
 import { createDotaWarmup } from '../dota/warmup.ts';
 import { createBridgeProbe, renderScreenNudge } from '../persona/screen-watch.ts';
 import { createDotaDigest } from '../persona/dota-digest.ts';
@@ -352,7 +352,26 @@ export async function bootstrapGateway(
 
   // ── Dota2 工具（qq_dota_recent / qq_dota_match / qq_dota_abilities）──
   if (dota) {
-    registerDotaTools(ctx, dota, logger);
+    // 2026-11-16：单场解析要标出「队里谁是群友」。绑定表在 steam 这里（openid → steamId），
+    // 而 matchDetail 里只有 accountId，所以换算一次做成 accountId → 群里称呼 的 map。
+    // 换算用现成的 steamIdToAccountId（= SteamID64 - 61197960265728），别自己算。
+    // 每次查询现取一次 bindings：群里刚 /绑 完人，下一次查就该认出来，缓存会让人白等。
+    registerDotaTools(ctx, dota, logger, {
+      annotateMatchDetail: (form) => {
+        const aliasByAccountId = new Map<number, string>();
+        if (steam) {
+          for (const b of steam.bindings.list()) {
+            const accountId = steamIdToAccountId(b.binding.steamId);
+            if (accountId === null) continue;
+            // alias 里可能是「小周、周星宇」，群里叫的是第一个；没有 alias 就用 openid 兜底没意义，
+            // 只按 alias 标 —— 没昵称的人宁可显示「路人」，也别在群里冒出一串 openid。
+            const alias = primaryName(b.binding.alias);
+            if (alias !== '') aliasByAccountId.set(accountId, alias);
+          }
+        }
+        return annotateBoundPlayers(form, (accountId) => aliasByAccountId.get(accountId));
+      },
+    });
   }
 
   // ── 小黑盒只读工具（默认关；匿名接口，不需要登录凭据）──
@@ -520,6 +539,9 @@ export async function bootstrapGateway(
           ...(typeof f.player.abilityMix === 'string' && f.player.abilityMix !== ''
             ? { abilityMix: f.player.abilityMix }
             : {}),
+          // 事实清单（2026-11-16）：简报缺席时的兜底路径也把逐项对照表带上，
+          // 否则这条链路又退化成「只给散字段 → 模型只念 KDA」。
+          ...(f.factSheet.lines.length > 0 ? { factSheet: f.factSheet } : {}),
           parsed: f.teamfights !== null,
         };
       },

@@ -938,6 +938,16 @@ describe('buildDeliverText · 完整简报', () => {
             heroDamage: 23828, teamRank: 2, damageRank: 1,
             abilities: [{ name: 'Shadowraze', nameZh: '毁灭阴影（影压）', uses: 126 }],
             abilityBasis: 'uses',
+            // 2026-11-16：事实清单跟着 boundPlayers 一起给模型，
+            // 让它必须逐项对照（而不是只念 KDA）
+            factSheet: {
+              lines: [
+                { dim: '经济', fact: 'GPM 559（队内第 2/5，比队内第一低 40）', verdict: 'plus' as const },
+                { dim: '输出', fact: '伤害 23828（队内第 1/5，占队内最高 100%）', verdict: 'plus' as const },
+                { dim: '视野', fact: '插眼 2 个（观察 1/岗哨 1，队内最多 18）', verdict: 'flat' as const },
+              ],
+              findings: [{ text: '伤害 23828 占队内最高的 100%，这局输出靠他', evidence: [0, 1] }],
+            },
           },
           {
             name: '芋头', hero: '撼地者', kda: '10/9/26', win: true,
@@ -982,12 +992,70 @@ describe('buildDeliverText · 完整简报', () => {
     expect(text).toContain('damageRank 才是队内输出排名')
     expect(text).toContain('abilityBasis=levels')
     expect(text).toContain('人数不固定')
+    // 2026-11-16：单场解析有了 teamPlayers，提示词必须说清 isBound 怎么读，
+    // 否则模型照旧把一起开黑的群友当路人点评。
+    expect(text).toContain('teamPlayers')
+    expect(text).toContain('isBound=true 的是群友')
+    expect(text).toContain('别把群友说成路人')
   })
 
   it('简报为空 → 降级到原来的单局提示词', () => {
     const text = buildDeliverText([SIMPLE_ITEM], { windowHours: 48, generatedAt: QUERY_AT, sessions: [] })
     expect(text).toContain('只说一个人')
     expect(text).not.toContain('最多挑 3 场')
+  })
+
+  // 2026-11-16 新增。群里的原话：「我看他从来没有综合分析过能收集的数据吧，
+  // 不都是抓一两条就开始评么」「真要能像 max 那样综合收集全数据评价，得花不少 token」。
+  // 上面那些护栏只解决了「别拿错尺子」，没解决「他懒得逐项看」—— 于是有了 factSheet，
+  // 外加下面这几条可以照着验收的硬约束。
+  it('硬约束：每条点评至少引用 2 个不同维度的 fact', () => {
+    const text = buildDeliverText([SIMPLE_ITEM], BRIEFING)
+    expect(text).toContain('factSheet')
+    expect(text).toContain('每条点评至少引用 2 个不同维度的 fact')
+    expect(text).toContain('只提 KDA、或整段只有一个数字的回答视为不合格')
+    // 提示里要解释 verdict 三个值分别是什么意思，否则模型看不懂 plus/minus/flat
+    expect(text).toContain('verdict')
+    expect(text).toContain('plus=这一项明显占优')
+    expect(text).toContain('minus=这一项明显不行')
+    expect(text).toContain('flat=无异常或无数据')
+    // findings 的 evidence 是 lines 下标，得点明，不然模型不知道能指回去
+    expect(text).toContain('evidence 就是 lines 的下标')
+  })
+
+  it('硬约束：minus 是真问题、plus 是可夸的、flat 别硬编故事', () => {
+    const text = buildDeliverText([SIMPLE_ITEM], BRIEFING)
+    expect(text).toContain('verdict=minus 的维度是这局真实的问题')
+    expect(text).toContain('verdict=plus 的是可夸的点')
+    expect(text).toContain('verdict=flat 的维度不要硬编故事')
+  })
+
+  it('硬约束：没有数据 ≠ 数据不好；laneRole 未知就说未知', () => {
+    const text = buildDeliverText([SIMPLE_ITEM], BRIEFING)
+    expect(text).toContain('不许把「没有数据」说成「数据不好」')
+    expect(text).toContain('laneRole')
+    expect(text).toContain('未知就直说未知')
+  })
+
+  it('硬约束：结论必须能指回 factSheet，不许自己发明因果', () => {
+    const text = buildDeliverText([SIMPLE_ITEM], BRIEFING)
+    expect(text).toContain('陈述结论必须能指回 factSheet 的具体某一行')
+    // 举的例子要够具体：泛泛说「别编」模型照编
+    expect(text).toContain('他补刀少所以输了')
+    expect(text).toContain('这种数据里没有的因果链')
+  })
+
+  it('factSheet 的数据真的被序列化进提示词了（不是只有文案约束）', () => {
+    const text = buildDeliverText([SIMPLE_ITEM], BRIEFING)
+    expect(text).toContain('"factSheet"')
+    expect(text).toContain('占队内最高 100%')
+    expect(text).toContain('"verdict": "plus"')
+  })
+
+  it('保留「辅助位伤害低是正常的」这条老护栏（别为了新约束把它删掉）', () => {
+    const text = buildDeliverText([SIMPLE_ITEM], BRIEFING)
+    expect(text).toContain('辅助位伤害低、补刀少是正常的')
+    expect(text).toContain('别拿核心的尺子量辅助')
   })
 })
 

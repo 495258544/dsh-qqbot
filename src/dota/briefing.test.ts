@@ -70,6 +70,14 @@ function mkForm(matchId: number, accountId: number, over: Partial<MatchDetailFor
     goldSwing: null,
     teamfights: { count: 16, participated: 16 },
     lineup: { radiant: ['幻影刺客', '撼地者'], dire: ['影魔'] },
+    // 2026-11-16：事实清单要跟着简报一起进缓存，模型才有得逐项对照
+    factSheet: {
+      lines: [
+        { dim: '经济', fact: 'GPM 559（队内第 2/5，比队内第一低 40）', verdict: 'plus' as const },
+        { dim: '输出', fact: '伤害 23828（队内第 1/5，占队内最高 100%）', verdict: 'plus' as const },
+      ],
+      findings: [{ text: '伤害 23828 占队内最高的 100%，这局输出靠他', evidence: [0, 1] }],
+    },
     notes: [],
     summaryText: '',
   } as MatchDetailForm;
@@ -80,6 +88,8 @@ interface Harness {
   build: ReturnType<typeof createBriefingBuilder>;
   calls: Array<[number, number]>;
   activePeak: { value: number };
+  /** 战绩库目录：测试要换一个 store 实例重读（模拟进程重启）时用 */
+  dir: string;
 }
 
 function harness(o: {
@@ -152,6 +162,7 @@ function harness(o: {
     build: createBriefingBuilder({ service, matchCache, logger: silent, tz: 'Asia/Shanghai' }),
     calls,
     activePeak,
+    dir,
   };
 }
 
@@ -191,6 +202,21 @@ describe('createBriefingBuilder · 去重与关联', () => {
     const h = harness({ withAbilities: false });
     const [s] = await h.build([401], 48);
     expect(s?.parsed).toBe(false);
+  });
+
+  // 2026-11-16 新增：factSheet 必须真的投影进 boundPlayers，且能落盘再读回来。
+  // 只投影不进缓存的话，第二天复用缓存时模型又只剩散字段，等于白改。
+  it('factSheet 投影进 boundPlayers 并落进缓存（重开进程也还在）', async () => {
+    const h = harness();
+    const [s] = await h.build([401], 48);
+    expect(s?.boundPlayers[0]?.factSheet).toBeDefined();
+    expect(s?.boundPlayers[0]?.factSheet?.lines).toHaveLength(2);
+    expect(s?.boundPlayers[0]?.factSheet?.lines[1]?.verdict).toBe('plus');
+    expect(s?.boundPlayers[0]?.factSheet?.findings[0]?.evidence).toEqual([0, 1]);
+
+    // 落盘一份：换一个 store 实例读（模拟重启）
+    const again = new MatchCacheStore(h.dir);
+    expect(again.getBriefing(401)?.boundPlayers[0]?.factSheet?.lines[0]?.dim).toBe('经济');
   });
 });
 
