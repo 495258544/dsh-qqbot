@@ -14,3 +14,4 @@ lib/**/*.map
 __pycache__/
 *.pyc
 .pytest_cache/
+dsh-decky-plugins-research.md
