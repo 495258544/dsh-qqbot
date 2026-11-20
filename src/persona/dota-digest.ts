@@ -215,6 +215,25 @@ export interface DigestBriefSession {
   parsed: boolean;
   /** 这一场里的绑定群友，人数不固定，可能只有 2–3 个 */
   boundPlayers: DigestBriefPlayer[];
+  /**
+   * 局内数据突出的路人/对手（2026-11-20）—— 已由脚本排除全部绑定群友。
+   *
+   * 「不认错人」的硬保证（脚本层做，不靠模型自觉）：
+   *   - 数组里没有任何群友，只有路人队友/对手，用 heroName 标识、没有 alias；
+   *   - relation 标了是队友还是对面；reason 是纯客观数据，定性交给模型；
+   *   - 空 = 这场没值得说的路人，别硬凑。
+   */
+  standouts?: Array<{
+    heroName: string;
+    relation: 'teammate' | 'opponent';
+    kda: string;
+    kills: number;
+    deaths: number;
+    assists: number;
+    gpm: number;
+    heroDamage: number;
+    reason: string;
+  }>;
   /** 全队十人英雄，用来判断谁是核心、谁在打辅助 */
   lineup?: { radiant: string[]; dire: string[] };
 }
@@ -528,6 +547,15 @@ function buildBriefingText(briefing: DigestBriefing): string {
     'sessions[].when 是那场实际开赛时间，可能不是昨晚，也可能是两三天前；要提时间就按它说，别说「这把」「刚刚」「昨晚」。',
     '不同 matchId 是不同场，别把几场说成同一场，也别把不同场的人凑成一队。',
     'boundPlayers 是这场里一起玩的绑定群友，人数不固定（可能只有两三个），别编成「你们五个」；lineup 是那场全队十人的英雄，只是背景。',
+    // 2026-11-20 加（用户原话：「路人队友或对手数据很突出，比如乱杀或巨坑，也可以补一两句锐评，但不要认错人」）。
+    // standouts 由脚本按客观阈值挑，且**已排除全部绑定群友**——这是认错人的根本防线。
+    // 提示词再做一层：不许给路人编名字、不许@、用英雄名+队友/对面指代，空就别说。
+    'standouts 是这场里数据突出的**路人队友或对面玩家**（乱杀/巨坑那种），脚本已把他们和群友分开：'
+    + '这个数组里**一个群友都没有**，也没有任何人的称呼（alias）—— 你拿不到路人的名字，就不许给他编名字。',
+    'standouts 最多挑一两个真正突出的补一句锐评，别喧宾夺主 —— 主角还是 boundPlayers 里的群友；'
+    + '没给 standouts 或它是空的，就一句路人都不提，别自己从 lineup 里挑人凑。',
+    '提路人时用「对面那个XX（英雄名）」「你们这局的XX」这种指代，relation=teammate 是路人队友、opponent 是对面；'
+    + '**绝对不许当成群友、不许@、不许用群友的称呼叫他们**；reason 是客观数据，定性用你自己的话说。',
     // 2026-11-16 修（用户原话「你把队友当路人了」）：单场解析输出里有了 teamPlayers，
     // 谁是群友、谁是路人终于能分开，这里必须点明怎么读 —— 不点明的话模型照旧
     // 把一起开黑的群友当路人点评，还把群友的功劳安到路人头上。

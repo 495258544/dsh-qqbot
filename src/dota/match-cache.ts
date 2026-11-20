@@ -85,6 +85,25 @@ export interface CachedBriefPlayer {
 }
 
 /**
+ * 局内数据突出的路人/对手（2026-11-20），形状与 service.ts 的
+ * MatchStandoutPlayer 对齐。这里重新声明：match-cache 是落盘层，不 import service。
+ *
+ * 关键：`isBound` 永远是 false —— 脚本在投影时已排除全部绑定群友，
+ * 模型在 `standouts` 里看到的每一个都保证是路人/对手，不会是熟人的 alias。
+ */
+export interface CachedStandoutPlayer {
+  heroName: string;
+  relation: 'teammate' | 'opponent';
+  kda: string;
+  kills: number;
+  deaths: number;
+  assists: number;
+  gpm: number;
+  heroDamage: number;
+  reason: string;
+}
+
+/**
  * 一场比赛的「完整简报」——给模型判断核心/辅助用的精简投影。
  *
  * 2026-11-12：以前只给模型 1 局 × 9 个数字 + 一句 abilityMix 套话，
@@ -106,6 +125,8 @@ export interface CachedBriefSession {
    */
   schema?: number;
   boundPlayers: CachedBriefPlayer[];
+  /** 局内数据突出的路人/对手（已排除群友）；空 = 这场没有值得说的路人 */
+  standouts?: CachedStandoutPlayer[];
   lineup?: { radiant: string[]; dire: string[] };
   /** 这份简报最后一次取数时间（ms） */
   fetchedAt: number;
@@ -152,8 +173,10 @@ const FILE_VERSION = 1;
  * 现在必须有 factSheet 里的 minus 撑腰，满参团+输出不差的局不再被判划水。
  * 老简报里没有 notes 字段本身（notes 只活在摘要里），但模型是靠整份简报
  * 判断「这人这局怎么样」，旧简报会带着旧口径一起被复用，所以必须让老的失效重取。
+ * 4 → 5（2026-11-20）：加了 standouts（突出的路人/对手），老简报没有这个字段，
+ * 得重取一次才能补上，否则路人锐评永远缺席。
  */
-export const BRIEF_SCHEMA = 4;
+export const BRIEF_SCHEMA = 5;
 
 function isFinitePositive(v: unknown): v is number {
   return typeof v === 'number' && Number.isFinite(v) && v > 0;
@@ -267,6 +290,28 @@ function sanitizeBriefing(v: unknown, matchId: number): CachedBriefSession | und
       ...(factSheet !== undefined ? { factSheet } : {}),
     });
   }
+  // 突出的路人/对手（2026-11-20）：只认客观字段，isBound 不存盘 ——
+  // 放在这个数组里的每一个都保证是路人，模型不会看到 alias，也就无从认错人。
+  const standouts: CachedStandoutPlayer[] = [];
+  if (Array.isArray(o.standouts)) {
+    for (const sp of o.standouts) {
+      if (sp === null || typeof sp !== 'object') continue;
+      const q = sp as Record<string, unknown>;
+      if (s(q, 'heroName') === undefined) continue;
+      if (q.relation !== 'teammate' && q.relation !== 'opponent') continue;
+      standouts.push({
+        heroName: q.heroName as string,
+        relation: q.relation,
+        kda: s(q, 'kda') ?? '',
+        kills: n(q, 'kills') ?? 0,
+        deaths: n(q, 'deaths') ?? 0,
+        assists: n(q, 'assists') ?? 0,
+        gpm: n(q, 'gpm') ?? 0,
+        heroDamage: n(q, 'heroDamage') ?? 0,
+        reason: s(q, 'reason') ?? '',
+      });
+    }
+  }
   let lineup: CachedBriefSession['lineup'];
   if (o.lineup !== null && typeof o.lineup === 'object') {
     const l = o.lineup as Record<string, unknown>;
@@ -284,6 +329,7 @@ function sanitizeBriefing(v: unknown, matchId: number): CachedBriefSession | und
     parsed: o.parsed === true,
     ...(n(o, 'schema') !== undefined ? { schema: n(o, 'schema') as number } : {}),
     boundPlayers,
+    ...(standouts.length > 0 ? { standouts } : {}),
     ...(lineup !== undefined ? { lineup } : {}),
     fetchedAt: n(o, 'fetchedAt') ?? 0,
   };

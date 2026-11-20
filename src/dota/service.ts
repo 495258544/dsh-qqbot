@@ -150,6 +150,32 @@ export interface MatchTeamPlayer {
   alias?: string;
 }
 
+/**
+ * 局内数据突出的**非群友**玩家（路人队友 / 对手），供播报补一两句锐评。
+ *
+ * 2026-11-20 加（用户原话：「路人队友或者对手数据很突出，比如乱杀或者巨坑，
+ * 也可以补上一两句锐评，但是要注意不要认错人」）。
+ *
+ * 「不认错人」靠三条硬保证，全在脚本侧做，不指望模型自觉：
+ *   1. accountId 命中绑定群的**一律不进这张表** —— 群友只会出现在 teamPlayers/boundPlayers，
+ *      模型不会在路人表里看到熟人的名字；
+ *   2. 只有 `relation` 和英雄名，没有 alias 字段 —— 模型压根拿不到路人的"名字"去乱认；
+ *   3. `reason` 是脚本按客观数据算的（如「16/2/9，全场击杀最高」），不带褒贬。
+ */
+export interface MatchStandoutPlayer {
+  heroName: string;
+  /** 相对被查的这位群友：同队路人 / 对面玩家 */
+  relation: 'teammate' | 'opponent';
+  kda: string;
+  kills: number;
+  deaths: number;
+  assists: number;
+  gpm: number;
+  heroDamage: number;
+  /** 脚本给的客观理由（纯数据，不含「乱杀/巨坑」这类定性，定性交给模型） */
+  reason: string;
+}
+
 /** 单场详细解析（比 recentForm 细：经济/输出/对位/目标/曲线/团战/阵容） */
 export interface MatchDetailForm {
   matchId: number;
@@ -235,6 +261,11 @@ export interface MatchDetailForm {
    * 一起开黑的人说成「路人」，还把功劳安到路人头上。
    */
   teamPlayers: MatchTeamPlayer[];
+  /**
+   * 局内数据突出的路人和对手（已排除全部绑定群友），脚本按客观阈值挑的。
+   * 播报用来补一两句锐评；没挑到就是空数组。判定逻辑见 pickStandouts。
+   */
+  standoutPlayers: MatchStandoutPlayer[];
   /**
    * 事实清单：把这一局能收集到的数据逐项压成「纯数据 + 优势/劣势/无异常」。
    *
@@ -545,7 +576,16 @@ export class DotaService {
    * 单场详细解析。
    * matchId 必填；accountId 用来定位"这局里的哪个人"（不传就没法算队内排名/对位）。
    */
-  async matchDetail(matchId: number, accountId: number): Promise<MatchDetailForm> {
+  async matchDetail(
+    matchId: number,
+    accountId: number,
+    /**
+     * 这场所有绑定群友的 accountId（2026-11-20 认错人防线）。
+     * 传入时，pickStandouts 会排除这些人，只留真路人/对手；不传则一个都不挑。
+     * 播报链路（briefing）传，手动查询（tools）不传 —— 手动查询另有用处。
+     */
+    boundAccountIds?: ReadonlySet<number>,
+  ): Promise<MatchDetailForm> {
     if (!this.config.enabled) {
       throw new OpenDotaError('bad-request', 'Dota2 战绩功能未启用（config.dota.enabled=false）');
     }
@@ -559,6 +599,13 @@ export class DotaService {
     const raw = await this.matchRaw(matchId);
     const itemName = await this.itemNameResolver();
     const form = buildMatchDetailForm(raw, accountId, itemName);
+
+    // 突出的路人/对手（2026-11-20）：绑定账号集合由调用方传入，命中者一律排除。
+    // 没传就是空 —— 认错人的代价太高，宁可不说。
+    if (boundAccountIds !== undefined && boundAccountIds.size > 0) {
+      const me = raw.players.find((p) => p.account_id === accountId);
+      if (me !== undefined) form.standoutPlayers = pickStandouts(raw, me, boundAccountIds);
+    }
 
     // 装备名护栏（2026-11-16）：中文名是脚本按官方译名给的，模型自己译会翻车
     // （Maelstrom 被说成「狂战斧」，而狂战斧是 Battle Fury）。
@@ -1626,6 +1673,67 @@ function avgOf(list: number[]): number {
   return list.reduce((s, v) => s + v, 0) / list.length;
 }
 
+/**
+ * 从一场里挑「数据突出的非群友」—— 乱杀或巨坑的路人/对手（2026-11-20）。
+ *
+ * 认错人防线：传入的 `boundIds` 是这场所有**绑定群友**的 accountId；命中即跳过。
+ * 注意 buildMatchDetailForm 是纯函数、看不到绑定表，所以由调用方（matchDetail）
+ * 在查完绑定后把 boundIds 传进来；没传时就一个都不挑（宁可不说，不可认错人）。
+ *
+ * 挑的是「相对极端」的人，不是随便谁：
+ *   - 击杀 >= 12 且死亡 <= 6（乱杀），或
+ *   - 死亡 >= 10（巨坑），或
+ *   - 全场伤害最高且 >= 对手方营收线（数据碾压）。
+ * 最多 2 个，避免喧宾夺主 —— 播报主角还是群友。
+ */
+export function pickStandouts(
+  raw: RawMatchDetail,
+  me: RawMatchPlayer,
+  boundIds: ReadonlySet<number>,
+): MatchStandoutPlayer[] {
+  if (boundIds.size === 0) return [];
+  const mySide = me.player_slot < 128;
+  const candidates = raw.players
+    .filter((p) => p !== me && p.account_id !== null && !boundIds.has(p.account_id))
+    .map((p) => {
+      const dmg = p.hero_damage ?? 0;
+      let reason = '';
+      if (p.kills >= 12 && p.deaths <= 6) reason = `${p.kills}/${p.deaths}/${p.assists}，全场乱杀级击杀`;
+      else if (p.deaths >= 10) reason = `${p.kills}/${p.deaths}/${p.assists}，死亡偏多`;
+      return { p, dmg, reason };
+    })
+    .filter((x) => x.reason !== '');
+
+  // 伤害碾压单独挑一个（不和上面的重复）：全场伤害最高、且明显高过第二名
+  const byDamage = [...raw.players].sort((a, b) => (b.hero_damage ?? 0) - (a.hero_damage ?? 0));
+  const top = byDamage[0];
+  const second = byDamage[1];
+  if (
+    top !== undefined && top !== me && top.account_id !== null && !boundIds.has(top.account_id)
+    && (top.hero_damage ?? 0) >= 20000
+    && second !== undefined && (top.hero_damage ?? 0) >= (second.hero_damage ?? 0) * 1.5
+    && !candidates.some((c) => c.p === top)
+  ) {
+    candidates.push({
+      p: top,
+      dmg: top.hero_damage ?? 0,
+      reason: `${top.kills}/${top.deaths}/${top.assists}，全场伤害最高 ${Math.round((top.hero_damage ?? 0) / 1000)}k`,
+    });
+  }
+
+  return candidates.slice(0, 2).map(({ p, reason }): MatchStandoutPlayer => ({
+    heroName: heroName(p.hero_id),
+    relation: (p.player_slot < 128) === mySide ? 'teammate' : 'opponent',
+    kda: `${p.kills}/${p.deaths}/${p.assists}`,
+    kills: p.kills,
+    deaths: p.deaths,
+    assists: p.assists,
+    gpm: p.gold_per_min,
+    heroDamage: p.hero_damage ?? 0,
+    reason,
+  }));
+}
+
 export function buildMatchDetailForm(
   raw: RawMatchDetail,
   accountId: number,
@@ -1818,6 +1926,9 @@ export function buildMatchDetailForm(
         isRadiant: p.player_slot < 128,
         isBound: false,
       })),
+    // 突出路人/对手：buildMatchDetailForm 看不到绑定表，先留空，
+    // 由 matchDetail 在拿到绑定账号集合后调 pickStandouts 注入（认错人防线）。
+    standoutPlayers: [],
     notes: [],
   };
 

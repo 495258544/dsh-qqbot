@@ -954,6 +954,14 @@ describe('buildDeliverText · 完整简报', () => {
             abilities: [{ name: 'Fissure', nameZh: '沟壑', uses: 40 }],
           },
         ],
+        // 突出的路人/对手（2026-11-20）：脚本已排除群友，只留英雄名+客观数据
+        standouts: [
+          {
+            heroName: '痛苦女王', relation: 'opponent', kda: '18/3/6',
+            kills: 18, deaths: 3, assists: 6, gpm: 720, heroDamage: 34000,
+            reason: '18/3/6，全场乱杀级击杀',
+          },
+        ],
         lineup: { radiant: ['幻影刺客', '撼地者'], dire: ['影魔'] },
       },
       {
@@ -1089,6 +1097,24 @@ describe('buildDeliverText · 完整简报', () => {
     expect(text).toContain('先锐评，后数据')
     expect(text).toContain('这一个字里不许有数字')
     expect(text).toContain('一句话里最多带一两个关键数字')
+  })
+
+  it('突出的路人/对手可补锐评，但提示词钉死认错人防线', () => {
+    const text = buildDeliverText([SIMPLE_ITEM], BRIEFING)
+    // 告诉模型 standouts 是什么、可以评
+    expect(text).toContain('standouts 是这场里数据突出的')
+    expect(text).toContain('脚本已把他们和群友分开')
+    // 认错人防线：没有 alias、不许编名字、不许@、不许当群友
+    expect(text).toContain('一个群友都没有')
+    expect(text).toContain('你拿不到路人的名字，就不许给他编名字')
+    expect(text).toContain('绝对不许当成群友、不许@')
+    expect(text).toContain('relation=teammate 是路人队友、opponent 是对面')
+    // 空就别说，别从 lineup 里挑人凑
+    expect(text).toContain('别自己从 lineup 里挑人凑')
+    // 数据真的序列化进提示词了（不是只有文案约束）
+    expect(text).toContain('"standouts"')
+    expect(text).toContain('"heroName": "痛苦女王"')
+    expect(text).toContain('全场乱杀级击杀')
   })
 
   it('「2 个维度」是防编底线，不许被当成「要多报数字」', () => {

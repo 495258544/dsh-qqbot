@@ -8,7 +8,7 @@
  */
 import { describe, expect, it } from 'vitest';
 import type { RawMatchDetail, RawMatchPlayer } from './opendota.ts';
-import { annotateBoundPlayers, buildMatchDetailForm, buildMatchNotes } from './service.ts';
+import { annotateBoundPlayers, buildMatchDetailForm, buildMatchNotes, pickStandouts } from './service.ts';
 import type { MatchDetailForm } from './service.ts';
 
 const HERO = {
@@ -524,6 +524,68 @@ describe('buildMatchNotes · 服从 factSheet', () => {
     expect(notes).toContain('视野做得不错');
     expect(notes).not.toContain('划水');
     expect(notes).not.toContain('有点送');
+  });
+});
+
+// 2026-11-20：局内突出的路人/对手（用户原话「乱杀或巨坑也可以锐评，但别认错人」）。
+// 认错人的根本防线在脚本侧：绑定群友绝不进 standouts，模型连 alias 都拿不到。
+describe('pickStandouts · 突出的路人/对手，绝不认错人', () => {
+  const me = (r: RawMatchDetail): RawMatchPlayer => r.players.find((p) => p.account_id === 123) as RawMatchPlayer;
+
+  it('没传绑定集合 → 一个都不挑（宁可不说，不可认错人）', () => {
+    expect(pickStandouts(fixture(), me(fixture()), new Set())).toEqual([]);
+  });
+
+  it('乱杀的路人对手被挑出，标 relation=opponent，理由只有客观数据', () => {
+    const raw = fixture({
+      players: fixture().players.map((p) => (
+        p.account_id === 302 ? { ...p, kills: 18, deaths: 3, assists: 6, hero_damage: 34000 } : p
+      )),
+    });
+    // 绑定集合只有 me 自己 → 302 是路人对手
+    const out = pickStandouts(raw, me(raw), new Set([123]));
+    const foe = out.find((s) => s.heroName === '痛苦女王');
+    expect(foe).toBeDefined();
+    expect(foe?.relation).toBe('opponent');
+    expect(foe?.kda).toBe('18/3/6');
+    expect(foe?.reason).toContain('全场乱杀级击杀');
+  });
+
+  it('巨坑的路人队友被挑出，标 relation=teammate', () => {
+    const raw = fixture({
+      players: fixture().players.map((p) => (
+        p.account_id === 204 ? { ...p, kills: 1, deaths: 12, assists: 3 } : p
+      )),
+    });
+    const out = pickStandouts(raw, me(raw), new Set([123]));
+    const feeder = out.find((s) => s.heroName === '巫妖');
+    expect(feeder).toBeDefined();
+    expect(feeder?.relation).toBe('teammate');
+    expect(feeder?.reason).toContain('死亡偏多');
+  });
+
+  it('绑定群友即使数据突出也绝不进 standouts（防认错人核心用例）', () => {
+    const raw = fixture({
+      players: fixture().players.map((p) => (
+        p.account_id === 201 ? { ...p, kills: 20, deaths: 2, assists: 9 } : p
+      )),
+    });
+    // 201 是绑定群友（CM）→ 必须被排除，哪怕 20/2/9
+    const out = pickStandouts(raw, me(raw), new Set([123, 201]));
+    expect(out.some((s) => s.heroName === '水晶室女')).toBe(false);
+  });
+
+  it('最多 2 个，不喧宾夺主', () => {
+    const raw = fixture({
+      players: fixture().players.map((p) => {
+        if (p.account_id === 301) return { ...p, kills: 15, deaths: 4, assists: 2 };
+        if (p.account_id === 302) return { ...p, kills: 14, deaths: 5, assists: 8 };
+        if (p.account_id === 303) return { ...p, kills: 13, deaths: 3, assists: 4 };
+        return p;
+      }),
+    });
+    const out = pickStandouts(raw, me(raw), new Set([123]));
+    expect(out.length).toBeLessThanOrEqual(2);
   });
 });
 

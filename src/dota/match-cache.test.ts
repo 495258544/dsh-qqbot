@@ -253,15 +253,16 @@ describe('MatchCacheStore · 完整简报', () => {
   // 2026-11-16：点评判定口径改了（划水必须有 factSheet 证据），BRIEF_SCHEMA 3 → 4。
   // sanitize 只做「数值兜底」、不校验版本号，所以 4 必须原样存回来 ——
   // 一旦它把 schema 吃掉了，简报构建器永远判「版本不对」，每轮都白重取一次。
-  it('schema 升到 4 后仍能落盘读回（sanitize 不吞版本号）', () => {
+  it('当前 schema 仍能落盘读回（sanitize 不吞版本号）', () => {
     const dir = tmpDir();
     const store = new MatchCacheStore(dir);
     store.upsertMany([{ matchId: 910, startTime: 100, player: p(1) }]);
     store.putBriefing({ ...session(), schema: BRIEF_SCHEMA });
-    expect(BRIEF_SCHEMA).toBe(4);
+    // 用常量本身断言，不写死数字 —— 每次加字段升 schema 都要改测试就失去意义了
+    expect(BRIEF_SCHEMA).toBeGreaterThanOrEqual(4);
 
     const again = new MatchCacheStore(dir);
-    expect(again.getBriefing(910)?.schema).toBe(4);
+    expect(again.getBriefing(910)?.schema).toBe(BRIEF_SCHEMA);
     // 老版本也照样读得回来（是否复用由 briefing 构建器判，sanitize 不篡改）
     again.putBriefing({ ...session(), schema: 3 });
     expect(new MatchCacheStore(dir).getBriefing(910)?.schema).toBe(3);
