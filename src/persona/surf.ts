@@ -32,7 +32,7 @@
 import { execFileSync } from 'node:child_process';
 import { locateEgo } from '../shared/ego-locate.ts';
 import { appendFileSync } from 'node:fs';
-import type { SelfProfileService } from './self.ts';
+import { findingSourceKey, type SelfInterest, type SelfProfileService } from './self.ts';
 import { DEFAULT_TZ, hourInTz, isHourInRange } from './clock.ts';
 
 /** ego-browser 入口（vendored Linux 版，package.json 无 bin 字段） */
@@ -459,6 +459,96 @@ function abstract(text: string, max = 100): string {
   return lastStop > max * 0.6 ? cut.slice(0, lastStop + 1) : `${cut}…`;
 }
 
+// ───────────── 自主冲浪去重 + 轮换（2026-11-18）─────────────
+//
+// 实测的坏样子（68 轮冲浪统计）：「清晨咖啡」相关内容出现 25 次。
+// 根因链：每轮只取搜索结果前 2 条（maxFindings=2）→ 搜索引擎对同一 query
+// 返回的排序几乎恒定 → 同一批 URL 每轮原样再注入一遍。
+// self.ts 的 addFinding 判重（11-12）只保住了 findings 的格子，
+// **注入块**（notifySurfResults 直接拼本轮 results）没有判重，照旧刷屏。
+//
+// 修法两层：
+//   ① 选择端剔除近期已见（下面 dropSeen / recentSeenUrls）——判据与
+//      addFinding 同源（findingSourceKey），两端一把尺子，否则排除静默失效；
+//   ② 话题端轮换（surfRotationScore / rankSurfTopics）——durable 兴趣
+//      不衰减、纯权重排序会永久霸占名额，改按「权重 × 闲置加成」排。
+
+/** findings 的「近期已见」窗口：7 天。窗口外的旧网页允许再看一遍。 */
+export const SURF_SEEN_WINDOW_MS = 7 * 24 * 3600_000;
+
+/**
+ * 该话题近 7 天已存进 findings 的出处 URL（已按 findingSourceKey 归一）。
+ * 传给 surfTopic 的 exclude，让选择端优先给没见过的条目。
+ */
+export function recentSeenUrls(interests: SelfInterest[], topic: string, now = Date.now()): Set<string> {
+  const out = new Set<string>();
+  const e = interests.find((i) => i.topic === topic);
+  for (const f of e?.findings ?? []) {
+    if (now - f.at > SURF_SEEN_WINDOW_MS) continue;
+    const key = findingSourceKey(f.source);
+    if (key) out.add(key);
+  }
+  return out;
+}
+
+/**
+ * 剔除命中 exclude 的候选；**全被剔除时退回首条**而不是返回空 ——
+ * 本轮零见闻（饿死）比重复一条更糟：宁可旧内容再出现一次，
+ * 也别让她整晚什么都"没看到"。exclude 为空/缺省时原样返回。
+ *
+ * exclude 里放的必须是 findingSourceKey 归一后的键（recentSeenUrls 产出的
+ * 就是这种键）；条目的 URL 在这里同样先归一再比对 —— 两端一把尺子。
+ */
+function dropSeen<T>(items: T[], exclude: Set<string> | undefined, urlOf: (it: T) => string): T[] {
+  if (exclude === undefined || exclude.size === 0) return items;
+  const fresh = items.filter((it) => !exclude.has(findingSourceKey(urlOf(it))));
+  if (fresh.length > 0) return fresh;
+  return items.slice(0, 1);
+}
+
+/** 轮换加成：距上次投入每多 1 天权重乘数 +1，封顶 7 天（最多 8 倍） */
+const SURF_ROTATION_DAY_MS = 24 * 3600_000;
+const SURF_ROTATION_MAX_IDLE_DAYS = 7;
+/** 入选题的轮换分下限（沿用原「权重 ≥ 0.3」门槛，只是现在卡的是加成后的分） */
+const SURF_MIN_SCORE = 0.3;
+
+/**
+ * 轮换分 = 权重 × (1 + min(距上次投入天数, 7))。
+ *
+ * 为什么这样能破"永久霸位"：durable 兴趣权重不衰减（咖啡 0.60、读书 0.53），
+ * 纯权重排序下它们永远前二；加了闲置加成后，被选中一次 lastAt 归零、
+ * 分数回落到裸权重，而久未冲浪的（做饭 0.098 闲置 7 天 → 0.78）能挤进来。
+ * 也不饿死 durable：别人被冲过同样冷却，且封顶 8 倍让 0.01 级的弱兴趣
+ * 永远够不着门槛（有效下限 ≈ 0.04）。lastAt 缺失的按 0 闲置处理（不给加成）。
+ */
+export function surfRotationScore(e: SelfInterest, now = Date.now()): number {
+  const weight = e.strength ?? e.weight;
+  const last = e.lastAt ?? 0;
+  const idleDays = last > 0 ? Math.min(Math.max((now - last) / SURF_ROTATION_DAY_MS, 0), SURF_ROTATION_MAX_IDLE_DAYS) : 0;
+  return weight * (1 + idleDays);
+}
+
+/**
+ * 排出一轮冲浪的话题名额：过滤厌恶 → 按轮换分降序（同分优先选更久没碰的）
+ * → 卡轮换分下限 → 取前 maxTopics。
+ */
+export function rankSurfTopics(
+  interests: SelfInterest[],
+  opts: { maxTopics?: number; hated?: Set<string>; minScore?: number; now?: number } = {},
+): SelfInterest[] {
+  const maxTopics = opts.maxTopics ?? 2;
+  const minScore = opts.minScore ?? SURF_MIN_SCORE;
+  const now = opts.now ?? Date.now();
+  const hated = opts.hated ?? new Set<string>();
+  return interests
+    .filter((i) => !hated.has(i.topic))
+    .map((i) => ({ i, s: surfRotationScore(i, now) }))
+    .filter((x) => x.s >= minScore)
+    .sort((a, b) => b.s - a.s || (a.i.lastAt ?? 0) - (b.i.lastAt ?? 0))
+    .map((x) => x.i)
+    .slice(0, maxTopics);
+}
+
 /**
  * 冲浪一个话题：宿主 web 搜索（Layer 0）→ B 站（视频型）→ Bing RSS（兜底）
  * → 挑第 1 条抓正文 → 组合成见闻。
@@ -469,7 +559,7 @@ function abstract(text: string, max = 100): string {
  */
 export async function surfTopic(
   topic: string,
-  opts: { deep?: boolean; maxFindings?: number; web?: WebSearchLike; log?: (m: string) => void } = {},
+  opts: { deep?: boolean; maxFindings?: number; web?: WebSearchLike; log?: (m: string) => void; exclude?: Set<string> } = {},
 ): Promise<SurfResult> {
   const maxFindings = opts.maxFindings ?? 2;
   try {
@@ -484,7 +574,9 @@ export async function surfTopic(
     if (BILI_TOPIC_RE.test(topic)) {
       const vids = biliHot(topic, 20000);
       if (vids.length) {
-        const findings: SurfFinding[] = vids.slice(0, maxFindings).map((v) => ({
+        // 近期已见排除（2026-11-18）：同样先剔掉 7 天内冲过的 BV 号再 slice
+        const freshVids = dropSeen(vids, opts.exclude, (v) => `https://www.bilibili.com/video/${v.bvid}`);
+        const findings: SurfFinding[] = freshVids.slice(0, maxFindings).map((v) => ({
           title: v.title,
           url: `https://www.bilibili.com/video/${v.bvid}`,
           // 官方推荐理由（"百万播放"）比我们编的摘要可信
@@ -499,7 +591,10 @@ export async function surfTopic(
     // 放在 Bing RSS 之前，专治「手冲咖啡」被断成「手」的字典页问题。
     const viaWeb = await searchViaWeb(opts.web, refined, { maxResults: 10, intent, log: opts.log });
     if (viaWeb !== null && viaWeb.length > 0) {
-      const findings: SurfFinding[] = viaWeb.slice(0, maxFindings).map((it) => ({
+      // 近期已见排除（2026-11-18）：slice 之前先剔掉 exclude 命中的条目，
+      // 否则同一 query 每轮端回同一批前 2 条 → 注入块重复刷屏。
+      const freshWeb = dropSeen(viaWeb, opts.exclude, (it) => it.link);
+      const findings: SurfFinding[] = freshWeb.slice(0, maxFindings).map((it) => ({
         title: it.title,
         url: it.link,
         summary: abstract(it.description || it.title),
@@ -523,7 +618,9 @@ export async function surfTopic(
     if (items.length === 0) {
       return { topic, findings: [], layer: 'none', error: 'web 与 Bing RSS 均无结果' };
     }
-    const findings: SurfFinding[] = items.slice(0, maxFindings).map((it) => ({
+    // 近期已见排除（与 web 层同一判据）
+    const freshRss = dropSeen(items, opts.exclude, (it) => it.link);
+    const findings: SurfFinding[] = freshRss.slice(0, maxFindings).map((it) => ({
       title: it.title,
       url: it.link,
       summary: abstract(it.description || it.title),
@@ -565,22 +662,33 @@ export async function runSurfRound(
   // 场景：兴趣里同时有「短视频」，厌恶里后来也记了「短视频」（她自己烦了）——
   // 纯按兴趣权重排序会继续半夜去搜她讨厌的内容，这种自相矛盾在这里掐掉。
   const hated = new Set(self.topDislikes(20).map((d) => d.topic));
-  const topics = self
-    .topInterests(maxTopics + hated.size)
-    .filter((i) => i.weight >= 0.3 && !hated.has(i.topic))
-    .slice(0, maxTopics);
+  // M38（2026-11-18）：排序从纯权重换成轮换分（权重 × 闲置加成），
+  // durable 兴趣不再永久霸位；门槛也从裸权重改为轮换分（见 surfRotationScore）。
+  // topInterests 返回的是**全部未冻结**活跃兴趣（内部自封顶 MAX_ACTIVE_INTERESTS），
+  // 轮换要在完整候选池里比，不能先按权重截断再轮换。
+  const topics = rankSurfTopics(self.topInterests(Number.MAX_SAFE_INTEGER), { maxTopics, hated });
   if (topics.length === 0) {
     opts.log?.('surf: 没有足够权重的兴趣，这轮跳过');
     return [];
   }
   const results: SurfResult[] = [];
   for (const t of topics) {
-    const r = await surfTopic(t.topic, { deep: opts.deep, web: opts.web });
-    opts.log?.(`surf: 「${t.topic}」${r.layer} 拿到 ${r.findings.length} 条${r.error ? `（${r.error}）` : ''}`);
+    // 近期已见排除（2026-11-18）：该话题 7 天内已经存过 findings 的 URL，
+    // 这一轮优先不给重复条目（surfTopic 里 slice 之前过滤）。
+    const exclude = recentSeenUrls(self.snapshot().interests, t.topic);
+    const r = await surfTopic(t.topic, { deep: opts.deep, web: opts.web, exclude });
     // 写回 findings（只存摘要，不存原始正文）
     for (const f of r.findings) {
       self.addFinding(t.topic, `[${f.title}] ${f.summary}`, f.url);
     }
+    // 注入端兜底：dropSeen 的"全剔除退回首条"意味着 r 里可能仍有近期已见条目。
+    // 这种条目 addFinding 已经续过命（重复阅读是投入），但**不进本轮 results** ——
+    // 它唯一的下游是 notifySurfResults 的注入块和 recordSurfWatchings，
+    // 重复注入正是要修的问题本身（68 轮里「清晨咖啡」出现 25 次）。
+    if (exclude.size > 0) {
+      r.findings = r.findings.filter((f) => !exclude.has(findingSourceKey(f.url)));
+    }
+    opts.log?.(`surf: 「${t.topic}」${r.layer} 拿到 ${r.findings.length} 条${r.error ? `（${r.error}）` : ''}`);
     results.push(r);
   }
   return results;

@@ -26,7 +26,7 @@ import { Humanizer } from './humanize.ts';
 import { extractFact, extractTrait } from './fact-extract.ts';
 import { matchesTopic } from './word-match.ts';
 import { pickDiaryMaterial, composeDiaryText, readTurnsOfDay, shouldWriteDiary } from './diary-auto.ts';
-import { createOwnLife, type OwnLifeHandle, type OwnLifeDeliverResult } from './own-life.ts';
+import { createOwnLife, writePromptOverridePart, OWN_LIFE_PROMPT_FILE, type OwnLifeHandle, type OwnLifeDeliverResult } from './own-life.ts';
 import { createScreenWatch, type ScreenWatchHandle, type ScreenWatchOptions, type ScreenNudge, type ScreenDeliverResult } from './screen-watch.ts';
 import { RuntimeConfig } from './runtime-config.ts';
 import type { PersonaConfig } from '../config.ts';
@@ -241,13 +241,19 @@ export class PersonaService {
   public readonly humanizer: Humanizer;
   public readonly budget: ProactiveBudget;
   public ownLife: OwnLifeHandle | undefined;
+  /**
+   * 自由时间提示词覆盖文件（<dataDir>/own-life-prompt.json）。
+   * 每次 fire 热读（own-life.ts loadPromptOverride），改完文件下次生效，不用重载插件；
+   * bot 自己改它用 qq_prompt_edit 工具 → writeOwnLifePrompt()（旧文件自动备份 .bak）。
+   */
+  public readonly ownLifePromptPath: string;
   /** 冲浪定时器（M6：低峰时段上网搜集她感兴趣的内容） */
   private surfTimer: ReturnType<typeof setInterval> | undefined;
   /** 看屏幕观察（M7/R7，默认关；只在 screenWatchEnabled 时存在） */
   public screenWatch: ScreenWatchHandle | undefined;
-  /** 轮内记账暂存（sessionId → 用户/回复文本），turn/end 配对写流水后清除。
+  /** 轮内记账暂存（sessionId → 用户/回复文本 + 到达/首块时刻），turn/end 配对写流水后清除。
    *  刻意不挂 SessionRecord：deliverables 等既有路径对 record 做深比较 */
-  private readonly turnLedger = new Map<string, { user?: string; reply: string; who?: string }>();
+  private readonly turnLedger = new Map<string, { user?: string; reply: string; who?: string; inboundAt?: number; outboundAt?: number }>();
   /**
    * 上一次对话轮结束的时间（M31：用来判断"中间是不是睡了一觉"）。
    *
@@ -318,6 +324,7 @@ export class PersonaService {
   constructor(private readonly deps: PersonaDeps) {
     const { config, dataDir, logger } = deps;
     this.lastTurnFile = path.join(dataDir, 'state', 'last-turn.json');
+    this.ownLifePromptPath = path.join(dataDir, OWN_LIFE_PROMPT_FILE);
     this.webSearch = deps.web;
     this.memory = new Memory({ dir: path.join(dataDir, 'memory') });
     this.diary = new Diary(path.join(dataDir, 'diary'));
@@ -654,9 +661,23 @@ export class PersonaService {
       // 正确语义应该按"睡觉时段"来：深夜到清晨别叫，白天晚上都算她的时间。
       // 现在从配置读（ownLifeQuietHours），这样能按作息调整而不改代码。
       quiet: (this.deps.config.ownLifeQuietHours as [number, number]) ?? [23, 8],
+      // 提示词热覆盖：fire 时每次重读 own-life-prompt.json（改完文件下次生效，不用重载插件）
+      promptOverridePath: this.ownLifePromptPath,
+      warn: (m) => this.deps.logger.warn(`persona: own-life ${m}`),
       log: (m) => this.deps.logger.info(`persona: own-life ${m}`),
     });
     this.ownLife.start();
+  }
+
+  /**
+   * qq_prompt_edit 工具的写路径：把 lines 整段替换进覆盖文件的一端（day/midnight）。
+   * 旧文件自动备份成 own-life-prompt.json.bak（保留最近一份）；
+   * 另一段已有内容原样保留。own-life 每次 fire 热读，写完下一次自由时间即生效。
+   */
+  writeOwnLifePrompt(part: 'day' | 'midnight', lines: string[]): { path: string; dayLines: number; midnightLines: number } {
+    const res = writePromptOverridePart(this.ownLifePromptPath, part, lines);
+    this.deps.logger.info(`persona: own-life 提示词已更新（${part} ${lines.length} 行）→ ${res.path}`);
+    return res;
   }
 
   /**
@@ -861,13 +882,23 @@ export class PersonaService {
   /** inbound：本轮用户消息与其发言人（空串也记，覆盖上一轮残留） */
   noteUserTurn(sessionId: string, text: string, who?: string): void {
     const cur = this.turnLedger.get(sessionId) ?? { reply: '' };
-    this.turnLedger.set(sessionId, { ...cur, user: text, who });
+    // 「时间感」修复：到达时刻在这里记，而不是 flush 时 —— 日界归属、"多久没理她"
+    // 都要按消息到达算（23:50 问、00:10 回完，人感知上是 23:50 那天的事）。
+    this.turnLedger.set(sessionId, { ...cur, user: text, who, inboundAt: Date.now() });
   }
 
   /** outbound：累积本轮已发送回复（截断 300 字，与 memory.logTurn 对齐） */
   noteReplyChunk(sessionId: string, text: string): void {
     const cur = this.turnLedger.get(sessionId) ?? { reply: '' };
-    this.turnLedger.set(sessionId, { user: cur.user, who: cur.who, reply: (cur.reply + ' ' + text).slice(0, 300) });
+    // outboundAt 只在**首块**记一次（整条回复什么时候开始说出去）。
+    // 注意别把 inboundAt 丢了 —— 这里重建对象，漏字段就等于白记。
+    this.turnLedger.set(sessionId, {
+      user: cur.user,
+      who: cur.who,
+      inboundAt: cur.inboundAt,
+      outboundAt: cur.outboundAt ?? Date.now(),
+      reply: (cur.reply + ' ' + text).slice(0, 300),
+    });
     // M11：记下她说的话，等后续判定是否被"接住"（key 用 sessionId 即可，只需同会话判定）
     this.voice.recordUtterance(`${sessionId}#${Date.now()}`, sessionId, text);
 
@@ -931,7 +962,8 @@ export class PersonaService {
     }
     const user = (entry.user ?? '').trim();
     const reply = entry.reply.trim();
-    if (user || reply) this.memory.logTurn({ where, who: entry.who ?? fallbackWho, text: user, reply });
+    // inboundAt 缺失（只走了 noteReplyChunk 的兜底路径）→ logTurn 回落旧行为
+    if (user || reply) this.memory.logTurn({ where, who: entry.who ?? fallbackWho, text: user, reply, inboundAt: entry.inboundAt, outboundAt: entry.outboundAt });
 
     // ── M31 情绪写入点②：她说了话、而且对方也说了话 → 这是"聊起来了" ──
     // 判据用"本轮既有她的回复又有对方的话"，而不是"来了条消息"——
@@ -948,7 +980,8 @@ export class PersonaService {
     this.autoRemember(entry.who ?? fallbackWho, user);
     // ── M30：兴趣续命（同样是硬触发）──
     this.touchMentionedInterests(user);
-    this.autoDiary();
+    // 日记归属日按**消息到达时刻**算（跨午夜 flush 不再把今晚的对话记到明天）
+    this.autoDiary(entry.inboundAt);
   }
 
   /**
@@ -989,11 +1022,15 @@ export class PersonaService {
    *
    * 实测：diary/ 曾长期为 0 个文件 —— "指望模型自觉写"就是不写。
    * 只在"当天还没写过"时触发，避免每条消息都写。
+   *
+   * 「时间感」修复：归属日按 inboundAt（消息到达时刻）算，不用 flush 时刻。
+   * 23:50 发的消息 00:10 才 flush 完，原来会把"今天"算成次日 —— 对话进了
+   * 明天的日记（甚至两边的日记都没有它）。at 缺失回落当前时刻。
    */
-  private autoDiary(): void {
+  private autoDiary(at?: number): void {
     try {
-      // 用显式时区算"今天"（启动时未设 TZ，getDate() 返回 UTC，会差 8 小时）
-      const day = dayInTz(new Date(), DEFAULT_TZ);
+      // 用显式时区算"当天"（启动时未设 TZ，getDate() 返回 UTC，会差 8 小时）
+      const day = dayInTz(new Date(at ?? Date.now()), DEFAULT_TZ);
 
       // 当天已经写过就不重复
       const already = this.diary.recent(30).some((e) => e.day === day);

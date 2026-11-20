@@ -55,7 +55,17 @@ export interface PersonLedger {
 }
 
 export interface TurnRecord {
+  /**
+   * 落盘时刻 = **消息到达时刻**（inboundAt）。
+   * 「时间感」修复：原来 t 记的是回复写完的时刻，23:50 发的消息、00:10
+   * 回复写完会被记到次日 —— 日记日界、「多久没理她」全都跟着错位。
+   * 旧档没有 inboundAt，t 仍是旧的出站时刻，读到不崩。
+   */
   t: number;
+  /** 消息到达时刻（毫秒）。旧档无此字段 */
+  inboundAt?: number;
+  /** 回复首块发出时刻（毫秒）。旧档无此字段 */
+  outboundAt?: number;
   where: string;
   who: string;
   text: string;
@@ -226,10 +236,18 @@ export class Memory {
   }
 
   // ── 共享对话流 ──────────────────────────────────────────────
-  /** 记一轮对话。where 用来说明发生在哪（'c2c' / 'group:xxx'） */
-  logTurn({ where, who, text, reply }: { where: string; who: string; text: string; reply: string }): void {
+  /**
+   * 记一轮对话。where 用来说明发生在哪（'c2c' / 'group:xxx'）。
+   *
+   * `t` 取**消息到达时刻**（inboundAt）：归属日、「多久没理她」都按到达算。
+   * inboundAt 缺失（旧档回放 / 老调用方没传）回落到落盘时刻 —— 与旧行为一致，
+   * 不崩。确需"她什么时候说的"单独读 outboundAt。
+   */
+  logTurn({ where, who, text, reply, inboundAt, outboundAt }: { where: string; who: string; text: string; reply: string; inboundAt?: number; outboundAt?: number }): void {
     const rec: TurnRecord = {
-      t: Date.now(),
+      t: inboundAt ?? Date.now(),
+      ...(typeof inboundAt === 'number' ? { inboundAt } : {}),
+      ...(typeof outboundAt === 'number' ? { outboundAt } : {}),
       where: String(where ?? ''),
       who: String(who ?? '').slice(0, 30),
       text: String(text ?? '').replace(/\s+/g, ' ').trim().slice(0, 300),

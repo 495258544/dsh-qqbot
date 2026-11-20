@@ -20,7 +20,7 @@ import { describe, expect, it, vi, afterEach } from 'vitest';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { SelfProfileService } from './self.ts';
+import { SelfProfileService, findingSourceKey } from './self.ts';
 
 function mkSelf(): { svc: SelfProfileService; dir: string } {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'self-findings-'));
@@ -243,5 +243,59 @@ describe('addFinding · 落盘', () => {
     // 不新增（长度仍是 3 —— 历史重复由上限慢慢自然淘汰，不在这里删数据）
     expect(f).toHaveLength(3);
     expect(f.every((x) => x.at === t)).toBe(true);
+  });
+});
+
+/**
+ * findingSourceKey 的 host 归一化（2026-11-20 窄规则）
+ * ─────────────────────────────────────────────────────────────
+ * 实测同一篇文章以两个 host 变体重复入库：
+ *   https://cloud.tencent.cn/developer/article/2762978?policyId=1004
+ *   https://cloud.tencent.com.cn/developer/article/2762978?policyId=1004
+ * 摘要一字不差。isSame 规定「两边都有 URL 时只比 URL」，而 key 不归一
+ * host 变体，这俩就躲过了去重。
+ *
+ * 修法是窄规则：host 末尾 `.com.cn` 折叠为 `.cn`。**不要泛化**：
+ * xxx.cn 与 xxx.com.cn 可能是两家的不同站点，其他后缀一律原样保留。
+ */
+describe('findingSourceKey · host 变体归一化', () => {
+  it('cloud.tencent.cn 与 cloud.tencent.com.cn 同 path → 同 key（实测重复案例）', () => {
+    const a = findingSourceKey('https://cloud.tencent.cn/developer/article/2762978?policyId=1004');
+    const b = findingSourceKey('https://cloud.tencent.com.cn/developer/article/2762978?policyId=1004');
+    expect(a).toBe(b);
+    expect(a).toBe('cloud.tencent.cn/developer/article/2762978?policyId=1004');
+  });
+
+  it('foo.cn 与 foo.com.cn 同 path → 同 key（规则本身的结果）', () => {
+    expect(findingSourceKey('https://foo.cn/x')).toBe(findingSourceKey('https://foo.com.cn/x'));
+  });
+
+  it('cloud.tencent.cn 与 www.sohu.com → 不同 key（不同站点不误并）', () => {
+    expect(findingSourceKey('https://cloud.tencent.cn/a/1')).not.toBe(
+      findingSourceKey('https://www.sohu.com/a/1'),
+    );
+  });
+
+  // ── 现有判据回归：窄规则不许碰这些 ──
+  it('协议差异（http vs https）→ 同 key', () => {
+    expect(findingSourceKey('http://a.com/x')).toBe(findingSourceKey('https://a.com/x'));
+  });
+
+  it('www. 前缀 → 同 key', () => {
+    expect(findingSourceKey('https://www.a.com/x')).toBe(findingSourceKey('https://a.com/x'));
+  });
+
+  it('尾部斜杠 → 同 key', () => {
+    expect(findingSourceKey('https://a.com/x/')).toBe(findingSourceKey('https://a.com/x'));
+  });
+
+  it('host 大小写 → 同 key', () => {
+    expect(findingSourceKey('https://A.COM/x')).toBe(findingSourceKey('https://a.com/x'));
+  });
+
+  it('path 大小写敏感 → 不同 key（误并就是丢数据）', () => {
+    expect(findingSourceKey('https://a.com/wiki/Coffee')).not.toBe(
+      findingSourceKey('https://a.com/wiki/coffee'),
+    );
   });
 });

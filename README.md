@@ -200,6 +200,29 @@ im-qqbot:
     ownerOpenids: [你的openid]
 ```
 
+### 自由时间提示词覆盖（own-life-prompt.json，热生效）
+
+own-life（静默自我时间）的提示词不用改代码、不用重载插件：
+`<persona.dataDir>/own-life-prompt.json`（默认 `~/.dsh-qqbot/persona/own-life-prompt.json`）：
+
+```json
+{ "day": ["现在是你的时间……", "……"], "midnight": ["半夜了……"] }
+```
+
+每次真的要投递时都会**重新读一次**这个文件，改完下一次自由时间就生效。规则：
+
+| 情况 | 行为 |
+|------|------|
+| 文件不存在 / JSON 坏 / 结构非法 | 回退内置默认，`logger.warn` 一次，不崩 |
+| 缺 `day` 或 `midnight` 字段 | 缺的那段用默认（两段互相独立） |
+| 字段是**空数组** | 合法 = 该段为空菜单（"整段替换"写什么就是什么；own-life 跳过这次投递，`skipped: empty-prompt`） |
+| 字段不是字符串数组 | 整体回退默认 + warn |
+| 拼错的键（如 `days`） | warn 提醒拼写，合法段照常生效 |
+
+bot 自己改这份文件用 `qq_prompt_edit` 工具（`part` + `lines` 整段替换；
+旧文件自动备份成 `own-life-prompt.json.bak`，保留最近一份）。工具层拒绝空 `lines` 防手滑清空，
+手工编辑文件清空是允许的。另有一个不认识的字段会 warn 提醒其余照常。
+
 ### 上游同步巡检（ops，默认关闭）
 
 `src/ops/upstream-watch.ts` 巡检 dsh-qqbot 自己 fork 的上游仓库：抓取上游 tip →
