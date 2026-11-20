@@ -1009,11 +1009,15 @@ describe('buildDeliverText · 完整简报', () => {
   // 不都是抓一两条就开始评么」「真要能像 max 那样综合收集全数据评价，得花不少 token」。
   // 上面那些护栏只解决了「别拿错尺子」，没解决「他懒得逐项看」—— 于是有了 factSheet，
   // 外加下面这几条可以照着验收的硬约束。
-  it('硬约束：每条点评至少引用 2 个不同维度的 fact', () => {
+  it('硬约束：2 个维度是内部核对用，不是输出清单（防「凑数字战报」回潮）', () => {
     const text = buildDeliverText([SIMPLE_ITEM], BRIEFING)
     expect(text).toContain('factSheet')
-    expect(text).toContain('每条点评至少引用 2 个不同维度的 fact')
-    expect(text).toContain('只提 KDA、或整段只有一个数字的回答视为不合格')
+    expect(text).toContain('内部核对，不是输出清单')
+    expect(text).toContain('在心里对照至少 2 个维度')
+    expect(text).toContain('不许把这 2 个维度都念出来')
+    // 2026-11-20 修：这条曾经是「整段只有一个数字视为不合格」，和「先锐评后数据」
+    // 直接打架，模型优先凑数字。回归断言：这条冲突约束必须彻底消失。
+    expect(text).not.toContain('整段只有一个数字的回答视为不合格')
     // 提示里要解释 verdict 三个值分别是什么意思，否则模型看不懂 plus/minus/flat
     expect(text).toContain('verdict')
     expect(text).toContain('plus=这一项明显占优')
@@ -1064,6 +1068,8 @@ describe('buildDeliverText · 完整简报', () => {
   it('硬约束：先锐评后数据，数字只当佐证', () => {
     const text = buildDeliverText([SIMPLE_ITEM], BRIEFING)
     expect(text).toContain('先锐评，后数据')
+    // 第一句必须零数字
+    expect(text).toContain('这一句里不许出现任何数字')
     // 不许数字串开头
     expect(text).toContain('不许拿「正补794、GPM834、建筑伤害13222」这种数字串开头')
     // 数字用量上限
@@ -1072,21 +1078,35 @@ describe('buildDeliverText · 完整简报', () => {
     expect(text).toContain('必须带态度')
     // 报表腔要改写
     expect(text).toContain('别用报表腔')
-    // 正反例都给了，抽象要求模型听不懂
+    // 正反例都给了，抽象要求模型听不懂；且合格例明确点破「开头那句没有任何数字」
     expect(text).toContain('不合格的样子')
     expect(text).toContain('合格的样子')
+    expect(text).toContain('开头那句没有任何数字，是一句吐槽')
   })
 
-  it('简报为空降级路径也要求先锐评后数据', () => {
+  it('简报为空降级路径也要求第一句零数字、先锐评后数据', () => {
     const text = buildDeliverText([SIMPLE_ITEM], { windowHours: 48, generatedAt: QUERY_AT, sessions: [] })
     expect(text).toContain('先锐评，后数据')
+    expect(text).toContain('这一个字里不许有数字')
     expect(text).toContain('一句话里最多带一两个关键数字')
   })
 
-  it('「引用 2 个维度」是防编底线，不许被当成「要多报数字」', () => {
+  it('「2 个维度」是防编底线，不许被当成「要多报数字」', () => {
     const text = buildDeliverText([SIMPLE_ITEM], BRIEFING)
-    expect(text).toContain('这是「不许乱编」的底线')
-    expect(text).toContain('不用凑维度')
+    expect(text).toContain('这条约束的是「不许乱编」')
+    expect(text).toContain('别为了凑维度把点评写回战报')
+  })
+
+  it('输出契约前置在数据 JSON 之前：第一句零数字、数字后置封顶两个', () => {
+    const text = buildDeliverText([SIMPLE_ITEM], BRIEFING)
+    const contractAt = text.indexOf('【怎么写 · 先读这条】')
+    const dataAt = text.indexOf('"matchId":')
+    // 契约必须在数据之前 —— 模型从前往后读，规矩得赶在近万字 JSON 之前立好
+    expect(contractAt).toBeGreaterThan(-1)
+    expect(dataAt).toBeGreaterThan(-1)
+    expect(contractAt).toBeLessThan(dataAt)
+    expect(text).toContain('第一句必须是判断或吐槽，一个阿拉伯数字都不许有')
+    expect(text).toContain('数字只能放到第二句以后当佐证，全段最多两个')
   })
 })
 
