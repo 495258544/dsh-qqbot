@@ -1057,6 +1057,37 @@ describe('buildDeliverText · 完整简报', () => {
     expect(text).toContain('辅助位伤害低、补刀少是正常的')
     expect(text).toContain('别拿核心的尺子量辅助')
   })
+
+  // 2026-11-20 修（群里的原话：「不要只有数据啊，来点锐评」）。
+  // 旧提示只要求「引用 2 个维度的 fact + 把数字说出来」，模型于是逐项念 factSheet，
+  // 出口是战报不是锐评。这里钉死「先锐评后数据」的顺序要求和正反例。
+  it('硬约束：先锐评后数据，数字只当佐证', () => {
+    const text = buildDeliverText([SIMPLE_ITEM], BRIEFING)
+    expect(text).toContain('先锐评，后数据')
+    // 不许数字串开头
+    expect(text).toContain('不许拿「正补794、GPM834、建筑伤害13222」这种数字串开头')
+    // 数字用量上限
+    expect(text).toContain('数字是佐证不是主角')
+    // 必须带态度
+    expect(text).toContain('必须带态度')
+    // 报表腔要改写
+    expect(text).toContain('别用报表腔')
+    // 正反例都给了，抽象要求模型听不懂
+    expect(text).toContain('不合格的样子')
+    expect(text).toContain('合格的样子')
+  })
+
+  it('简报为空降级路径也要求先锐评后数据', () => {
+    const text = buildDeliverText([SIMPLE_ITEM], { windowHours: 48, generatedAt: QUERY_AT, sessions: [] })
+    expect(text).toContain('先锐评，后数据')
+    expect(text).toContain('一句话里最多带一两个关键数字')
+  })
+
+  it('「引用 2 个维度」是防编底线，不许被当成「要多报数字」', () => {
+    const text = buildDeliverText([SIMPLE_ITEM], BRIEFING)
+    expect(text).toContain('这是「不许乱编」的底线')
+    expect(text).toContain('不用凑维度')
+  })
 })
 
 describe('tickQuery · 完整简报落盘与投递', () => {
