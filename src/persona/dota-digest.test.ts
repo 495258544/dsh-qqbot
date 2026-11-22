@@ -134,6 +134,8 @@ function cfg(over: Partial<DotaDigestConfig> = {}): DotaDigestConfig {
     deliverHours: [10, 12],
     maxItems: 2,
     maxPerDay: 1,
+    pollEnabled: false,
+    pollIntervalMs: 3600 * 1000,
     matchLimit: 10,
     recentHours: 48,
     tz: TZ,
@@ -1376,5 +1378,161 @@ describe('全账号查询失败 · 不锁死当天（回归 2026-11-14 整天静
     expect(await h.handle.tickQuery(QUERY_AT)).toEqual({ ran: false, count: 0, reason: 'no-highlight' })
     expect(exists(h.dataDir)).toBe(true)
     expect(await h.handle.tickQuery(QUERY_AT + 60_000)).toEqual({ ran: false, count: 0, reason: 'already-prepared' })
+  })
+})
+
+// ── 统一轮询（2026-11-22）：一小时一次，按解析状态分流 ────────
+describe('tickPoll · 统一轮询与状态分流', () => {
+  const pollCfg = { pollEnabled: true, pollIntervalMs: 3600_000 };
+  const bindings = () => [
+    { openid: 'u_a', alias: '小周', steamId: STEAM_A },
+    { openid: 'u_b', alias: '芋头', steamId: STEAM_B },
+  ];
+  const forms = () => ({
+    1: mkForm(1, [mkMatch({ matchId: 701, at: QUERY_AT - 2 * 3600e3, win: true, hero: '影魔', k: 9, d: 2, a: 11 })]),
+    2: mkForm(2, [mkMatch({ matchId: 701, at: QUERY_AT - 2 * 3600e3, win: true, hero: '斧王', k: 7, d: 3, a: 20 })]),
+  });
+  const session = (matchId: number, parsed: boolean): DigestBriefing['sessions'][number] => ({
+    matchId,
+    when: '3月10日 01:30',
+    gameMode: '技能征召',
+    durationMin: 40,
+    parsed,
+    boundPlayers: [
+      { name: '小周', hero: '影魔', kda: '9/2/11', win: true, abilities: parsed ? [{ name: 'Shadowraze', nameZh: '毁灭阴影（影压）', uses: 40 }] : [] },
+    ],
+  });
+
+  it('pollEnabled=false → 直接跳过（旧行为不变）', async () => {
+    const h = harness({ bindings, forms: forms() })
+    const r = await h.handle.tickPoll(QUERY_AT)
+    expect(r).toEqual({ ran: false, ready: 0, pending: 0, sent: false, people: 0, reason: 'disabled' })
+  })
+
+  it('节流：1 小时内重复触发 → too-soon，不打第二次 API', async () => {
+    let calls = 0
+    const h = harness({
+      config: pollCfg,
+      bindings,
+      forms: forms(),
+      buildBriefing: async () => { calls += 1; return { windowHours: 48, generatedAt: QUERY_AT, sessions: [session(701, true)] } },
+    })
+    const first = await h.handle.tickPoll(QUERY_AT)
+    expect(first.ran).toBe(true)
+    const second = await h.handle.tickPoll(QUERY_AT + 30 * 60_000)
+    expect(second.reason).toBe('too-soon')
+    expect(calls).toBe(1)
+  })
+
+  it('有解析好的场 → 触发小深点评，投递文本含锐评契约', async () => {
+    const h = harness({
+      config: pollCfg,
+      bindings,
+      forms: forms(),
+      buildBriefing: async () => ({ windowHours: 48, generatedAt: QUERY_AT, sessions: [session(701, true)] }),
+    })
+    const r = await h.handle.tickPoll(QUERY_AT)
+    expect(r).toMatchObject({ ran: true, ready: 1, pending: 0, sent: true, people: 2 })
+    expect(h.deliverCalls).toHaveLength(1)
+    expect(h.deliverCalls[0]?.text).toContain('先读这条')
+    // 投递成功才记去重：同一场 1 小时后再 poll 不再当新场
+    expect(h.handle.snapshot().digest?.briefing?.sessions).toHaveLength(1)
+  })
+
+  it('只有半解析场 → 只申请解析、不点评（sent=false）', async () => {
+    const h = harness({
+      config: pollCfg,
+      bindings,
+      forms: forms(),
+      buildBriefing: async () => ({ windowHours: 48, generatedAt: QUERY_AT, sessions: [session(701, false)] }),
+    })
+    const r = await h.handle.tickPoll(QUERY_AT)
+    expect(r).toMatchObject({ ran: true, ready: 0, pending: 1, sent: false })
+    expect(h.deliverCalls).toHaveLength(0)
+  })
+
+  it('窗口内没场次 → no-matches，不做动作', async () => {
+    const h = harness({
+      config: pollCfg,
+      bindings,
+      forms: { 1: mkForm(1, []), 2: mkForm(2, []) },
+    })
+    const r = await h.handle.tickPoll(QUERY_AT)
+    expect(r.reason).toBe('no-matches')
+    expect(h.deliverCalls).toHaveLength(0)
+  })
+
+  it('全账号查询失败 → 本轮不动作 + 冷却，不打简报', async () => {
+    let calls = 0
+    const h = harness({
+      config: pollCfg,
+      bindings,
+      forms: { 1: new Error('挂了'), 2: new Error('挂了') },
+      buildBriefing: async () => { calls += 1; return undefined },
+    })
+    const first = await h.handle.tickPoll(QUERY_AT)
+    expect(first.reason).toBe('all-queries-failed')
+    // 全失败当轮不打简报；1 小时间隔内再触发也被节流挡住（too-soon 先于 cooldown）
+    const second = await h.handle.tickPoll(QUERY_AT + 60_000)
+    expect(second.reason).toBe('too-soon')
+    expect(calls).toBe(0)
+  })
+
+  it('背景场：带已播过的解析好旧场 → 提示词里标注可选引用、不许当新场', async () => {
+    // 同一个 dataDir：先在 700 上播报一次，把它写进去重历史；下一轮 700 就成"已播过的旧场"。
+    // 主 harness 的 forms 里同时有 700（旧）+701（新），poll 应把 700 归为背景、701 归为新场。
+    const bothForms = () => ({
+      1: mkForm(1, [
+        mkMatch({ matchId: 701, at: QUERY_AT - 2 * 3600e3, win: true, hero: '影魔', k: 9, d: 2, a: 11 }),
+        mkMatch({ matchId: 700, at: QUERY_AT - 5 * 3600e3, win: false, k: 1, d: 9, a: 2 }),
+      ]),
+      2: mkForm(2, []),
+    })
+    const dir = tmpDir()
+    // 第一轮：只让 700 进 New（模拟当时只有这一场），播报后记历史
+    const seed = harness({
+      config: pollCfg, dataDir: dir, bindings, forms: bothForms(),
+      buildBriefing: async () => ({ windowHours: 48, generatedAt: QUERY_AT, sessions: [session(700, true)] }),
+    })
+    await seed.handle.tickPoll(QUERY_AT - 3600_000)
+
+    // 第二轮：同一个目录、新的句柄（模拟下一小时）。buildBriefing 按传入 ids 返回对应场。
+    const delivered: string[] = []
+    const h = harness({
+      config: pollCfg, dataDir: dir, bindings, forms: bothForms(),
+      buildBriefing: async (ids) => ({
+        windowHours: 48,
+        generatedAt: QUERY_AT,
+        sessions: ids.includes(701) ? [session(701, true)] : [session(700, true)],
+      }),
+      deliver: async (_g, text) => { delivered.push(text); return { ok: true } },
+    })
+    const r = await h.handle.tickPoll(QUERY_AT)
+    expect(r.sent).toBe(true)
+    const text = delivered[0] ?? ''
+    expect(text).toMatch(/之前已经聊过的旧场|旧场怎么用/)
+    expect(text).toContain('不许把旧场当成新场重新点评')
+  })
+
+  it('背景场半解析 → 被过滤掉，不进提示词', () => {
+    const bg = [session(700, false)]
+    const kept = bg.filter((s) => s.parsed)
+    expect(kept).toHaveLength(0)
+    // 提示词函数对无背景的 briefing 不产出旧场段
+    const text = buildDeliverText([], { windowHours: 48, generatedAt: QUERY_AT, sessions: [session(701, true)] })
+    expect(text).not.toMatch(/之前已经聊过的旧场/)
+  })
+
+  it('skipBudget=true：poll 投递明确要求不占主动消息额度', async () => {
+    const opts: Array<{ skipBudget?: boolean } | undefined> = []
+    const h = harness({
+      config: pollCfg,
+      bindings,
+      forms: forms(),
+      buildBriefing: async () => ({ windowHours: 48, generatedAt: QUERY_AT, sessions: [session(701, true)] }),
+      deliver: async (_g, _t, o) => { opts.push(o); return { ok: true } },
+    })
+    await h.handle.tickPoll(QUERY_AT)
+    expect(opts).toEqual([{ skipBudget: true }])
   })
 })

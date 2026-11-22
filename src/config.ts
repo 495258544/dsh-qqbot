@@ -172,8 +172,12 @@ export interface PersonaConfig {
   dotaDigestDeliverHours: [number, number];
   /** 摘要最多保留几条亮点，默认 2 */
   dotaDigestMaxItems: number;
-  /** 每天最多投递几次，默认 1 */
+  /** 每天最多投递几次，默认 1（poll 模式下不生效） */
   dotaDigestMaxPerDay: number;
+  /** 统一轮询模式（默认关）：每小时查一次，按解析状态分流；打开后替代定时投递与凌晨预热 */
+  dotaDigestPollEnabled: boolean;
+  /** 统一轮询间隔(ms)，默认 1 小时 */
+  dotaDigestPollIntervalMs: number;
   /** 每人查最近几局，默认 10 */
   dotaDigestMatchLimit: number;
   /** 只分析最近这么多小时内打过的人，默认 24（只要新鲜的） */
@@ -440,7 +444,9 @@ export const ConfigSchema: Schema<ImQQBotConfig> = Schema.object({
     dotaDigestQueryHours: Schema.transform(Schema.array(Schema.number()), (v) => activeHoursOf(v)).default([10, 12] as [number, number]).description('查询时段 [起,止)（小时），默认 [10,12)：看昨晚到今早的战绩，这个点基本都解析完了'),
     dotaDigestDeliverHours: Schema.transform(Schema.array(Schema.number()), (v) => activeHoursOf(v)).default([10, 12] as [number, number]).description('投递时段 [起,止)（小时），默认 [10,12)：大家刚起/摸鱼，打扰最小'),
     dotaDigestMaxItems: Schema.number().default(2).description('摘要里最多保留几条亮点（默认 2，避免一条消息报一堆人）'),
-    dotaDigestMaxPerDay: Schema.number().default(1).description('每天最多投递几次（默认 1）'),
+    dotaDigestMaxPerDay: Schema.number().default(1).description('每天最多投递几次（默认 1；poll 模式下不生效，点评不限每天次数，只按场次 3 天去重）'),
+    dotaDigestPollEnabled: Schema.boolean().default(false).description('统一轮询模式（默认关）：每小时查一次战绩，解析好的场触发小深点评、半解析场触发解析申请、没有就不动；打开后替代旧的定时投递与凌晨预热'),
+    dotaDigestPollIntervalMs: Schema.natural().default(3600 * 1000).description('统一轮询间隔(ms)，默认 1 小时'),
     dotaDigestMatchLimit: Schema.number().default(10).description('每人查最近几局（默认 10）'),
     dotaDigestRecentHours: Schema.number().default(24).description('只分析最近这么多小时内打过 Dota 的人（默认 24：只播新鲜的，避免拿旧战绩炒冷饭）'),
     dotaKeywords: Schema.array(Schema.string()).default([]).description('判断「这群人在聊 Dota」的关键词表。留空 = 用内置默认表（已含 dota/刀塔/打刀/开黑/上号/天梯/战绩 等）。不同群叫法不同时可在这里覆盖'),
@@ -488,6 +494,8 @@ export const ConfigSchema: Schema<ImQQBotConfig> = Schema.object({
     dotaDigestDeliverHours: [10, 12],
     dotaDigestMaxItems: 2,
     dotaDigestMaxPerDay: 1,
+    dotaDigestPollEnabled: false,
+    dotaDigestPollIntervalMs: 3600 * 1000,
     dotaDigestMatchLimit: 10,
     dotaDigestRecentHours: 24,
     dotaKeywords: [],

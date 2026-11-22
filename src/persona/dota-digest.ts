@@ -104,6 +104,17 @@ export interface DotaDigestConfig {
   /** 只保留「最近这么多小时内打过」的人，默认 48（覆盖"当天或前一天"） */
   recentHours: number;
   tz: string;
+  /**
+   * 统一轮询模式（2026-11-22 用户要求）：每 pollIntervalMs 跑一次，替代旧的
+   * 「查询/投递两阶段 + 凌晨预热」。按解析状态分流：
+   *   - 有 parsed=true 的完整简报 → 触发小深评论（不限每天次数，仍按场次去重）
+   *   - 只有 parsed=false 的半解析场 → 触发解析申请（buildBriefing 重拉时已请求 OpenDota）
+   *   - 都没有 → 不做动作
+   * 默认 false 保持旧行为；bootstrap 在 profile 打开后接线启用。
+   */
+  pollEnabled: boolean;
+  /** 轮询间隔(ms)，默认 1 小时 */
+  pollIntervalMs: number;
 }
 
 export type DigestKind = 'lose-streak' | 'win-streak' | 'carry' | 'bad-game' | 'grinder';
@@ -243,10 +254,19 @@ export interface DigestBriefing {
   generatedAt: number;
   /** 按开赛时间倒序，同一场只出现一次 */
   sessions: DigestBriefSession[];
+  /**
+   * 背景场次（2026-11-22 用户要求「点评时可结合前面几场」）：之前已播过的场。
+   *
+   * 只用来让模型判断趋势/延续性（连败、状态起伏），**不当成新场重新点评**：
+   * 提示词里明确「可选引用、别逐场念、别当新场」。为空/缺席时行为与之前完全一样。
+   */
+  background?: DigestBriefSession[];
 }
 
 /** 数据给足但别把上下文撑爆；提示词里要求最多挑 3 场来点评 */
 const MAX_BRIEF_SESSIONS = 8;
+/** 点评时可参考的「之前播过的旧场」数量上限（2026-11-22，避免上下文膨胀） */
+const BACKGROUND_SESSIONS = 3;
 
 /** 落盘的 briefing 只做形状校验：坏掉就降级到旧提示词，不让今天播报挂掉 */
 function isBriefing(v: unknown): v is DigestBriefing {
@@ -368,8 +388,12 @@ export interface DotaDigestDeps {
   primaryAlias: (alias: string | undefined) => string;
   /** 选目标群：返回群 openid 或 null（bootstrap 注入，按 Dota 相关度评分） */
   pickGroup: () => string | null;
-  /** 把一段「内部提示」投递进群会话；ok=false 表示跳过（不算失败） */
-  deliver: (groupId: string, text: string) => Promise<{ ok: boolean; reason?: string }>;
+  /**
+   * 把一段「内部提示」投递进群会话；ok=false 表示跳过（不算失败）。
+   * skipBudget：战绩主动点评不占每日主动消息额度（2026-11-22 用户要求），
+   * 由 bootstrap 据此跳过 budget 计数；「对方正在聊天不插话」的护栏仍然保留。
+   */
+  deliver: (groupId: string, text: string, opts?: { skipBudget?: boolean }) => Promise<{ ok: boolean; reason?: string }>;
   /**
    * 预取某一局的详情（bootstrap 注入 DotaService.matchDetail 的精简投影）。
    *
@@ -393,6 +417,20 @@ export interface DotaDigestDeps {
   now?: () => number;
 }
 
+/** 统一轮询的一轮结果：动作分流一目了然，便于日志与测试断言 */
+export interface PollResult {
+  ran: boolean;
+  reason?: string;
+  /** 本轮解析好、可以交给小深点评的场次数 */
+  ready: number;
+  /** 本轮仍是半解析、已触发解析申请的场次数 */
+  pending: number;
+  /** 是否真的投递了点评 */
+  sent: boolean;
+  /** 聚到一起的绑定群友人数（决定要不要查） */
+  people: number;
+}
+
 export interface DotaDigestHandle {
   start(): void;
   stop(): void;
@@ -400,6 +438,13 @@ export interface DotaDigestHandle {
   tickQuery(nowTs?: number): Promise<{ ran: boolean; count: number; reason?: string }>;
   /** 跑一次「投递」；不在投递时段/未到日期/已投递则跳过 */
   tickDeliver(nowTs?: number): Promise<{ sent: boolean; reason?: string }>;
+  /**
+   * 统一轮询（poll 模式专属）：查窗口内场次 → 按解析状态分流。
+   * - parsed=true 的场 → 落摘要并投递小深点评（每场仍按 3 天去重）
+   * - 只有 parsed=false → 已触发解析申请，本轮不点评
+   * - 没有新场 → 静默
+   */
+  tickPoll(nowTs?: number): Promise<PollResult>;
   /** 当前摘要快照（诊断用） */
   snapshot(): { digest: DigestFile | null };
   /** 手动清空摘要（诊断用） */
@@ -427,6 +472,8 @@ export const DEFAULT_DIGEST_CONFIG: DotaDigestConfig = {
   matchLimit: 10,
   recentHours: 24,
   tz: DEFAULT_TZ,
+  pollEnabled: false,
+  pollIntervalMs: HOUR_MS,
 };
 
 // ── 小工具 ──────────────────────────────────────────────────
@@ -507,7 +554,7 @@ function isDigestItem(v: unknown): v is DigestItem {
  * 不再由脚本替她挑「唯一一局」，但一天仍只有一次投递、最多挑 3 场。
  */
 function buildBriefingText(briefing: DigestBriefing): string {
-  return [
+  const lines = [
     '[内部·你刚把群里这几个人最近两天的战绩全翻了一遍，下面是按比赛去重整理好的完整数据，别照抄，也别复述本提示]',
     // 2026-11-20 二次修：前一次（6946f2f）加了「先锐评后数据」却没治住，群里仍是数据串。
     // 根因是同一份提示里还留着「整段只有一个数字视为不合格，重写」——这是可机械验收的硬指标，
@@ -518,9 +565,21 @@ function buildBriefingText(briefing: DigestBriefing): string {
     '【怎么写 · 先读这条】你发群里的这段话：**第一句必须是判断或吐槽，一个阿拉伯数字都不许有**；'
     + '数字只能放到第二句以后当佐证，全段最多两个。先甩态度、再摆事实 —— '
     + '像朋友在群里损人，不像战报、不像客服。别写小标题、别分点、别 @ 人、别复述本提示。',
-    `窗口：最近 ${briefing.windowHours} 小时 · 共 ${briefing.sessions.length} 场（同一场只出现一次，按开赛时间倒序）`,
+    `窗口：最近 ${briefing.windowHours} 小时 · 共 ${briefing.sessions.length} 场新场（同一场只出现一次，按开赛时间倒序）`,
     '数据：',
     JSON.stringify(briefing.sessions, null, 2),
+
+    // 2026-11-22 加（用户原话：「评论的时候可以结合前面几场的数据进行评论（可选）」）。
+    // background 是**之前已经播过的场**，只给你判断趋势做参考（连败/起伏/状态回暖），
+    // 不是这轮的新场。硬护栏：不许把它们当新场再评一遍、不许逐场念数据、可选引用。
+    ...(briefing.background !== undefined && briefing.background.length > 0 ? [
+      `另外，下面 ${briefing.background.length} 场是**之前已经聊过的旧场**（按开赛时间倒序）：`,
+      JSON.stringify(briefing.background, null, 2),
+      '旧场怎么用（可选）：只在能串出一句趋势时才提，比如「连着三局都在送，这局终于像样了」；'
+      + '**不许把旧场当成新场重新点评、不许逐场报它们的数字、不许凑数念一遍**。'
+      + '旧场数据不全或和本轮无关就完全不提，主角永远是上面的新场。',
+    ] : []),
+
     '这是今天唯一一次主动播报，把想说的都写在这一段里；用你自己的话，像老朋友随口损人，不是客服播报，也不是战报。别 @ 人，别念数据，别复述本提示。',
     `你自己决定点评哪几场、哪几个人：最多挑 3 场，可以串成一段，也可以只挑最有意思的一两个说；别把 ${briefing.sessions.length} 场全念一遍。`,
     // 2026-11-20 修（群里的原话：「不要只有数据啊，来点锐评」）。
@@ -597,7 +656,8 @@ function buildBriefingText(briefing: DigestBriefing): string {
     ...(briefing.sessions.length > 0 && briefing.sessions.every((s) => !s.parsed)
       ? ['这一批场次都还没解析完：随口说句谁打了、输赢和 KDA 就行，别提技能、别编。']
       : []),
-  ].join('\n');
+  ];
+  return lines.join('\n');
 }
 
 /** 拼「内部提示」文本（不含 openid，不含 @） */
@@ -1345,15 +1405,245 @@ export function createDotaDigest(deps: DotaDigestDeps): DotaDigestHandle {
     }
   }
 
+  // ── 统一轮询（2026-11-22）：一小时一次，按解析状态分流 ────
+  /**
+   * 用户原话：「频率提高到 1 小时一次；有解析好的数据 → 触发小深评论；
+   * 有没解析的数据 → 触发解析申请；都没有就不做动作」。
+   *
+   * 与旧的 tickQuery/tickDeliver 两阶段的关系：
+   *   - 这里不复用它们的时段/日期/maxPerDay 语义（那是「隔夜 + 一天一次」）；
+   *   - 复用同一套查询（queryForm → 本地战绩库 → buildBriefing）和投递（pickGroup → deliver）；
+   *   - 去重仍走 recentlyBriefed（同一场 3 天不复读），所以「不限次数」不会变成复读机。
+   *
+   * 「解析申请」由 buildBriefing 天然完成：它对 parsed=false / schema 过旧的场会
+   * 重新走 matchDetail → matchRaw，请求 OpenDota 入队解析。所以只要本轮查到半解析场，
+   * 就已经在申请解析了 —— 不需要额外再打一次接口。
+   */
+  let lastPollAt = 0;
+  let polling = false;
+
+  async function tickPoll(nowTs?: number): Promise<PollResult> {
+    const idle: PollResult = { ran: false, ready: 0, pending: 0, sent: false, people: 0 };
+    if (!cfg.enabled || !cfg.pollEnabled) return { ...idle, reason: 'disabled' };
+
+    const now = Number(nowTs ?? nowFn()) || nowFn();
+    // 一小时节流：手动/定时重复触发不会连打 OpenDota
+    if (now - lastPollAt < cfg.pollIntervalMs) {
+      return { ...idle, reason: 'too-soon' };
+    }
+    if (now < allFailedUntil) return { ...idle, reason: 'query-cooldown' };
+    if (polling) return { ...idle, reason: 'busy' };
+    polling = true;
+    lastPollAt = now;
+
+    try {
+      reloadFromDisk();
+
+      // ── 1. 查所有绑定账号，合并进本地战绩库 ──────────────────
+      const rows: MatchCacheRow[] = [];
+      let queried = 0;
+      let failed = 0;
+      const seen = new Set<string>();
+      const seenSteam = new Set<string>();
+      for (const b of bindings()) {
+        const openid = String(b.openid ?? '').trim();
+        const steamId = String(b.steamId ?? '').trim();
+        if (openid === '' || steamId === '') continue;
+        if (seen.has(openid)) continue;
+        seen.add(openid);
+        if (seenSteam.has(steamId)) continue;
+        seenSteam.add(steamId);
+        const accountId = deps.toAccountId(steamId);
+        if (accountId === null) continue;
+        let form: DigestForm;
+        try {
+          form = await queryForm(accountId, cfg.matchLimit);
+          queried += 1;
+        } catch (err) {
+          failed += 1;
+          logger.warn(
+            `dota-poll: ${openid} 战绩查询失败（跳过该人）: ${err instanceof Error ? err.message : String(err)}`,
+          );
+          continue;
+        }
+        if (form.empty) continue;
+        const last = form.matches[0];
+        const lastAt = last === undefined ? 0 : msOfIso(last.startedAt);
+        if (lastAt <= 0 || now - lastAt > cfg.recentHours * HOUR_MS) continue;
+        const alias = deps.primaryAlias(typeof b.alias === 'string' ? b.alias : '') || FALLBACK_ALIAS;
+        const cutoff = now - cfg.recentHours * HOUR_MS;
+        for (const m of form.matches) {
+          const at = msOfIso(m.startedAt);
+          if (at <= 0 || at < cutoff) continue;
+          rows.push({
+            matchId: m.matchId,
+            startTime: Math.floor(at / 1000),
+            durationSec: m.durationSec,
+            gameMode: m.gameMode,
+            player: {
+              accountId,
+              alias,
+              heroId: m.heroId,
+              heroName: m.heroName,
+              kills: m.kills,
+              deaths: m.deaths,
+              assists: m.assists,
+              win: m.win,
+            },
+          });
+        }
+      }
+
+      if (queried === 0 && failed > 0) {
+        allFailedUntil = now + ALL_FAILED_COOLDOWN_MS;
+        logger.warn(
+          `dota-poll: ${failed} 个账号战绩查询全部失败，本轮不动作，`
+          + `${Math.round(ALL_FAILED_COOLDOWN_MS / 60000)} 分钟后自动重试`,
+        );
+        return { ...idle, reason: 'all-queries-failed' };
+      }
+      deps.matchCache?.upsertMany(rows);
+
+      // ── 2. 窗口内按 matchId 去重，排除最近已播过的场 ──────────
+      const startById = new Map<number, number>();
+      for (const r of rows) {
+        const prev = startById.get(r.matchId);
+        if (prev === undefined || r.startTime > prev) startById.set(r.matchId, r.startTime);
+      }
+      const allIds = [...startById.entries()]
+        .sort((a, b) => b[1] - a[1])
+        .map(([id]) => id);
+      const freshIds = allIds.filter((id) => !recentlyBriefed(id, now)).slice(0, MAX_BRIEF_SESSIONS);
+      // 背景场：最近播过的场（本地已有解析好的简报，复用不额外打网络），给点评做趋势参考。
+      // 用户说「可选」——取数失败/为空都不影响主场点评，所以单独一个 try。
+      const backgroundIds = allIds.filter((id) => recentlyBriefed(id, now)).slice(0, BACKGROUND_SESSIONS);
+      const people = new Set(rows.map((r) => r.player.accountId)).size;
+
+      if (rows.length === 0 || freshIds.length === 0) {
+        const reason = rows.length === 0 ? 'no-matches' : 'all-already-briefed';
+        logger.info(`dota-poll: ${reason === 'no-matches' ? '窗口内没有新场' : '窗口内的场次最近都播过了'}，本轮不做动作`);
+        return { ...idle, people, reason };
+      }
+
+      // ── 3. 构建完整简报（parsed=false / 旧 schema 的场会在此重新请求 = 解析申请）──
+      let sessions: DigestBriefSession[] = [];
+      let background: DigestBriefSession[] = [];
+      if (deps.buildBriefing !== undefined) {
+        try {
+          const built = await deps.buildBriefing(freshIds, cfg.recentHours);
+          sessions = built?.sessions ?? [];
+          // 背景场单独构建：失败就当没有，绝不影响主场点评
+          if (backgroundIds.length > 0) {
+            try {
+              const bg = await deps.buildBriefing(backgroundIds, cfg.recentHours);
+              background = (bg?.sessions ?? []).filter((s) => !freshIds.includes(s.matchId));
+            } catch (err) {
+              logger.warn(`dota-poll: 背景场取数失败（忽略，照常点评新场）: ${err instanceof Error ? err.message : String(err)}`);
+            }
+          }
+        } catch (err) {
+          logger.warn(
+            `dota-poll: 简报取数失败（本轮不动作，下轮重试）: ${err instanceof Error ? err.message : String(err)}`,
+          );
+          return { ...idle, people, reason: 'briefing-error' };
+        }
+      }
+      if (sessions.length === 0) {
+        logger.info('dota-poll: 简报为空（群友场次不足或取数失败），本轮不做动作');
+        return { ...idle, people, reason: 'no-sessions' };
+      }
+
+      // ── 4. 分流：解析好的 → 评论；半解析的 → 解析申请（已在第 3 步触发）──
+      const ready = sessions.filter((s) => s.parsed);
+      const pending = sessions.filter((s) => !s.parsed);
+      // 背景场只留解析好的（半解析旧场拿给模型只会诱导脑补）
+      background = background.filter((s) => s.parsed);
+      const result: PollResult = {
+        ran: true,
+        ready: ready.length,
+        pending: pending.length,
+        sent: false,
+        people,
+      };
+
+      if (pending.length > 0) {
+        logger.info(
+          `dota-poll: ${pending.length} 场仍是半解析，已请求 OpenDota 入队解析`
+          + `（下轮解析好后再点评）`,
+        );
+      }
+      if (ready.length === 0) {
+        logger.info('dota-poll: 只有半解析场，本轮只申请解析、不点评');
+        return result;
+      }
+
+      // ── 5. 有解析好的场 → 落摘要 + 投递点评（不限每天次数，仍按场次去重）──
+      const briefing: DigestBriefing = {
+        windowHours: cfg.recentHours,
+        generatedAt: now,
+        sessions: ready,
+        ...(background.length > 0 ? { background } : {}),
+      };
+      let groupId: string | null = null;
+      try {
+        groupId = pickGroup();
+      } catch (err) {
+        logger.warn(`dota-poll: 选群失败: ${err instanceof Error ? err.message : String(err)}`);
+        return { ...result, reason: 'no-group' };
+      }
+      if (groupId === null || groupId === '') {
+        if (noGroupWarnDay !== dayInTz(new Date(now), cfg.tz)) {
+          noGroupWarnDay = dayInTz(new Date(now), cfg.tz);
+          logger.warn('dota-poll: 选不到能发的群，本轮点评发不出去（场次留着下轮重试）');
+        }
+        return { ...result, reason: 'no-group' };
+      }
+      if (delivering) return { ...result, reason: 'busy' };
+      delivering = true;
+      try {
+        const text = buildDeliverText([], briefing);
+        // 战绩主动点评不占每日主动消息额度（用户要求）；peer-active 护栏由 bootstrap 保留
+        const res = await deliver(groupId, text, { skipBudget: true });
+        if (!res.ok) {
+          logger.info(`dota-poll: 投递被跳过${res.reason ?? ''}，场次留着下轮重试`);
+          return { ...result, reason: res.reason ?? 'deliver-skip' };
+        }
+        // 投递成功才记去重历史：同一场 3 天内不再进简报
+        rememberSent([], ready.map((s) => s.matchId), now);
+        digest = {
+          version: 1,
+          queriedAt: now,
+          forDay: dayInTz(new Date(now), cfg.tz),
+          items: [],
+          briefing,
+          deliveredAt: now,
+          deliveredDay: dayInTz(new Date(now), cfg.tz),
+        };
+        save();
+        logger.info(`dota-poll: 已投递 ${ready.length} 场解析好的战绩点评到群 ${groupId}`);
+        return { ...result, sent: true };
+      } catch (err) {
+        logger.warn(`dota-poll: 投递异常: ${err instanceof Error ? err.message : String(err)}`);
+        return { ...result, reason: 'deliver-error' };
+      } finally {
+        delivering = false;
+      }
+    } finally {
+      polling = false;
+    }
+  }
+
   // ── 定时器 ────────────────────────────────────────────────
 
   let queryTimer: NodeJS.Timeout | null = null;
   let deliverTimer: NodeJS.Timeout | null = null;
   let queryBoot: NodeJS.Timeout | null = null;
   let deliverBoot: NodeJS.Timeout | null = null;
+  let pollTimer: NodeJS.Timeout | null = null;
+  let pollBoot: NodeJS.Timeout | null = null;
 
   function start(): void {
-    if (queryTimer !== null || deliverTimer !== null) return;
+    if (queryTimer !== null || deliverTimer !== null || pollTimer !== null) return;
 
     // 同 dataDir 的旧实例先停掉：热重载后不留双份定时器
     const reg = instances();
@@ -1367,6 +1657,24 @@ export function createDotaDigest(deps: DotaDigestDeps): DotaDigestHandle {
       }
     }
     reg.set(key, { stop });
+
+    if (cfg.pollEnabled) {
+      // 统一轮询：每 pollIntervalMs 跑一次，首次 90 秒后跑（别和开机抢资源）
+      pollTimer = setInterval(() => {
+        void tickPoll().catch(() => {});
+      }, cfg.pollIntervalMs);
+      pollTimer.unref?.();
+      pollBoot = setTimeout(() => {
+        void tickPoll().catch(() => {});
+      }, FIRST_DELAY_MS);
+      pollBoot.unref?.();
+      logger.info(
+        `dota-poll: 已武装 · 每 ${Math.round(cfg.pollIntervalMs / 60000)} 分钟一次`
+        + ' · 解析好的场→点评 / 半解析→申请解析 / 没有→不动'
+        + ' · 同一场 3 天不复读（点评不限每天次数）',
+      );
+      return;
+    }
 
     queryTimer = setInterval(() => {
       void tickQuery().catch(() => {});
@@ -1401,10 +1709,14 @@ export function createDotaDigest(deps: DotaDigestDeps): DotaDigestHandle {
     if (deliverTimer !== null) clearInterval(deliverTimer);
     if (queryBoot !== null) clearTimeout(queryBoot);
     if (deliverBoot !== null) clearTimeout(deliverBoot);
+    if (pollTimer !== null) clearInterval(pollTimer);
+    if (pollBoot !== null) clearTimeout(pollBoot);
     queryTimer = null;
     deliverTimer = null;
     queryBoot = null;
     deliverBoot = null;
+    pollTimer = null;
+    pollBoot = null;
     // 从跨实例登记表里撤掉自己，避免新实例停一个已经停过的旧实例
     const reg = instances();
     const key = path.resolve(dataDir);
@@ -1417,6 +1729,7 @@ export function createDotaDigest(deps: DotaDigestDeps): DotaDigestHandle {
     stop,
     tickQuery,
     tickDeliver,
+    tickPoll,
     snapshot: () => ({
       digest: digest === null
         ? null

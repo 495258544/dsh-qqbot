@@ -500,6 +500,8 @@ export async function bootstrapGateway(
         deliverHours: config.persona.dotaDigestDeliverHours,
         maxItems: config.persona.dotaDigestMaxItems,
         maxPerDay: config.persona.dotaDigestMaxPerDay,
+        pollEnabled: config.persona.dotaDigestPollEnabled,
+        pollIntervalMs: config.persona.dotaDigestPollIntervalMs,
         matchLimit: config.persona.dotaDigestMatchLimit,
         recentHours: config.persona.dotaDigestRecentHours,
         tz: 'Asia/Shanghai',
@@ -571,7 +573,7 @@ export async function bootstrapGateway(
         if (remembered.length === 0) return null;
         return pickBestGroup(activity, remembered, bound);
       },
-      deliver: async (groupId, text) => {
+      deliver: async (groupId, text, opts) => {
         const live = manager.peek('group', groupId);
         // 群里久没人说话时内存里没有会话 —— 主动拉起一个。
         // 这和 own-life 11-01 踩的是同一个坑（peek 只看内存，会话早被回收），
@@ -580,35 +582,49 @@ export async function bootstrapGateway(
         if (record === undefined) return { ok: false, reason: 'no-live-session' };
         // 「对方刚在聊天时不插话」只对**本来就在**的会话判：
         // 刚拉起的会话 lastActivity 就是 now，拿它判会把每一次播报都判成 peer-active。
+        // 这条护栏即使 skipBudget 也保留 —— 用户要的是「不占次数」，不是「打断聊天」。
         if (live !== undefined && Date.now() - (live.lastActivity ?? 0) < 10 * 60 * 1000) {
           return { ok: false, reason: 'peer-active' };
         }
-        const gate = svc.budget.allow(groupId);
-        if (!gate.ok) return { ok: false, reason: `budget:${gate.reason}` };
-        svc.budget.recordProactive(groupId);
+        // 战绩主动点评不占每日主动消息额度（2026-11-22 用户要求）。
+        // 只跳过预算检查/计数；会话活跃护栏（上面）照常生效。
+        if (opts?.skipBudget !== true) {
+          const gate = svc.budget.allow(groupId);
+          if (!gate.ok) return { ok: false, reason: `budget:${gate.reason}` };
+          svc.budget.recordProactive(groupId);
+        }
         record.agent.followup(createUserMessage({
           content: [{ type: 'text', text }],
           source: { kind: 'user' },
         }));
-        logger.info(`dota-digest: 战绩播报已投递群 ${groupId}`);
+        logger.info(`dota-digest: 战绩播报已投递群 ${groupId}${opts?.skipBudget === true ? '（不占主动消息额度）' : ''}`);
         return { ok: true };
       },
     });
     dotaDigest.start();
 
     const kwCount = config.persona.dotaKeywords.length;
-    logger.info(
-      `dota-digest: 已武装（查 ${config.persona.dotaDigestQueryHours[0]}:00-${config.persona.dotaDigestQueryHours[1]}:00`
-      + ` → 次日 ${config.persona.dotaDigestDeliverHours[0]}:00-${config.persona.dotaDigestDeliverHours[1]}:00`
-      + `，关键词 ${kwCount > 0 ? `${kwCount} 个（自定义）` : '内置默认（含「打刀」）'}）`,
-    );
+    if (config.persona.dotaDigestPollEnabled) {
+      logger.info(
+        `dota-digest: 统一轮询模式 · 每 ${Math.round(config.persona.dotaDigestPollIntervalMs / 60000)} 分钟一次`
+        + `（解析好的场→点评 / 半解析→申请解析 / 没有→不动，凌晨预热已停用）`,
+      );
+    } else {
+      logger.info(
+        `dota-digest: 已武装（查 ${config.persona.dotaDigestQueryHours[0]}:00-${config.persona.dotaDigestQueryHours[1]}:00`
+        + ` → 次日 ${config.persona.dotaDigestDeliverHours[0]}:00-${config.persona.dotaDigestDeliverHours[1]}:00`
+        + `，关键词 ${kwCount > 0 ? `${kwCount} 个（自定义）` : '内置默认（含「打刀」）'}）`,
+      );
+    }
   }
 
   // ── OpenDota 解析预热（独立于 digest 开关：白天的单场查询同样受益）──
   // OpenDota 的解析是按需的：一场比赛不被请求就永远停在"半解析"
   // （KDA 有、技能/团战没有）。凌晨 3 点把昨天所有人打过的局请求一遍，
   // 触发 OpenDota 入队解析，白天查"这局拿了什么技能"才拿得到。
-  if (dota && config.dota.warmup?.enabled !== false) {
+  // 2026-11-22：统一轮询模式打开后，解析申请由每轮 poll 里的 buildBriefing 承担
+  // （半解析场会被重新请求），凌晨这套就停掉，避免两套机制重复请求同一批场。
+  if (dota && config.dota.warmup?.enabled !== false && !config.persona.dotaDigestPollEnabled) {
     dotaWarmup = createDotaWarmup({
       config: config.dota.warmup ?? {},
       // 与 ability-records.json 同目录：热重载换代码后新实例照样读得到当天进度
