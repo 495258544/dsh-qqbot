@@ -147,6 +147,10 @@ export function setupMiddlewares(
     const persona = manager.persona;
     bot.use(personaWakeGate(persona, logger, {
       fromBotAtMeAllowed: config.persona.fromBotAtMeAllowed,
+      // 「群聊仅回复 @机器人」是用户显式配置，优先级高于唤醒判定。
+      // 之前只把它传给了 mentionGate，而 wakeByPersona 一开就把
+      // requireMentionInGroup 覆写成 false，配置等于作废。
+      atOnly: config.requireMention === true,
       // 群友的称呼，三个来源：
       //   1. runtime.json 的 otherNames —— 改完即时生效，加名字不用重启；
       //   2. 配置里的 persona.otherNames —— 没绑 Steam 的群友也能填；

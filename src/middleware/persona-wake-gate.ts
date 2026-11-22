@@ -84,6 +84,16 @@ export function personaWakeGate(
      */
     extraNames?: () => string[];
     /**
+     * 「群聊仅回复 @机器人」硬门控（对应配置 requireMention=true）。
+     *
+     * 之前 middleware-setup 把它算成 `wakeByPersona ? false : requireMention`，
+     * 于是 persona 唤醒一开，用户配的「只回 @」就被 Waker 的兴趣/名字/概率
+     * 判定悄悄覆盖 —— 表现就是「明明设了只回 @，她还在接别人的话」。
+     * 这个开关让配置回到配置：为 true 时只认 @，外加「刚 @ 过她的同一个人
+     * 继续说话」（避免每句都要重新 @）。
+     */
+    atOnly?: boolean;
+    /**
      * 自己人的 openid（owner + bot + runtime.json 的 selfIds）。
      * 这些账号的群昵称不该进「别人名字」表：群成员 openid ≠ 私聊 owner id，
      * 只过滤 ownerOpenids 修不掉「主人自称群昵称被当成在叫别人」。
@@ -141,6 +151,37 @@ export function personaWakeGate(
       persona.memory.touch(msg.senderId, { name: msg.senderName });
       await next();
       return;
+    }
+
+    // ── 用户配了「群聊仅回复 @机器人」：硬门控优先于唤醒判定 ──
+    // 只认两件事：① 这条 @ 了她；② 刚 @ 过她的同一个人接着说（延续话头）。
+    // 带附件的非 @ 消息仍放行下载，但只归档不回复 —— 手机端没法同时 @ + 发图，
+    // 直接 stop 会丢图，这是既有痛点（见文件头注释）。
+    if (scope === 'group' && opts.atOnly === true) {
+      const atMe = ctx.state.mention?.wasMentioned === true;
+      if (!atMe) {
+        const continueWithMe = waker !== undefined && waker.isSpeakerActive(key, msg.senderId);
+        if (continueWithMe) {
+          // 延续话头：直接放行下游。不能只"不拦"——后面的 shouldWake
+          // 还会按概率判一遍，非 @ 消息照样会被 persona:not-woken 拦掉。
+          waker?.wake(key, msg.senderId);
+          persona.memory.touch(msg.senderId, { name: msg.senderName });
+          await next();
+          return;
+        }
+        const hasAttachments = (msg.attachments?.length ?? 0) > 0;
+        if (!hasAttachments) {
+          logger.debug(`persona: at-only stop ${key}`);
+          ctx.stop('persona:at-only');
+          return;
+        }
+        const st = ctx.state as Record<string, unknown>;
+        st.collectOnly = true;
+        st.awaitAttachmentFetch = true;
+        logger.debug(`persona: at-only collect-only ${key}`);
+        await next();
+        return;
+      }
     }
 
     if (waker) {
