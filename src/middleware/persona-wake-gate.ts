@@ -94,6 +94,11 @@ export function personaWakeGate(
      */
     atOnly?: boolean;
     /**
+     * atOnly 模式下，是否允许「刚 @ 过她的同一个人接着说话」继续唤醒她。
+     * 默认 true（不打断话头）；false = 每条消息都必须重新 @。
+     */
+    atOnlyFollowup?: boolean;
+    /**
      * 自己人的 openid（owner + bot + runtime.json 的 selfIds）。
      * 这些账号的群昵称不该进「别人名字」表：群成员 openid ≠ 私聊 owner id，
      * 只过滤 ownerOpenids 修不掉「主人自称群昵称被当成在叫别人」。
@@ -160,7 +165,9 @@ export function personaWakeGate(
     if (scope === 'group' && opts.atOnly === true) {
       const atMe = ctx.state.mention?.wasMentioned === true;
       if (!atMe) {
-        const continueWithMe = waker !== undefined && waker.isSpeakerActive(key, msg.senderId);
+        const continueWithMe = opts.atOnlyFollowup !== false
+          && waker !== undefined
+          && waker.isSpeakerActive(key, msg.senderId);
         if (continueWithMe) {
           // 延续话头：直接放行下游。不能只"不拦"——后面的 shouldWake
           // 还会按概率判一遍，非 @ 消息照样会被 persona:not-woken 拦掉。

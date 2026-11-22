@@ -271,6 +271,11 @@ export interface ImQQBotConfig {
   cwd?: string;
   /** 是否启用群消息 @mention 门控 */
   requireMention: boolean;
+  /**
+   * 仅 @ 模式下，刚 @ 过她的同一个人是否还能继续唤醒她（默认 true）。
+   * false = 群里每条消息都必须重新 @，连话头也不延续 —— 最严格的模式。
+   */
+  requireMentionFollowup: boolean;
   /** 群聊额外 system prompt */
   groupPrompt?: string;
   /** 私聊额外 system prompt */
@@ -339,6 +344,7 @@ export const ConfigSchema: Schema<ImQQBotConfig> = Schema.object({
   preset: Schema.string().description('Agent preset id'),
   cwd: Schema.string().description('Agent working directory (default ~/.dsh-qqbot/workspace)'),
   requireMention: Schema.boolean().default(true).description('群聊是否需要@bot触发'),
+  requireMentionFollowup: Schema.boolean().default(true).description('仅 @ 模式下，刚 @ 过她的同一个人是否还能继续唤醒（true=可接着聊；false=每条都要重新 @）'),
   groupPrompt: Schema.string().description('群聊额外system prompt'),
   directPrompt: Schema.string().description('私聊额外system prompt'),
   textChunkLimit: Schema.number().default(4500).description('单条消息最大字符数'),

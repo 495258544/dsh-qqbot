@@ -981,8 +981,8 @@ describe('buildDeliverText · 完整简报', () => {
 
   it('有简报时给完整场次数据，让她自己决定点评哪几场', () => {
     const text = buildDeliverText([SIMPLE_ITEM], BRIEFING)
-    expect(text).toContain('"matchId": 9085591620')
-    expect(text).toContain('"nameZh": "毁灭阴影（影压）"')
+    expect(text).toContain('"matchId":9085591620')
+    expect(text).toContain('"nameZh":"毁灭阴影（影压）"')
     expect(text).toContain('"boundPlayers"')
     expect(text).toContain('你自己决定点评哪几场')
     expect(text).toContain('最多挑 3 场')
@@ -1033,8 +1033,13 @@ describe('buildDeliverText · 完整简报', () => {
     expect(text).toContain('plus=这一项明显占优')
     expect(text).toContain('minus=这一项明显不行')
     expect(text).toContain('flat=无异常或无数据')
-    // findings 的 evidence 是 lines 下标，得点明，不然模型不知道能指回去
-    expect(text).toContain('evidence 就是 lines 的下标')
+    // 2026-11-22 瘦身：findings 是 lines 的下标组合，序列化时已剔除，
+    // 提示词改为只解释 lines（模型用 verdict 判断即可）。
+    expect(text).toContain('factSheet.lines 是脚本逐项算好的对照表')
+    expect(text).not.toContain('"findings"')
+    // 紧凑 JSON：不带缩进，省约 40% 体积
+    expect(text).toContain('"matchId":9085591620')
+    expect(text).not.toContain('"matchId": 9085591620')
   })
 
   it('硬约束：minus 是真问题、plus 是可夸的、flat 别硬编故事', () => {
@@ -1063,7 +1068,7 @@ describe('buildDeliverText · 完整简报', () => {
     const text = buildDeliverText([SIMPLE_ITEM], BRIEFING)
     expect(text).toContain('"factSheet"')
     expect(text).toContain('占队内最高 100%')
-    expect(text).toContain('"verdict": "plus"')
+    expect(text).toContain('"verdict":"plus"')
   })
 
   it('保留「辅助位伤害低是正常的」这条老护栏（别为了新约束把它删掉）', () => {
@@ -1115,7 +1120,7 @@ describe('buildDeliverText · 完整简报', () => {
     expect(text).toContain('别自己从 lineup 里挑人凑')
     // 数据真的序列化进提示词了（不是只有文案约束）
     expect(text).toContain('"standouts"')
-    expect(text).toContain('"heroName": "痛苦女王"')
+    expect(text).toContain('"heroName":"痛苦女王"')
     expect(text).toContain('全场乱杀级击杀')
   })
 

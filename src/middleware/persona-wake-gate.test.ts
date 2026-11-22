@@ -59,7 +59,7 @@ function makePersona(o: { speakerActive?: boolean; isActive?: boolean } = {}) {
 }
 
 async function run(
-  gateOpts: { atOnly?: boolean },
+  gateOpts: { atOnly?: boolean; atOnlyFollowup?: boolean },
   ctxOpts: CtxOpts,
   personaOpts: { speakerActive?: boolean; isActive?: boolean } = {},
 ) {
@@ -104,5 +104,15 @@ describe('personaWakeGate · 群聊仅回复 @机器人', () => {
     const { calls } = await run({ atOnly: false }, { mentioned: false }, { isActive: true });
     expect(calls.stopped).toBeUndefined();
     expect(calls.passed).toBe(true);
+  });
+
+  it('atOnlyFollowup=false → 同一个人接着说也必须重新 @', async () => {
+    const { calls } = await run(
+      { atOnly: true, atOnlyFollowup: false },
+      { mentioned: false, senderId: 'U2' },
+      { speakerActive: true },
+    );
+    expect(calls.stopped).toBe('persona:at-only');
+    expect(calls.passed).toBe(false);
   });
 });

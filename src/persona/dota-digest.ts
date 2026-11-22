@@ -553,6 +553,38 @@ function isDigestItem(v: unknown): v is DigestItem {
  * → 关联群友 → 交给她自己决定点评哪几场」。这里给的是**去重后的全部场次**，
  * 不再由脚本替她挑「唯一一局」，但一天仍只有一次投递、最多挑 3 场。
  */
+/**
+ * 投递文本瘦身（2026-11-22，用户原话：「一次给小深的消息会不会太多」）。
+ *
+ * 实测：2 场新场 + 3 场背景 = 50,975 字符 ≈ 3.2 万 token。两处白占体积：
+ *   ① 缩进 2 空格 —— 给人看的，模型不需要；
+ *   ② factSheet.findings —— 内容就是 lines 的下标组合，与 lines 重复约 15%。
+ * 这里去掉缩进、序列化时剔除 findings。background 另有更狠的精简（slimBackground）。
+ */
+function slimJson(value: unknown): string {
+  // replacer 返回 undefined 即删除该键
+  return JSON.stringify(value, (key, v) => (key === 'findings' ? undefined : v));
+}
+
+/**
+ * 背景旧场的用途只有「判断趋势」（连败/起伏/状态回暖），
+ * 不需要技能、装备、逐条 fact —— 完整简报一场 6k 字符，3 场就吃掉 2 万。
+ */
+function slimBackground(list: DigestBriefSession[]) {
+  return list.map((s) => ({
+    matchId: s.matchId,
+    when: s.when,
+    durationMin: s.durationMin,
+    players: s.boundPlayers.map((p) => ({
+      name: p.name,
+      hero: p.hero,
+      kda: p.kda,
+      win: p.win,
+      role: p.role,
+    })),
+  }));
+}
+
 function buildBriefingText(briefing: DigestBriefing): string {
   const lines = [
     '[内部·你刚把群里这几个人最近两天的战绩全翻了一遍，下面是按比赛去重整理好的完整数据，别照抄，也别复述本提示]',
@@ -567,14 +599,14 @@ function buildBriefingText(briefing: DigestBriefing): string {
     + '像朋友在群里损人，不像战报、不像客服。别写小标题、别分点、别 @ 人、别复述本提示。',
     `窗口：最近 ${briefing.windowHours} 小时 · 共 ${briefing.sessions.length} 场新场（同一场只出现一次，按开赛时间倒序）`,
     '数据：',
-    JSON.stringify(briefing.sessions, null, 2),
+    slimJson(briefing.sessions),
 
     // 2026-11-22 加（用户原话：「评论的时候可以结合前面几场的数据进行评论（可选）」）。
     // background 是**之前已经播过的场**，只给你判断趋势做参考（连败/起伏/状态回暖），
     // 不是这轮的新场。硬护栏：不许把它们当新场再评一遍、不许逐场念数据、可选引用。
     ...(briefing.background !== undefined && briefing.background.length > 0 ? [
-      `另外，下面 ${briefing.background.length} 场是**之前已经聊过的旧场**（按开赛时间倒序）：`,
-      JSON.stringify(briefing.background, null, 2),
+      `另外，下面 ${briefing.background.length} 场是**之前已经聊过的旧场**（只留了谁、什么英雄、什么战绩）：`,
+      JSON.stringify(slimBackground(briefing.background)),
       '旧场怎么用（可选）：只在能串出一句趋势时才提，比如「连着三局都在送，这局终于像样了」；'
       + '**不许把旧场当成新场重新点评、不许逐场报它们的数字、不许凑数念一遍**。'
       + '旧场数据不全或和本轮无关就完全不提，主角永远是上面的新场。',
@@ -634,10 +666,9 @@ function buildBriefingText(briefing: DigestBriefing): string {
     // 不都是抓一两条就开始评么」）。上面那些护栏解决的是「别拿错尺子」，
     // 但没解决「他懒得逐项看」—— 一对一错两条已经吃过的教训都是这么来的
     // （0/7/25 被叫混子、赏金伤害垫底被当主输出骂）。这里直接改成可验收的格式要求。
-    'boundPlayers[].factSheet 是脚本逐项算好的对照表：lines 每一行 = 一个维度（经济/输出/'
+    'boundPlayers[].factSheet.lines 是脚本逐项算好的对照表：每一行 = 一个维度（经济/输出/'
     + '补刀/视野/团战/目标/死亡/出装/分路）+ 一句纯数据 + verdict（plus=这一项明显占优，'
-    + 'minus=这一项明显不行，flat=无异常或无数据）；findings 是挂了下标的结论候选，'
-    + 'evidence 就是 lines 的下标。',
+    + 'minus=这一项明显不行，flat=无异常或无数据）。',
     '**内部核对，不是输出清单**：fact 是给你自己判断用的 —— 下结论前在心里对照至少 2 个维度'
     + '（例如「经济和视野」），确保判断站得住、不是只凭 KDA 瞎说；'
     + '但**不许把这 2 个维度都念出来**，说出口的全段最多一两个数字。'
@@ -648,7 +679,7 @@ function buildBriefingText(briefing: DigestBriefing): string {
     + '就是没读到，照实说没数据，不许当成打得差；laneRole / 分路 显示未知就直说未知，别猜。',
     '陈述结论必须能指回 factSheet 的具体某一行，别自己发明因果：'
     + '「他补刀少所以输了」「经济低是因为没支援」这种数据里没有的因果链，一句都不许写。'
-    + '想下结论就先用 findings 里的某条（它已经挂好 evidence 了），或者拿 fact 里的数字当佐证 —— '
+    +     '想下结论就用 verdict=minus/plus 的那几行，或者拿 fact 里的数字当佐证 —— '
     + '别把数字本身当结论念出来。',
     'abilityBasis=levels 时 uses 是加点次数、不是施放次数，别写成「按了 N 次」。',
     '指标别混：teamRank 是队内经济排名（1=最富），damageRank 才是队内输出排名（1=伤害最高），heroDamage 是伤害数值，gpm/xpm/netWorth 都是经济，teamfight 是参团次数。',
