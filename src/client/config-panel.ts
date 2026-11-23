@@ -35,6 +35,7 @@ interface AccessControlWire {
 /** GET 回显的生效配置（appSecret 已剔除） */
 type ConfigWire = {
   requireMention?: boolean;
+  requireMentionFollowup?: boolean;
   streaming?: boolean;
   showToolResults?: boolean;
   debug?: boolean;
@@ -589,6 +590,14 @@ export function ConfigPanel(props?: { bindPhase?: string }): ReactNode {
       help: '开启后，机器人仅可回复 @机器人的群聊消息',
       onChange: (v) => { patch('requireMention', v); },
     }),
+    // 只在「仅回复 @」开启时有意义：它决定 @ 过一次之后还要不要每句都 @。
+    (form.requireMention ?? true)
+      ? createElement(SwitchRow, {
+          label: '仅 @ 时可连续唤醒', checked: form.requireMentionFollowup ?? true,
+          help: '开启后，刚 @ 过机器人的同一个人可以接着聊（不用每句重新 @）；关闭则每条消息都要重新 @',
+          onChange: (v) => { patch('requireMentionFollowup', v); },
+        })
+      : null,
     createElement(SwitchRow, {
       label: '流式输出', checked: form.streaming ?? true,
       help: '回复内容分段实时推送到聊天',
