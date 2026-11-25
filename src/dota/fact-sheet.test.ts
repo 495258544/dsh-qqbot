@@ -475,3 +475,23 @@ describe('buildFactSheet · 定位判不出时不硬下结论', () => {
     expect(eco?.fact).toContain('定位未判出');
   });
 });
+
+// 2026-11-25：定位判不出时，补刀行要能让人自己判断档次。
+// 线上 9104947359 的宙斯原来只说「队内最多 373，占全队 15%」——那是别人多少，
+// 不是他排第几；补上「队内第 X/Y」才看得出他在五个人里的位置。
+describe('buildFactSheet · 定位未判出时的补刀信息量', () => {
+  it('role=unknown 的补刀行带「队内第 N/5」（不是只给队内最多）', () => {
+    const base = fixture();
+    const raw: RawMatchDetail = {
+      ...base,
+      players: base.players.map((p) => (p.account_id === ME ? { ...p, gold_per_min: 470, last_hits: 150 } : p)),
+    };
+    const form = buildMatchDetailForm(raw, ME, itemName);
+    if (form.player.role !== 'unknown') return; // 前提：这一档确实判不出定位
+    const lh = lineOf(form.factSheet, '补刀');
+    expect(lh?.fact).toContain('队内第');
+    expect(lh?.fact).toContain('/5');
+    expect(lh?.fact).toContain('占全队');
+    expect(lh?.verdict).toBe('flat'); // 不判优劣仍然成立
+  });
+});

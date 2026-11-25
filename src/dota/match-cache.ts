@@ -175,8 +175,12 @@ const FILE_VERSION = 1;
  * 判断「这人这局怎么样」，旧简报会带着旧口径一起被复用，所以必须让老的失效重取。
  * 4 → 5（2026-11-20）：加了 standouts（突出的路人/对手），老简报没有这个字段，
  * 得重取一次才能补上，否则路人锐评永远缺席。
+ * 5 → 6（2026-11-25）：定位判定口径改了 —— 核心必须有正补占比 >= 18% 且排进队内
+ * 前三高（旧口径 12% + 经济前三，把正补只占 13% 的水晶室女判成了核心）。
+ * 简报里带着 role / roleReason / factSheet，旧的那份会继续把辅助说成核心，
+ * 所以必须整批作废重取（9104947359 那局的误判就是这么锁在缓存里的）。
  */
-export const BRIEF_SCHEMA = 5;
+export const BRIEF_SCHEMA = 6;
 
 function isFinitePositive(v: unknown): v is number {
   return typeof v === 'number' && Number.isFinite(v) && v > 0;

@@ -1540,4 +1540,22 @@ describe('tickPoll · 统一轮询与状态分流', () => {
     await h.handle.tickPoll(QUERY_AT)
     expect(opts).toEqual([{ skipBudget: true }])
   })
+
+  it('投递被 peer-active 跳过 → 10 分钟就能重试，不用白等一小时', async () => {
+    const h = harness({
+      config: pollCfg,
+      bindings,
+      forms: forms(),
+      buildBriefing: async () => ({ windowHours: 48, generatedAt: QUERY_AT, sessions: [session(701, true)] }),
+      deliver: async () => ({ ok: false, reason: 'peer-active' }),
+    })
+    const first = await h.handle.tickPoll(QUERY_AT)
+    expect(first.reason).toBe('peer-active')
+    // 5 分钟后还在重试窗口内
+    const five = await h.handle.tickPoll(QUERY_AT + 5 * 60_000)
+    expect(five.reason).toBe('too-soon')
+    // 11 分钟后允许再试（常规节流是 1 小时，这里必须放行）
+    const eleven = await h.handle.tickPoll(QUERY_AT + 11 * 60_000)
+    expect(eleven.reason).not.toBe('too-soon')
+  })
 })

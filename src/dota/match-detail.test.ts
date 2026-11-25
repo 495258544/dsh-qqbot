@@ -589,3 +589,170 @@ describe('pickStandouts · 突出的路人/对手，绝不认错人', () => {
   });
 });
 
+
+// ── 定位判定（2026-11-25）────────────────────────────────────
+//
+// 线上误判 match 9104947359：水晶室女 正补只占全队 13%、队内经济第 3，
+// 却被判成 core；群里当场吐槽「冰女和宙斯不是辅助吗，补刀伤害低点正常的」。
+// 根因是旧规则 `worthRank <= 3 && lhShare >= 0.12` —— 只看自己经济排前三，
+// 不看横向补刀占比。下面这批用例锁住新口径：
+//   · 核心 = 正补占比 >= 18% 且排进队内前三高（占位满 3 个后不再判核心）；
+//   · 经济排名不再单独作为核心依据；
+//   · 插眼字段为 null（没读到）必须在 reason 里写明「插眼数据缺失」，
+//     而真的是 0 个眼（字段有值）时不许写缺失。
+describe('inferRole · 定位判定（横向比补刀，2026-11-25）', () => {
+  /** 造一份「五个人正补占比可控」的局：lh 直接给，占比自己算 */
+  const teamOf = (specs: Array<{ acc: number; lh: number; gpm: number; obs?: number | null; sen?: number | null }>): RawMatchDetail => {
+    const players = specs.map((s, i) => player({
+      slot: i,
+      account: s.acc,
+      hero: HERO.SF,
+      k: 5,
+      d: 5,
+      a: 10,
+      gpm: s.gpm,
+      lh: s.lh,
+      worth: s.gpm * 40,
+      ...(s.obs !== undefined ? { obs: s.obs } : {}),
+      ...(s.sen !== undefined ? { sen: s.sen } : {}),
+    }));
+    return fixture({ players });
+  };
+
+  it('正补占全队 13% + 队内经济第 3 → 不是 core（冰女那局的复现）', () => {
+    // 占比：373/1380=27%、361/1380=26%、311/1380=22.5%、178/1380=12.9%、157/1380=11.4%
+    // 第三个 acc=40 的人经济排第 3（gpm 606 高于 500/567），旧规则会把他判成 core
+    const raw = teamOf([
+      { acc: 1, lh: 373, gpm: 673 },
+      { acc: 2, lh: 361, gpm: 710 },
+      { acc: 3, lh: 311, gpm: 606 },
+      { acc: 4, lh: 178, gpm: 500 },
+      { acc: 5, lh: 157, gpm: 620 },
+    ]);
+    // 12.9% 那位：经济第 4、补刀占比也不够 → 不是 core
+    const low = buildMatchDetailForm(raw, 4, itemName);
+    expect(low.player.role).not.toBe('core');
+    expect(low.player.lastHits).toBe(178);
+    // 11.4% 那位经济第 3（620 只低于 710/673）—— 旧规则 `worthRank<=3 && lhShare>=0.12`
+    // 会放他过，新规则必须先看补刀占比
+    const third = buildMatchDetailForm(raw, 5, itemName);
+    expect(third.player.role).not.toBe('core');
+    // 前提确认：他确实是队内经济第 3
+    expect(third.teamRank.netWorth).toBe(3);
+  });
+
+  it('正补占全队 13% + 队内经济第 3 → 明确判成 unknown/support，reason 提到补刀占比', () => {
+    // 直接复刻 9104947359 黑洞方：388/1320=29%、307/1320=23%、253/1320=19%、197/1320=15%、175/1320=13%
+    const raw = teamOf([
+      { acc: 10, lh: 388, gpm: 606 },
+      { acc: 11, lh: 253, gpm: 441 },
+      { acc: 12, lh: 307, gpm: 552 },
+      { acc: 13, lh: 175, gpm: 493 },
+      { acc: 14, lh: 197, gpm: 455 },
+    ]);
+    const cm = buildMatchDetailForm(raw, 13, itemName);
+    expect(cm.player.role).not.toBe('core');
+    expect(cm.player.roleReason).toContain('13%');
+  });
+
+  it('正补占全队 20% + 队内经济第 1 → core', () => {
+    const raw = teamOf([
+      { acc: 20, lh: 400, gpm: 700 },
+      { acc: 21, lh: 300, gpm: 600 },
+      { acc: 22, lh: 260, gpm: 500 },
+      { acc: 23, lh: 160, gpm: 450 },
+      { acc: 24, lh: 140, gpm: 400 },
+    ]);
+    // 400/1260 = 31.7%
+    const f = buildMatchDetailForm(raw, 20, itemName);
+    expect(f.player.role).toBe('core');
+    expect(f.player.roleReason).toContain('队内经济第 1');
+  });
+
+  it('只两人过线时，第三人补刀 13% + 经济第 3 → 不为 core（经济排名不再单独构成核心）', () => {
+    // 这就是 9104947359 那局的黑洞方：29%/23% 两人已占位，剩下的 19%/15%/13% 里
+    // 13% 那位经济排第 3（辅助装烧钱），旧规则靠 `worthRank <= 3` 把他判成核心。
+    const raw = teamOf([
+      { acc: 10, lh: 388, gpm: 606 }, // 29%
+      { acc: 11, lh: 307, gpm: 441 }, // 23%
+      { acc: 12, lh: 253, gpm: 552 }, // 19% ← 第三高，仍算核心（三号位）
+      { acc: 13, lh: 175, gpm: 500 }, // 13% ← 经济第 3，但不许判核心
+      { acc: 14, lh: 197, gpm: 455 }, // 15%
+    ]);
+    const cm = buildMatchDetailForm(raw, 13, itemName);
+    expect(cm.teamRank.netWorth).toBe(3);
+    expect(cm.player.role).not.toBe('core');
+  });
+
+  it('第三人 lhShare 20% 且经济第 3 → 仍是 core（一到三号位都算核心，2026-11-25 用户口径）', () => {
+    // 用户补充的领域常识：一到五号位是 核心/中单/劣势路/半辅助/纯辅助，
+    // 前三个都算核心 —— 所以核心位最多 3 个，第三个过线的人不该被挡。
+    const raw = teamOf([
+      { acc: 30, lh: 500, gpm: 700 }, // 35%
+      { acc: 31, lh: 420, gpm: 650 }, // 30%
+      { acc: 32, lh: 285, gpm: 600 }, // 20%
+      { acc: 33, lh: 130, gpm: 500 }, // 9%
+      { acc: 34, lh: 90, gpm: 450 },  // 6%
+    ]);
+    const third = buildMatchDetailForm(raw, 32, itemName);
+    expect(third.player.role).toBe('core');
+    expect(third.teamRank.netWorth).toBe(3);
+  });
+
+  it('第四个 lhShare 过 18% 的人，核心位已满 → 不为 core', () => {
+    // 五个都过 18%：31%、25%、21%、19%、13%？→ 取前三个占位，第四个（19%）被挡
+    const raw = teamOf([
+      { acc: 40, lh: 380, gpm: 700 }, // 30.4%
+      { acc: 41, lh: 300, gpm: 650 }, // 24.0%
+      { acc: 42, lh: 270, gpm: 600 }, // 21.6%
+      { acc: 43, lh: 240, gpm: 550 }, // 19.2% ← 第四个高的，被占位规则挡掉
+      { acc: 44, lh: 60, gpm: 400 },  // 4.8%
+    ]);
+    const fourth = buildMatchDetailForm(raw, 43, itemName);
+    expect(fourth.player.role).not.toBe('core');
+    // 但前三高的都是 core，规则自洽
+    expect(buildMatchDetailForm(raw, 40, itemName).player.role).toBe('core');
+    expect(buildMatchDetailForm(raw, 42, itemName).player.role).toBe('core');
+  });
+
+  it('插眼字段为 null → reason 含「插眼数据缺失」', () => {
+    const raw = teamOf([
+      { acc: 50, lh: 400, gpm: 700, obs: null, sen: null },
+      { acc: 51, lh: 300, gpm: 600, obs: null, sen: null },
+      { acc: 52, lh: 260, gpm: 500, obs: null, sen: null },
+      { acc: 53, lh: 160, gpm: 450, obs: null, sen: null },
+      { acc: 54, lh: 140, gpm: 400, obs: null, sen: null },
+    ]);
+    const f = buildMatchDetailForm(raw, 50, itemName);
+    expect(f.player.role).toBe('core');
+    expect(f.player.roleReason).toContain('插眼数据缺失');
+  });
+
+  it('插眼真的是 0（字段有值）→ reason 不写「缺失」', () => {
+    const raw = teamOf([
+      { acc: 60, lh: 400, gpm: 700, obs: 0, sen: 0 },
+      { acc: 61, lh: 300, gpm: 600, obs: 0, sen: 0 },
+      { acc: 62, lh: 260, gpm: 500, obs: 0, sen: 0 },
+      { acc: 63, lh: 160, gpm: 450, obs: 0, sen: 0 },
+      { acc: 64, lh: 140, gpm: 400, obs: 0, sen: 0 },
+    ]);
+    const f = buildMatchDetailForm(raw, 60, itemName);
+    expect(f.player.role).toBe('core');
+    expect(f.player.roleReason).not.toContain('缺失');
+  });
+
+  it('unknown 时 reason 同时写明「插眼数据缺失」和补刀占比（别只说夹在中间）', () => {
+    const raw = teamOf([
+      { acc: 70, lh: 388, gpm: 606, obs: null, sen: null },
+      { acc: 71, lh: 253, gpm: 441, obs: null, sen: null },
+      { acc: 72, lh: 307, gpm: 552, obs: null, sen: null },
+      { acc: 73, lh: 175, gpm: 493, obs: null, sen: null },
+      { acc: 74, lh: 197, gpm: 455, obs: null, sen: null },
+    ]);
+    const f = buildMatchDetailForm(raw, 73, itemName);
+    expect(f.player.role).toBe('unknown');
+    expect(f.player.roleReason).toContain('插眼数据缺失');
+    expect(f.player.roleReason).toContain('13%');
+    expect(f.player.roleReason).toContain('定位看不出');
+  });
+});

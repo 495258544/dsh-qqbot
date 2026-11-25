@@ -251,7 +251,8 @@ describe('MatchCacheStore · 完整简报', () => {
   });
 
   // 2026-11-16：点评判定口径改了（划水必须有 factSheet 证据），BRIEF_SCHEMA 3 → 4。
-  // sanitize 只做「数值兜底」、不校验版本号，所以 4 必须原样存回来 ——
+  // 2026-11-25：定位判定口径改了（核心必须有补刀占比 >= 18%，BRIEF_SCHEMA 5 → 6）。
+  // sanitize 只做「数值兜底」、不校验版本号，所以当前版本必须原样存回来 ——
   // 一旦它把 schema 吃掉了，简报构建器永远判「版本不对」，每轮都白重取一次。
   it('当前 schema 仍能落盘读回（sanitize 不吞版本号）', () => {
     const dir = tmpDir();
